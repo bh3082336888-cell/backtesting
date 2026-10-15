@@ -1,0 +1,74 @@
+# Perp Lab config. No secrets in here — ever. Keys come from env vars only.
+
+data_dir: ./data
+runs_dir: ./runs
+
+# Binance USDⓈ-M perps. Base assets; quote is always USDT.
+universe: [BTC, ETH, SOL, BNB, XRP, DOGE, AVAX, LINK]
+quote: USDT
+timeframes: [5m, 15m, 1h, 4h]
+
+# Research data starts here. Everything is measured from this date.
+history_start: "2022-01-01"
+
+# FIXED holdout start. This is a calendar date on purpose: it must never drift
+# forward with "now", or new data would silently become research data.
+# Phase 1–2 loaders refuse to read at/after this date. Only Phase 3's
+# promotion gate may obtain a HoldoutToken.
+holdout_start: "2026-07-01"
+
+backfill:
+  datasets: [klines, fundingRate, metrics]   # aggTrades: not wired (optional, huge)
+  workers: 8
+  max_retries: 6
+
+costs:
+  taker: 0.0005
+  maker: 0.0002
+  slippage_bps: 2.0          # applied to taker fills (market entry/exit, stop-market)
+
+account:
+  initial_equity: 10000.0
+  leverage: 3.0
+  risk_per_trade: 0.01       # fraction of wallet balance risked to the stop
+  max_margin_frac: 1.0       # isolated margin may not exceed this fraction of wallet
+
+# Maintenance margin, tier 1 only (our notionals stay in tier 1 at default equity).
+# APPROXIMATE public values — the exact table is /fapi/v1/leverageBracket and needs a key.
+# Liquidation: isolated, one-way mode. mmr = maintenance margin rate, cum = maint amount.
+margin_brackets:
+  default: {mmr: 0.010, cum: 0.0}
+  BTCUSDT: {mmr: 0.004, cum: 0.0}
+  ETHUSDT: {mmr: 0.005, cum: 0.0}
+  SOLUSDT: {mmr: 0.0065, cum: 0.0}
+  BNBUSDT: {mmr: 0.0065, cum: 0.0}
+  XRPUSDT: {mmr: 0.0065, cum: 0.0}
+  DOGEUSDT: {mmr: 0.0065, cum: 0.0}
+  AVAXUSDT: {mmr: 0.010, cum: 0.0}
+  LINKUSDT: {mmr: 0.010, cum: 0.0}
+
+walkforward:
+  train_months: 6
+  test_months: 2
+  selection_metric: sharpe    # pooled: mean per-symbol Sharpe over the train window
+  min_train_trades: 20        # pooled across universe; combos below this score -inf
+
+validation:
+  sensitivity_steps: [-0.2, -0.1, 0.1, 0.2]
+  island_drop: 0.5            # Sharpe falling >50% (or flipping sign) at ±20% → narrow island
+  mc_iterations: 10000
+  random_seeds: 200
+  random_percentile: 95       # strat must beat this percentile of random-entry OOS Sharpe
+
+regime:
+  timeframe: 4h               # regimes computed on native 4h bars for every TF (consistent labels)
+  adx_n: 14
+  adx_trend: 25
+  adx_range: 20
+  vol_n: 42                   # 7 days of 4h bars
+  vol_rank_window: 1080       # 180 days of 4h bars, trailing percentile rank
+  vol_high_pct: 0.80
+
+paper:
+  min_paper_days: 60
+  warmup_bars: 1000
