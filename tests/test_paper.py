@@ -131,6 +131,54 @@ def test_watch_closed_yields_candles_missing_from_rollover_batch():
                                                                 (105.0, 100.0, 104.0, 9.0)]
 
 
+class _Proto:
+    _reading_paused = False
+
+    def pause_reading(self):
+        self._reading_paused = True
+
+    def resume_reading(self):
+        self._reading_paused = False
+
+
+def test_ccxt_ws_drain_keeps_aiohttp_queue_accounting_balanced():
+    """ccxt's receive loop drains aiohttp's websocket queue itself and carries only raw message sizes
+    onto the last entry. aiohttp 3.14 also counts 128 bytes of overhead per message, so each drained
+    message leaked into the queue size until reading paused for good: Binance bookTicker went silent
+    ~25s in with the connection still open (live, 2026-10-15). Pinned aiohttp<3.14 in pyproject."""
+    import json
+
+    from aiohttp import WSMessage, WSMsgType
+    from aiohttp._websocket.reader_py import WebSocketDataQueue   # the C build compiles this; its _size is hidden
+    from ccxt.async_support.base.ws.client import Client
+
+    class Conn:
+        closed = False
+
+        def __init__(self, q):
+            self._conn = type("C", (), {"protocol": type("P", (), {"_payload": q})()})()
+            self.receive = q.read
+
+    async def drain_burst(n):
+        loop = asyncio.get_running_loop()
+        q = WebSocketDataQueue(_Proto(), 2 ** 16, loop=loop)
+        got = []
+        noop = lambda *a: None
+        c = Client("wss://test", lambda client, m: got.append(m), noop, noop, noop, {"asyncio_loop": loop})
+        c.connection = Conn(q)
+        for i in range(n):                              # a burst lands before ccxt reads
+            data = json.dumps({"i": i})
+            q.feed_data(WSMessage(WSMsgType.TEXT, data, None), len(data))
+        c.receive_loop()
+        while len(got) < n:
+            await asyncio.sleep(0)
+        return q._size, [m["i"] for m in got]
+
+    size, order = asyncio.run(drain_burst(50))
+    assert order == list(range(50))
+    assert size == 0          # every byte counted in was counted out
+
+
 def test_paper_runner_loop_with_fake_exchange(tmp_path):
     from perp_lab.config import load_config
     cfg = load_config()
