@@ -12,7 +12,11 @@ lab tail                              # ccxt: stitch parquet → now
 lab strategies                        # plugins + hypotheses
 lab walkforward donchian_atr --tf 4h  # OOS walk-forward + full validation → ./runs/<id>/report.md
 lab backtest donchian_atr --tf 4h     # single fixed-param run (IN-SAMPLE, labelled as such)
-lab paper donchian_atr --tf 4h --params '{"n": 20, "atr_mult": 4.0}'
+lab dashboard                         # Streamlit: strategies, detail, pairs, lineage
+lab ingest                            # record any run dir not yet in the store
+lab link PARENT_RUN CHILD_RUN --decision kill --reason "..."   # hand-made lineage edge
+lab paper RUN_ID                      # only runs approved for paper in the dashboard
+lab paper-refresh PAPER_RUN_ID        # recount regime changes → paper_eligible
 pytest
 ```
 
@@ -32,6 +36,18 @@ perp_lab/paper/          paper runner (same Strategy class, live book fills)
 strategies/              plugins — one hypothesis per file
 tests/                   lookahead (auto on every plugin), fees/funding, liquidation, holdout, paper
 ```
+
+## Results store + dashboard (Phase 2)
+
+- `perp_lab/store/db.py`: SQLAlchemy Core schema (`runs`, `run_folds`, `run_symbols`, `run_regimes`,
+  `lineage_edges`, `status_log`). SQLite at `runs/lab.db`; point `store.url` at Postgres to switch
+  (env vars are expanded, so the password stays in `$PGPASSWORD`). `write_run()` records every run.
+- Status: `noise`/`candidate` come from the harness verdict. `paper` only via the dashboard's approval
+  button, and only for a walk-forward candidate. Nothing in the system can set `live`.
+- Paper eligibility = `min_paper_days` elapsed **and** ≥1 regime change. A regime change is a switch of
+  the daily dominant 4h regime that persists ≥ `regime_change_min_days` (raw 4h labels flip ~24×/60d,
+  which would make the gate meaningless), counted per pair, min across pairs.
+- Backtest-vs-paper divergence replays the engine on exactly the bars the paper runner saw.
 
 ## Rules the code enforces
 
