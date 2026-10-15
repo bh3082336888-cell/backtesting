@@ -68,8 +68,14 @@ class FakeEx:
         return [self._row(50 + self.k)]
 
     async def watch_ticker(self, sym):
+        # Binance USD-M's ticker stream carries no book: ccxt.pro returns bid/ask None (seen live).
         await asyncio.sleep(0.001)
-        return {"bid": 99.9, "ask": 100.1, "timestamp": self.t0}
+        return {"symbol": sym, "timestamp": self.t0, "last": 100.0, "bid": None, "ask": None}
+
+    async def watch_bids_asks(self, symbols):
+        await asyncio.sleep(0.001)
+        return {s: {"symbol": s, "timestamp": self.t0, "bid": 99.9, "bidVolume": 3.0,
+                    "ask": 100.1, "askVolume": 2.0} for s in symbols}
 
     async def fetch_funding_rate(self, sym):
         return {"fundingRate": 0.0001, "fundingTimestamp": self.t0 + 10**12, "markPrice": 100.0}
@@ -133,4 +139,5 @@ def test_paper_runner_loop_with_fake_exchange(tmp_path):
     r = PaperRunner(cfg, cls, {}, "1h", ["BTCUSDT"], tmp_path, exchange=FakeEx())
     asyncio.run(r.run(max_bars=3))
     assert r.books["BTCUSDT"].pos is not None
+    assert r.books["BTCUSDT"].pos["entry_price"] == 100.1   # filled at the live ask
     assert (tmp_path / "state.json").exists()
