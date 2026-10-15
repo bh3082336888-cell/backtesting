@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import numpy as np
 import pandas as pd
@@ -40,19 +41,31 @@ def test_paper_trade_schema_matches_backtest():
 
 
 class FakeEx:
+    """Hourly candles from t0; candle 50 + k is open after k stream updates. Like ccxt.pro binance,
+    watch_ohlcv returns only the open candle, so closed ones must come from REST fetch_ohlcv.
+    The stream ends after n updates so a runner that never sees a close fails instead of hanging."""
+    H = 3_600_000
+
     def __init__(self, n=12):
-        self.t0 = 1_700_000_000_000
+        now = int(time.time() * 1000)
+        self.t0 = now // self.H * self.H - 60 * self.H
         self.n = n
         self.k = 0
 
+    def _row(self, i):
+        return [self.t0 + i * self.H, 100, 101, 99, 100, 1]
+
     async def fetch_ohlcv(self, sym, tf, since=None, limit=None):
-        return [[self.t0 + i * 3_600_000, 100, 101, 99, 100, 1] for i in range(50)]
+        i0 = max(0, -(-(since - self.t0) // self.H)) if since is not None else 0
+        rows = [self._row(i) for i in range(i0, 50 + self.k)]
+        return rows[:limit] if limit else rows
 
     async def watch_ohlcv(self, sym, tf):
         await asyncio.sleep(0)
+        if self.k >= self.n:
+            raise StreamEnded
         self.k += 1
-        ts = self.t0 + (50 + self.k) * 3_600_000
-        return [[ts - 3_600_000, 100, 101, 99, 100, 1], [ts, 100, 101, 99, 100, 1]]
+        return [self._row(50 + self.k)]
 
     async def watch_ticker(self, sym):
         await asyncio.sleep(0.001)
@@ -60,6 +73,56 @@ class FakeEx:
 
     async def fetch_funding_rate(self, sym):
         return {"fundingRate": 0.0001, "fundingTimestamp": self.t0 + 10**12, "markPrice": 100.0}
+
+
+class StreamEnded(Exception):
+    pass
+
+
+class RolloverStream:
+    """ccxt.pro binance watch_ohlcv as seen live (BTCUSDT 5m, 2026-10-15): each call returns only
+    the candle(s) updated since the last call, so the batch that opens a new candle lacks the one
+    that just closed. fetch_ohlcv is REST: final values of closed candles, honouring since/limit."""
+
+    def __init__(self, batches, final):
+        self.batches, self.final = list(batches), final
+
+    async def watch_ohlcv(self, sym, tf):
+        if not self.batches:
+            raise StreamEnded
+        return self.batches.pop(0)
+
+    async def fetch_ohlcv(self, sym, tf, since=None, limit=None):
+        rows = [r for ts, r in sorted(self.final.items()) if ts >= since]
+        return rows[:limit] if limit else rows
+
+
+def test_watch_closed_yields_candles_missing_from_rollover_batch():
+    from perp_lab.data.live import watch_closed
+    H = 3_600_000
+    t = 1_700_000_000_000 // H * H
+    final = {t: [t, 100.0, 102.0, 99.0, 101.0, 12.0],
+             t + H: [t + H, 101.0, 105.0, 100.0, 104.0, 9.0]}
+    stream = RolloverStream([
+        [[t, 100.0, 101.0, 99.0, 100.5, 5.0]],
+        [[t, 100.0, 102.0, 99.0, 101.0, 12.0]],
+        [[t + H, 101.0, 101.5, 100.5, 101.2, 2.0]],   # t closed; batch holds only t+H
+        [[t + 2 * H, 104.0, 104.0, 104.0, 104.0, 0.1]],  # t+H's last ticks never reached us
+    ], final)
+
+    async def collect():
+        got = []
+        try:
+            async for c in watch_closed(stream, "BTCUSDT", "1h"):
+                got.append(c)
+        except StreamEnded:
+            pass
+        return got
+
+    got = asyncio.run(collect())
+    assert [int(c.open_time) for c in got] == [t, t + H]
+    assert [(c.high, c.low, c.close, c.volume) for c in got] == [(102.0, 99.0, 101.0, 12.0),
+                                                                (105.0, 100.0, 104.0, 9.0)]
 
 
 def test_paper_runner_loop_with_fake_exchange(tmp_path):
