@@ -1,0 +1,225 @@
+"""Walk-forward: rolling train/test, OOS-only headline.
+
+Mechanics (and why):
+  * Every grid combo is run once, continuously, over the whole research span
+    [history_start, holdout_start) per symbol. prepare() is causal (tested), so a
+    continuous run is equivalent to re-running each window with warmup — and
+    ~#folds times cheaper.
+  * Fold k: score every combo on its TRAIN window (pooled: mean per-symbol daily
+    Sharpe; combos with < min_train_trades pooled entries score -inf). Pick the
+    best. One param set for the whole universe per fold — per-symbol selection
+    triples the overfitting surface for little gain.
+  * OOS for fold k = the selected combo's daily returns on the TEST window, and
+    its trades whose *signal* falls in the test window. Selection never sees
+    test data. Stitched across folds → the OOS track record.
+  * Caveat: a position opened by the selected combo just before a test window
+    carries into it (it is the same continuous run). No lookahead — its entry was
+    decided on pre-test data — but it's not a cold start. Documented, accepted.
+"""
+
+from __future__ import annotations
+
+import itertools
+import logging
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
+from functools import lru_cache
+
+import numpy as np
+import pandas as pd
+
+from perp_lab.config import Config, load_config
+from perp_lab.data.store import load_bars
+from perp_lab.engine.backtest import EngineParams, build_arrays, run_backtest
+from perp_lab.engine.metrics import daily_returns, portfolio_returns, sharpe, summarize
+from perp_lab.strategy import load_strategy_class
+
+log = logging.getLogger(__name__)
+
+
+def make_folds(start: pd.Timestamp, end: pd.Timestamp, train_m: int, test_m: int) -> list[dict]:
+    folds = []
+    k = 0
+    ts = start + pd.DateOffset(months=train_m)
+    while ts + pd.DateOffset(months=test_m) <= end:
+        folds.append({"fold": k, "train_start": ts - pd.DateOffset(months=train_m), "train_end": ts,
+                      "test_start": ts, "test_end": ts + pd.DateOffset(months=test_m)})
+        ts = ts + pd.DateOffset(months=test_m)
+        k += 1
+    return folds
+
+
+def grid_combos(grid: dict) -> list[dict]:
+    if not grid:
+        return [{}]
+    keys = list(grid)
+    return [dict(zip(keys, v)) for v in itertools.product(*(grid[k] for k in keys))]
+
+
+def combo_key(c: dict) -> str:
+    return ",".join(f"{k}={c[k]}" for k in sorted(c)) or "default"
+
+
+# ---------------------------------------------------------------- worker side
+
+_CFG_PATH: str | None = None
+
+
+def _init_worker(cfg_path: str):
+    global _CFG_PATH
+    _CFG_PATH = cfg_path
+
+
+@lru_cache(maxsize=None)
+def _cfg() -> Config:
+    return load_config(_CFG_PATH)
+
+
+@lru_cache(maxsize=16)
+def _bars(symbol: str, tf: str) -> pd.DataFrame:
+    return load_bars(_cfg(), symbol, tf)
+
+
+def run_one(args) -> dict:
+    """Continuous run of one (strategy, params, symbol). Returns compact results."""
+    name, params, symbol, tf, overrides, seed, entry_prob = args
+    cfg = _cfg()
+    bars = _bars(symbol, tf)
+    cls = load_strategy_class(name)
+    strat = cls(**params)
+    if seed is not None:
+        from perp_lab.strategy import RandomEntry
+        strat = RandomEntry(strat, entry_prob, seed)
+    feats = strat.prepare(bars)
+    ep = EngineParams.from_config(cfg, symbol, **(overrides or {}))
+    res = run_backtest(strat, bars, feats, symbol=symbol, tf=tf, ep=ep,
+                       arrays=build_arrays(bars, feats))
+    dr = daily_returns(res.equity, res.time)
+    idx = pd.to_datetime(res.time, unit="ms", utc=True)
+    expo = pd.Series(res.in_pos.astype(float), index=idx).resample("1D").mean()
+    flat_daily = pd.Series((~res.in_pos).astype(float), index=idx).resample("1D").sum()
+    trades = pd.DataFrame(res.trades)
+    return {"symbol": symbol, "params": params, "seed": seed, "daily": dr, "exposure": expo,
+            "flat_bars": flat_daily, "trades": trades, "rejected": res.rejected}
+
+
+def run_many(cfg: Config, jobs: list[tuple], workers: int | None = None) -> list[dict]:
+    if workers == 1:
+        _init_worker(str(cfg.path))
+        return [run_one(j) for j in jobs]
+    with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker,
+                             initargs=(str(cfg.path),)) as ex:
+        return list(ex.map(run_one, jobs, chunksize=1))
+
+
+# ---------------------------------------------------------------- orchestration
+
+def _window(s: pd.Series, a, b) -> pd.Series:
+    return s[(s.index >= a) & (s.index < b)]
+
+
+def _trades_in(tr: pd.DataFrame, a, b) -> pd.DataFrame:
+    if tr is None or tr.empty:
+        return tr if tr is not None else pd.DataFrame()
+    st = pd.to_datetime(tr.signal_time, unit="ms", utc=True)
+    return tr[(st >= a) & (st < b)]
+
+
+@dataclass
+class WFResult:
+    strategy: str
+    tf: str
+    symbols: list[str]
+    folds: list[dict]
+    oos_daily: dict[str, pd.Series]
+    oos_portfolio: pd.Series
+    oos_trades: pd.DataFrame
+    oos_exposure: dict[str, float]
+    oos_summary: dict
+    oos_by_symbol: dict[str, dict]
+    is_summary: dict
+    grid_table: pd.DataFrame          # per combo: fixed-param metrics over the OOS span (diagnostic)
+    selected: list[dict]
+    oos_flat_bars: dict[str, float]
+    raw: dict = field(repr=False, default_factory=dict)
+
+
+def walkforward(cfg: Config, name: str, tf: str, symbols: list[str] | None = None,
+                workers: int | None = None) -> WFResult:
+    cls = load_strategy_class(name)
+    symbols = symbols or cfg.symbols
+    wf = cfg["walkforward"]
+    combos = grid_combos(cls.grid)
+    log.info("walkforward %s %s: %d combos x %d symbols", name, tf, len(combos), len(symbols))
+    jobs = [(name, c, s, tf, None, None, None) for c in combos for s in symbols]
+    results = run_many(cfg, jobs, workers)
+    R: dict[tuple[str, str], dict] = {(combo_key(r["params"]), r["symbol"]): r for r in results}
+    keys = [combo_key(c) for c in combos]
+    cmap = dict(zip(keys, combos))
+
+    folds = make_folds(cfg.history_start, cfg.holdout_start, wf["train_months"], wf["test_months"])
+    if not folds:
+        raise ValueError("not enough history for one walk-forward fold")
+    oos_parts = {s: [] for s in symbols}
+    expo_parts = {s: [] for s in symbols}
+    flat_parts = {s: 0.0 for s in symbols}
+    trade_parts, is_parts, selected = [], [], []
+
+    for f in folds:
+        a, b = f["train_start"], f["train_end"]
+        best_k, best_score, best_n = None, -np.inf, 0
+        for k in keys:
+            n_tr = sum(len(_trades_in(R[(k, s)]["trades"], a, b)) for s in symbols)
+            if n_tr < wf["min_train_trades"]:
+                score = -np.inf
+            else:
+                score = float(np.mean([sharpe(_window(R[(k, s)]["daily"], a, b)) for s in symbols]))
+            if score > best_score or best_k is None:
+                best_k, best_score, best_n = k, score, n_tr
+        ta, tb = f["test_start"], f["test_end"]
+        selected.append({**f, "params": cmap[best_k], "combo": best_k,
+                         "is_score": best_score, "is_trades": best_n})
+        is_parts.append(portfolio_returns({s: _window(R[(best_k, s)]["daily"], a, b) for s in symbols}))
+        for s in symbols:
+            r = R[(best_k, s)]
+            oos_parts[s].append(_window(r["daily"], ta, tb))
+            expo_parts[s].append(_window(r["exposure"], ta, tb))
+            flat_parts[s] += float(_window(r["flat_bars"], ta, tb).sum())
+            t = _trades_in(r["trades"], ta, tb)
+            if len(t):
+                trade_parts.append(t.assign(fold=f["fold"], combo=best_k))
+
+    oos_daily = {s: pd.concat(p).sort_index() for s, p in oos_parts.items()}
+    oos_port = portfolio_returns(oos_daily)
+    oos_trades = pd.concat(trade_parts, ignore_index=True) if trade_parts else pd.DataFrame()
+    oos_expo = {s: float(pd.concat(p).mean()) for s, p in expo_parts.items()}
+
+    by_sym = {}
+    for s in symbols:
+        ts = oos_trades[oos_trades.symbol == s] if len(oos_trades) else oos_trades
+        by_sym[s] = summarize(oos_daily[s], ts, oos_expo[s])
+    oos_summary = summarize(oos_port, oos_trades, float(np.mean(list(oos_expo.values()))))
+    is_port = pd.concat(is_parts)
+    is_port = is_port[~is_port.index.duplicated()]   # overlapping train windows
+    is_summary = summarize(is_port)
+
+    # Fixed-param diagnostic over the OOS span (heatmap source; NOT an OOS result).
+    oa, ob = folds[0]["test_start"], folds[-1]["test_end"]
+    rows = []
+    for k in keys:
+        pr = portfolio_returns({s: _window(R[(k, s)]["daily"], oa, ob) for s in symbols})
+        n = sum(len(_trades_in(R[(k, s)]["trades"], oa, ob)) for s in symbols)
+        rows.append({**cmap[k], "combo": k, "sharpe": sharpe(pr),
+                     "total_return": float((1 + pr).prod() - 1), "trades": n,
+                     "times_selected": sum(1 for x in selected if x["combo"] == k)})
+    grid_table = pd.DataFrame(rows)
+
+    return WFResult(name, tf, symbols, folds, oos_daily, oos_port, oos_trades, oos_expo,
+                    oos_summary, by_sym, is_summary, grid_table, selected, flat_parts,
+                    raw={"R": R, "oos_span": (oa, ob)})
+
+
+def modal_params(wf: WFResult) -> dict:
+    counts = pd.Series([x["combo"] for x in wf.selected]).value_counts()
+    top = counts.index[0]
+    return next(x["params"] for x in wf.selected if x["combo"] == top)
