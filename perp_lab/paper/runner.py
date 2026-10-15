@@ -172,12 +172,15 @@ class PaperRunner:
         self.books = {s: PaperBook(strategy_cls(**params), s, tf, EngineParams.from_config(cfg, s))
                       for s in symbols}
         self.quote = cfg.get("quote", "USDT")
+        self.seen: dict[str, pd.DataFrame] = {}
         self.warmup = cfg["paper"]["warmup_bars"]
 
     def _persist(self):
         rows = [t for b in self.books.values() for t in b.trades]
         if rows:
             pd.DataFrame(rows).to_parquet(self.out / "trades.parquet", index=False)
+        for s, df in self.seen.items():
+            df.to_parquet(self.out / f"bars_{s}.parquet", index=False)
         state = {s: {"W": b.W, "pos": b.pos} for s, b in self.books.items()}
         (self.out / "state.json").write_text(json.dumps(state, default=float, indent=1))
 
@@ -201,12 +204,14 @@ class PaperRunner:
     async def _bars_loop(self, sym, max_bars):
         book = self.books[sym]
         bars = await self._warm(sym)
+        self.seen[sym] = bars.assign(live=False).reset_index(drop=True)
         n = 0
         async for c in watch_closed(self.ex, sym, self.tf, self.quote):
             row = pd.DataFrame([c.to_dict()])
             bars = pd.concat([bars, row], ignore_index=True).drop_duplicates("open_time", keep="last")
             bars = self._with_funding(bars.tail(self.warmup).reset_index(drop=True), book)
             bars.index = pd.to_datetime(bars.open_time.astype("int64"), unit="ms", utc=True)
+            self.seen[sym] = pd.concat([self.seen[sym], bars.iloc[[-1]].assign(live=True)], ignore_index=True)
             sig = book.on_closed_bar(bars)
             if sig.action != "hold":
                 log.info("%s signal %s", sym, sig)

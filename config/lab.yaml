@@ -72,3 +72,10 @@ regime:
 paper:
   min_paper_days: 60
   warmup_bars: 1000
+  # A "regime change" = the daily dominant 4h regime switches AND the new regime
+  # persists >= this many days. Raw 4h labels flip ~24x per 60 days, which would
+  # make the gate meaningless. Counted per traded pair; the run's value is the min.
+  regime_change_min_days: 7
+
+store:
+  url: sqlite:///runs/lab.db     # Postgres-ready: postgresql+psycopg://user:$PGPASSWORD@host/db

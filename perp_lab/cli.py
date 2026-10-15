@@ -103,11 +103,14 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
 @app.command()
 def walkforward(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
                 seeds: Optional[int] = typer.Option(None, help="random-entry seeds (default: config)"),
-                workers: Optional[int] = None, notes: str = "", config: Optional[str] = CfgOpt):
+                workers: Optional[int] = None, notes: str = "",
+                parent_run: Optional[str] = typer.Option(None, help="parent run_id (lineage)"),
+                config: Optional[str] = CfgOpt):
     """Walk-forward + sensitivity + random-entry + MC + regime split. OOS headline only."""
     from perp_lab.validate.pipeline import validate_strategy
     cfg = load_config(config)
-    rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes)
+    rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
+                                    parent_run_id=parent_run)
     o, i = rec["metrics"], rec["is_metrics"]
     typer.secho(f"{strategy} @ {tf}  →  {rec['status'].upper()}", bold=True,
                 fg="red" if rec["status"] == "noise" else "green")
@@ -120,17 +123,76 @@ def walkforward(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
 
 
 @app.command()
-def paper(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
-          params: str = typer.Option("{}", help="JSON params (use the walk-forward modal params)"),
-          max_bars: Optional[int] = None, config: Optional[str] = CfgOpt):
-    """Forward-test on live closed candles; writes the same trade-log schema."""
+def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved for paper in the dashboard"),
+          symbols: Optional[str] = None, max_bars: Optional[int] = None, config: Optional[str] = CfgOpt):
+    """Forward-test an APPROVED walk-forward run on live closed candles (modal params)."""
+    import sqlalchemy as sa
+
     from perp_lab.paper.runner import PaperRunner
-    from perp_lab.strategy import load_strategy_class
+    from perp_lab.runs import new_run_id, repo_commit
+    from perp_lab.store.db import current_status, engine, record_run, runs
+    from perp_lab.strategy import load_strategy_class, plugin_hash
     cfg = load_config(config)
-    cls = load_strategy_class(strategy)
-    out = cfg.runs_dir / "paper" / f"{strategy}_{tf}"
-    r = PaperRunner(cfg, cls, json.loads(params), tf, _syms(cfg, symbols), out)
-    asyncio.run(r.run(max_bars=max_bars))
+    with engine(cfg).connect() as c:
+        r = c.execute(sa.select(runs).where(runs.c.run_id == from_run)).mappings().first()
+    if r is None:
+        raise typer.BadParameter(f"unknown run {from_run}")
+    if current_status(cfg, r["strategy"], r["timeframe"], r["verdict"]) != "paper":
+        typer.secho(f"{r['strategy']} @ {r['timeframe']} is not approved for paper. "
+                    "Approve it in the dashboard (only walk-forward candidates qualify).", fg="red")
+        raise typer.Exit(2)
+    params = (r["metrics"] or {}).get("modal_params") or json.loads(
+        (cfg.runs_dir / from_run / "summary.json").read_text())["sensitivity"]["base_params"]
+    cls = load_strategy_class(r["strategy"])
+    rid = new_run_id()
+    out = cfg.runs_dir / rid
+    syms = _syms(cfg, symbols) if symbols else r["universe"]
+    started = datetime.now(timezone.utc)
+    record_run(cfg, {"run_id": rid, "strategy": r["strategy"], "strategy_hash": plugin_hash(r["strategy"]),
+                     "hypothesis": cls.hypothesis(), "params": params, "universe": syms,
+                     "timeframes": [r["timeframe"]], "validation_mode": "paper", "repo_commit": repo_commit(),
+                     "parent_run_id": from_run, "lineage_id": r["lineage_id"], "created_at": started.isoformat(),
+                     "paper_started_at": started.isoformat(), "metrics": {},
+                     "artifacts": {"trades": str(out / "trades.parquet")}}, out)
+    typer.echo(f"paper run {rid} → {out}")
+    pr = PaperRunner(cfg, cls, params, r["timeframe"], syms, out)
+    asyncio.run(pr.run(max_bars=max_bars))
+
+
+@app.command("paper-refresh")
+def paper_refresh(run_id: str, config: Optional[str] = CfgOpt):
+    """Recompute regime changes + paper_eligible for a paper run (fetches live 4h bars)."""
+    from perp_lab.paper.tracking import refresh_paper_run
+    typer.echo(json.dumps(refresh_paper_run(load_config(config), run_id), default=str))
+
+
+@app.command()
+def ingest(config: Optional[str] = CfgOpt):
+    """Record any run directory not yet in the results store."""
+    from perp_lab.store.db import ingest_runs
+    added = ingest_runs(load_config(config))
+    typer.echo(f"ingested {len(added)} run(s): {added}")
+
+
+@app.command()
+def link(parent: str, child: str, decision: str = typer.Option(..., help="promote | kill | manual"),
+         reason: str = typer.Option(..., help="why — shown on the lineage edge"),
+         config: Optional[str] = CfgOpt):
+    """Record a hand-made lineage edge (Phase 3's judge writes these itself)."""
+    from perp_lab.store.db import add_edge
+    add_edge(load_config(config), parent, child, decision, reason, decided_by="human")
+    typer.echo(f"{parent} → {child} [{decision}] {reason}")
+
+
+@app.command()
+def dashboard(port: int = 8501, config: Optional[str] = CfgOpt):
+    """Launch the Streamlit dashboard."""
+    import subprocess
+    import sys
+    args = [sys.executable, "-m", "streamlit", "run", "dashboard/app.py", "--server.port", str(port)]
+    if config:
+        args += ["--", "--config", config]
+    raise typer.Exit(subprocess.call(args))
 
 
 if __name__ == "__main__":

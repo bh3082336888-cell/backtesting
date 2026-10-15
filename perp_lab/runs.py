@@ -70,4 +70,6 @@ def write_run(cfg, record: dict, frames: dict[str, pd.DataFrame], report_md: str
     (d / "summary.json").write_text(json.dumps(_clean(record), indent=1))
     if report_md:
         (d / "report.md").write_text(report_md)
+    from perp_lab.store.db import record_run
+    record_run(cfg, record, d)       # no run exists that isn't recorded
     return d
