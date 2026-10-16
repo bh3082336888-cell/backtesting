@@ -95,7 +95,7 @@ def with_moving_columns(bars: pd.DataFrame, seed: int = EXTRAS_SEED) -> pd.DataF
 
 
 def causality_failures(cls, bars: pd.DataFrame | None = None, *, cuts: list[int] | None = None,
-                       require_signals: bool = True) -> list[str]:
+                       require_signals: bool = True, params: dict | None = None) -> list[str]:
     """assert_causal on the default params and every grid corner; one line per failing variant.
 
     Runs on a copy of the bars in which every column moves. A crash on synthetic data
@@ -104,6 +104,8 @@ def causality_failures(cls, bars: pd.DataFrame | None = None, *, cuts: list[int]
     extra date ranges pass require_signals=False: a plugin may honestly be quiet there."""
     bars = with_moving_columns(synthetic_bars(seed=1) if bars is None else bars)
     variants = [{}] + [{k: v} for k, vals in cls.grid.items() for v in (vals[0], vals[-1])]
+    if params and params not in variants:   # e.g. the walk-forward's frozen exam params
+        variants.append(dict(params))
     out = []
     for kw in variants:
         try:

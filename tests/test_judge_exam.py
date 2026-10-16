@@ -372,3 +372,26 @@ def test_lookahead_after_the_judged_span_blocks_the_exam_before_any_read(cfg, pl
     [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(250))
     assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "lookahead")
     assert budget.reads_used(cfg) == 0
+
+
+def test_lookahead_in_the_last_days_of_the_exam_window_blocks_the_exam(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    from tests.test_judge import date_peek
+    monkeypatch.setattr(jm, "_now", lambda: pd.Timestamp("2026-10-16", tz="UTC"))
+    budget.init_log(cfg)
+    add_plugin(plugins, "tailpeek", date_peek("2026-12-20", parent=False))
+    judged(cfg, "tailpeek", {"tailpeek": ("candidate", STRONG)}, stub_run(0.003), days=100)
+    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(180))   # window ends 2026-12-28
+    assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "lookahead")
+    assert budget.reads_used(cfg) == 0
+
+
+def test_an_honest_seasonal_plugin_is_not_blocked_at_exam_time(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    from tests.test_judge import SEASONAL
+    monkeypatch.setattr(jm, "_now", lambda: pd.Timestamp("2026-10-16", tz="UTC"))
+    budget.init_log(cfg)
+    add_plugin(plugins, "seasonal", SEASONAL)
+    judged(cfg, "seasonal", {"seasonal": ("candidate", STRONG)}, stub_run(0.003), days=100)
+    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(100))   # window May-Oct only
+    assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "too_short")

@@ -316,11 +316,6 @@ class Seasonal(Strategy):
 '''
 
 
-def test_an_honest_seasonal_plugin_is_not_killed_by_the_dated_run(cfg, plugins):
-    from perp_lab.strategy import load_strategy_class
-    add_plugin(plugins, "seasonal", SEASONAL)
-    assert lookahead_failures(cfg, load_strategy_class("seasonal")) == []
-
 
 def date_peek(day: str, parent: bool = True) -> str:
     text = DATE_PEEK.replace('"2026-07-01"', f'"{day}"')
@@ -346,3 +341,64 @@ def test_real_plugins_pass_a_long_dated_window(cfg, name, monkeypatch):
     from perp_lab.strategy import load_strategy_class
     monkeypatch.setattr("perp_lab.strategy.STRATEGY_DIR", REPO / "strategies")
     assert dated_lookahead_failures(cfg, load_strategy_class(name), pd.Timestamp("2027-06-30", tz="UTC")) == []
+
+
+def test_the_dated_check_reaches_the_end_of_its_span(cfg, plugins):
+    # a peek keyed to the last days before `until` must be seen: the span always ends on a cut
+    from perp_lab.judge.judge import dated_lookahead_failures
+    from perp_lab.strategy import load_strategy_class
+    add_plugin(plugins, "peek", date_peek("2027-02-20"))
+    fails = dated_lookahead_failures(cfg, load_strategy_class("peek"), pd.Timestamp("2027-03-08", tz="UTC"))
+    assert any("features at cut" in f for f in fails)
+
+
+def test_the_dated_check_is_empty_before_the_holdout_starts(cfg, plugins):
+    # an exam window that hasn't reached the holdout has nothing to check (and must not crash)
+    from perp_lab.judge.judge import dated_lookahead_failures
+    from perp_lab.strategy import load_strategy_class
+    early = cfg.holdout_start - pd.Timedelta(days=70)
+    assert dated_lookahead_failures(cfg, load_strategy_class("donchian_atr"), early) == []
+
+
+PARAM_PEEK = '''"""Peeks at the next close only with k=2, a value between its grid corners."""
+import numpy as np
+from perp_lab.indicators import atr
+from perp_lab.strategy import HOLD, Strategy, enter
+
+
+class ParamPeek(Strategy):
+    params = {"k": 1}
+    grid = {"k": [1, 3]}
+
+    def prepare(self, bars):
+        honest = np.sign(bars.close - bars.close.shift(1))
+        peek = np.sign(bars.close.shift(-1) - bars.close)
+        return bars[[]].assign(sig=peek if self.p["k"] == 2 else honest, atr=atr(bars, 14))
+
+    def bracket(self, ctx, side):
+        return ctx["close"] - side * 2 * ctx["atr"], None
+
+    def entry(self, ctx):
+        s = ctx["sig"]
+        if s != s or s == 0:
+            return HOLD
+        return enter(int(s), *self.bracket(ctx, int(s)))
+'''
+
+
+def test_the_dated_check_also_tries_the_exam_params(cfg, plugins):
+    from perp_lab.judge.judge import dated_lookahead_failures
+    from perp_lab.strategy import load_strategy_class
+    add_plugin(plugins, "parampeek", PARAM_PEEK)
+    cls, until = load_strategy_class("parampeek"), pd.Timestamp("2026-12-28", tz="UTC")
+    assert dated_lookahead_failures(cfg, cls, until) == []          # corners k=1, k=3 are honest
+    assert any("k=2" in f for f in dated_lookahead_failures(cfg, cls, until, params={"k": 2}))
+
+
+def test_a_seasonal_plugin_quiet_across_the_whole_dated_span_is_not_killed(cfg, plugins, monkeypatch):
+    # judged on 2026-08-01 the dated span is May-August: the plugin never signals there
+    import perp_lab.judge.judge as jm
+    from perp_lab.strategy import load_strategy_class
+    monkeypatch.setattr(jm, "_now", lambda: pd.Timestamp("2026-08-01", tz="UTC"))
+    add_plugin(plugins, "seasonal", SEASONAL)
+    assert lookahead_failures(cfg, load_strategy_class("seasonal")) == []

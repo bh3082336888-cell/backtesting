@@ -71,7 +71,9 @@ the dashboard shows judgements and the holdout budget.
    (`defaults: no signals on synthetic data; causality cannot be verified`).
    The check runs twice: on the synthetic bars at their default (2023) dates, and on synthetic
    hourly bars dated from 60 days before the holdout start to 30 days past today, cut every
-   30 days from 45 days before the holdout start. Lookahead keyed to holdout dates is caught
+   30 days from 45 days before the holdout start and always at the span's end (the end cut
+   catches any peek that starts before it; the spaced cuts catch peeks confined to a stretch).
+   A span that hasn't reached the holdout has nothing to check. Lookahead keyed to holdout dates is caught
    here (reasons prefixed `holdout-dated:`), before any walk-forward or holdout read, without
    touching holdout data. Because the exam window keeps growing after a judgement, the exam
    step repeats the dated check up to the window's actual end just before the read (see 10).
@@ -117,8 +119,8 @@ the dashboard shows judgements and the holdout budget.
    verdict before the error propagates.
 10. **If promoted**, attempt the exam (see Holdout exam). Outcome sets `holdout_status`.
     Just before the budget is asked for a read, the dated lookahead check is re-run over
-    `[60 days before holdout_start, exam window end]`; a failure blocks the exam with reason
-    `lookahead` and no read is spent.
+    `[60 days before holdout_start, exam window end]`, also trying the exam's frozen params as a
+    variant; a failure blocks the exam with reason `lookahead` and no read is spent.
 11. **Write the public verdict** and print a summary. The verdict file is written even when
     the exam cannot start (e.g. the holdout log was never initialised) or crashes; the error is
     then re-raised (exit 1).

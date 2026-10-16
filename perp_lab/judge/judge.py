@@ -100,19 +100,25 @@ def _now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
 
-def dated_lookahead_failures(cfg, cls, until: pd.Timestamp) -> list[str]:
+def dated_lookahead_failures(cfg, cls, until: pd.Timestamp, params: dict | None = None) -> list[str]:
     """The causality check on synthetic hourly bars dated from DATED_LEAD_DAYS before the holdout
     start to `until`, cut every DATED_CUT_EVERY_DAYS from DATED_FIRST_CUT_DAYS before the holdout
-    start, so lookahead keyed to any date in that span is seen. No real data. The no-signals rule
-    does not apply: a plugin may honestly be quiet in this span."""
+    start and always at `until` itself, so lookahead keyed to any date before `until` is seen (the
+    end cut catches any peek that starts before it; the spaced cuts catch peeks confined to a
+    stretch). `params` (e.g. the exam's frozen params) is checked as one more variant. No real
+    data. The no-signals rule does not apply: a plugin may honestly be quiet in this span. A span
+    that hasn't reached the holdout has nothing to check."""
+    if until <= cfg.holdout_start:
+        return []
     start = cfg.holdout_start - pd.Timedelta(days=DATED_LEAD_DAYS)
     cuts, d = [], cfg.holdout_start - pd.Timedelta(days=DATED_FIRST_CUT_DAYS)
-    while d <= until:
+    while d < until:
         cuts.append(int((d - start) / _HOUR))
         d += pd.Timedelta(days=DATED_CUT_EVERY_DAYS)
-    bars = synthetic_bars(n=int((until - start) / _HOUR) + 24, seed=1, start=str(start.date()))
+    cuts.append(int((until - start) / _HOUR))
+    bars = synthetic_bars(n=cuts[-1] + 24, seed=1, start=str(start.date()))
     return [f"holdout-dated: {f}"
-            for f in causality_failures(cls, bars, cuts=cuts, require_signals=False)]
+            for f in causality_failures(cls, bars, cuts=cuts, require_signals=False, params=params)]
 
 
 def lookahead_failures(cfg, cls) -> list[str]:
@@ -293,7 +299,8 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     syms, tf = s["universe"], j["timeframe"]
     end = end_fn(cfg, syms, tf)
     days = max(0, (end - cfg.holdout_start).days)
-    if dated_lookahead_failures(cfg, load_strategy_class(j["strategy"]), end):
+    if dated_lookahead_failures(cfg, load_strategy_class(j["strategy"]), end,
+                                params=s["sensitivity"]["base_params"]):
         db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
         return finish(cfg, jid)
     chk, token = budget.mint(cfg, j["lineage_id"], jid, days)
