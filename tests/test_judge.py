@@ -165,3 +165,17 @@ def test_cli_names_the_judgement_it_returns(cfg, plugins):
     add_plugin(plugins, "copy_root", (plugins / "donchian_atr.py").read_text())
     r = CliRunner().invoke(app, ["judge", "copy_root", "--tf", "4h", "--config", str(cfg.path)])
     assert r.exit_code == 0 and "donchian_atr @ 4h" in r.output and "already judged" in r.output
+
+
+def test_a_judged_child_keeps_its_family_when_its_parent_line_is_removed(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("noise", NOISE), "donchian_atr_wide": ("noise", NOISE),
+                      "grandchild": ("noise", NOISE)})
+    a = judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    assert a["lineage_id"] == "family:donchian_atr"
+    f = plugins / "donchian_atr_wide.py"
+    f.write_text(f.read_text().replace('PARENT = "donchian_atr"\n', "") + "# now a root\n")
+    b = judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    assert b["id"] != a["id"] and b["parent_run_id"] is None and b["lineage_id"] == "family:donchian_atr"
+    add_plugin(plugins, "grandchild", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "donchian_atr_wide"')
+               + "# grandchild variant\n")
+    assert judge(cfg, "grandchild", "4h", validate=v)["lineage_id"] == "family:donchian_atr"

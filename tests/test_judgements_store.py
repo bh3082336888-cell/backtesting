@@ -58,13 +58,14 @@ def test_trial_stats_count_distinct_versions_and_use_the_latest_sharpe(cfg):
     assert n == 3 and v == pytest.approx(0.0002899543378995434, rel=1e-12)
 
 
-def test_family_of_follows_the_first_judgement_then_the_first_run(cfg):
+def test_family_of_is_the_family_of_the_first_judgement_only(cfg):
     assert db.family_of(cfg, "s1") is None
     fake_run(cfg, "r1", strategy="s1", created_at="2026-10-01T00:00:00+00:00")
-    fake_run(cfg, "r2", strategy="s1", tf="1h", created_at="2026-10-02T00:00:00+00:00")
-    assert db.family_of(cfg, "s1") == "r1"
-    db.record_judgement(cfg, jrow(strategy="z", strategy_hash="hz", lineage_id="famz"))
-    assert db.family_of(cfg, "z") == "famz"
+    assert db.family_of(cfg, "s1") is None                 # a walk-forward run alone is not a family
+    db.record_judgement(cfg, jrow(strategy="s1", strategy_hash="h0", lineage_id=None))
+    db.record_judgement(cfg, jrow(strategy="s1", strategy_hash="h1", lineage_id="fam1"))
+    db.record_judgement(cfg, jrow(strategy="s1", strategy_hash="h2", lineage_id="fam2"))
+    assert db.family_of(cfg, "s1") == "fam1"
 
 
 def test_latest_wf_run_matches_hash_and_universe(cfg):

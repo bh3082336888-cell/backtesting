@@ -400,18 +400,13 @@ def latest_wf_run(cfg, strategy: str, timeframe: str, strategy_hash: str, univer
 
 
 def family_of(cfg, strategy: str) -> str | None:
-    """A plugin name's family: that of its first judgement, else of its first walk-forward run.
-    Looked up by name so editing or re-running a root never starts a new family."""
+    """A plugin name's family: that of its first judgement (None if it was never judged).
+    Looked up by name so editing a judged plugin never starts a new family."""
     with engine(cfg).connect() as c:
         j = c.execute(sa.select(judgements.c.lineage_id).where(sa.and_(
             judgements.c.strategy == strategy, judgements.c.lineage_id.isnot(None)))
             .order_by(judgements.c.created_at, judgements.c.id).limit(1)).first()
-        if j:
-            return j[0]
-        r = c.execute(sa.select(runs.c.lineage_id).where(sa.and_(
-            runs.c.strategy == strategy, runs.c.validation_mode == "walkforward",
-            runs.c.lineage_id.isnot(None))).order_by(runs.c.created_at).limit(1)).first()
-    return r[0] if r else None
+    return j[0] if j else None
 
 
 def trial_stats(cfg) -> tuple[int, float]:

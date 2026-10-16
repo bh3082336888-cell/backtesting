@@ -97,11 +97,16 @@ same budget checks.
 
 ## Family identity
 
-A family is the root strategy and all its descendants (`lineage_id`). A root's family is
-stable and looked up by plugin name: judging a root that already has a judgement or
-walk-forward run under that name, on any timeframe or file version, joins that family rather
-than starting a new one, so re-running or editing a root cannot reset the per-family read. Children inherit their
-parent's family. A renamed copy of a strategy starts a new family; the global cap bounds that.
+A family is the root strategy and all its descendants (`lineage_id`), written
+`family:<root>`. It is resolved by plugin name along the `PARENT` chain: walking from the
+plugin towards its root, the first plugin name that already has a judgement (on any timeframe
+or file version) gives the family of its earliest judgement; if nothing on the chain has been
+judged, the family is `family:<root>`. An existing judgement's family therefore takes
+precedence over the chain: re-running or editing a root cannot reset the per-family read, a
+judged child whose `PARENT` line is removed stays in its family, and a chain whose ancestor is
+later edited into a root stays together. Plain walk-forward runs do not define a family. A
+renamed and edited copy of a root starts a new family (a byte-identical copy returns the
+original's judgement); the global cap bounds that.
 
 ## Gates (`gates.py`)
 

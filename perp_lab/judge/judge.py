@@ -70,17 +70,23 @@ def finish(cfg, jid: int) -> dict:
     return {**j, "verdict_path": str(write_verdict(cfg, j))}
 
 
-def resolve_family(name: str) -> str:
-    """The family of a plugin: that of the root of its PARENT chain, by name, so it never splits."""
+def resolve_family(cfg, name: str) -> str:
+    """The family of a plugin. Walk the PARENT chain from `name` to its root: the first plugin
+    name on the way that already has a judgement gives its earliest family, so a judged plugin
+    keeps its family (and its descendants with it) even after its PARENT line is removed or
+    edited. With no judgement on the chain, the family is `family:<root>`."""
     path, cur = [name], name
-    while (p := plugin_parent(cur)) is not None:
+    while (fam := db.family_of(cfg, cur)) is None:
+        p = plugin_parent(cur)
+        if p is None:
+            return f"family:{cur}"
         if p in path:
             raise JudgeRefused(f"PARENT chain loops: {' → '.join(path + [p])}")
         if p not in list_plugins():
             raise JudgeRefused(f"PARENT '{p}' is not a plugin in strategies/")
         path.append(p)
         cur = p
-    return f"family:{cur}"
+    return fam
 
 
 def supersede(cfg, parent: str, tf: str) -> None:
@@ -109,7 +115,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if existing:   # (re)write its verdict under the judged strategy's name, even for a renamed copy
         return {**finish(cfg, existing["id"]), "existing": True}
 
-    family = resolve_family(name)
+    family = resolve_family(cfg, name)
     fails = causality_failures(load_strategy_class(name))
     if fails:
         jid = db.record_judgement(cfg, {
