@@ -145,6 +145,13 @@ def list_plugins() -> list[str]:
     return sorted(p.stem for p in STRATEGY_DIR.glob("*.py") if not p.stem.startswith("_"))
 
 
+def plugin_parent(name: str) -> str | None:
+    """The PARENT a plugin module declares (a module-level string), or None for a root."""
+    cls = load_strategy_class(name)
+    p = getattr(sys.modules[cls.__module__], "PARENT", None)
+    return str(p) if p else None
+
+
 def plugin_hash(name: str) -> str:
     """Git blob hash of the plugin file content (stable whether or not committed)."""
     path = plugin_path(name)

@@ -71,7 +71,8 @@ def render_report(rec: dict, regime: pd.DataFrame, monthly: pd.DataFrame) -> str
 
 
 def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers=None,
-                      notes: str = "", parent_run_id: str | None = None) -> tuple[dict, str]:
+                      notes: str = "", parent_run_id: str | None = None,
+                      lineage_id: str | None = None) -> tuple[dict, str]:
     from perp_lab.engine.metrics import monthly_table
 
     cls = load_strategy_class(name)
@@ -103,7 +104,8 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
         "folds": [{k: v for k, v in f.items()} for f in wf.selected],
         "status": status, "fail_reasons": fails,
         "costs": cfg["costs"], "account": cfg["account"],
-        "parent_run_id": parent_run_id, "created_at": datetime.now(timezone.utc).isoformat(), "notes": notes,
+        "parent_run_id": parent_run_id, "lineage_id": lineage_id,
+        "created_at": datetime.now(timezone.utc).isoformat(), "notes": notes,
     }
     daily = pd.DataFrame({**wf.oos_daily, "PORTFOLIO": wf.oos_portfolio})
     frames = {

@@ -16,12 +16,16 @@ def cfg(tmp_path):
     raw = yaml.safe_load(open("config/lab.yaml"))
     raw["runs_dir"] = str(tmp_path / "runs")
     raw["store"] = {"url": f"sqlite:///{tmp_path}/lab.db"}
+    raw["judge"] = {**raw["judge"], "holdout_log": str(tmp_path / "runs" / "holdout_log.jsonl"),
+                    "verdicts_dir": str(tmp_path / "runs" / "verdicts")}
     p = tmp_path / "lab.yaml"
     p.write_text(yaml.safe_dump(raw))
     return load_config(p)
 
 
-def fake_run(cfg, run_id, strategy="s1", tf="4h", verdict="noise", sharpe=0.3, parent=None, mode="walkforward"):
+def fake_run(cfg, run_id, strategy="s1", tf="4h", verdict="noise", sharpe=0.3, parent=None, mode="walkforward",
+             strategy_hash="abc", created_at="2026-10-01T00:00:00+00:00", universe=None,
+             lineage_id=None):
     idx = pd.date_range("2024-01-01", periods=120, freq="D", tz="UTC")
     rng = np.random.default_rng(abs(hash(run_id)) % 2**32)
     daily = pd.DataFrame({"BTCUSDT": rng.normal(0, 0.01, 120), "ETHUSDT": rng.normal(0, 0.01, 120)}, index=idx)
@@ -29,9 +33,9 @@ def fake_run(cfg, run_id, strategy="s1", tf="4h", verdict="noise", sharpe=0.3, p
     folds = [{"fold": i, "train_start": str(idx[0].date()), "train_end": str(idx[30 * i].date()),
               "test_start": str(idx[30 * i].date()), "test_end": str(idx[min(30 * i + 30, 119)].date()),
               "combo": "n=20", "params": {"n": 20}, "is_score": 1.0} for i in range(1, 4)]
-    rec = {"run_id": run_id, "strategy": strategy, "strategy_hash": "abc", "hypothesis": "h",
+    rec = {"run_id": run_id, "strategy": strategy, "strategy_hash": strategy_hash, "hypothesis": "h",
            "params": {"grid": {"n": [10, 20], "k": [1, 2]}, "defaults": {"n": 20, "k": 1}},
-           "universe": ["BTCUSDT", "ETHUSDT"], "timeframes": [tf], "validation_mode": mode,
+           "universe": universe or ["BTCUSDT", "ETHUSDT"], "timeframes": [tf], "validation_mode": mode,
            "date_start": "2024-01-01", "date_end": "2024-04-30", "status": verdict,
            "fail_reasons": [] if verdict == "candidate" else ["x"],
            "metrics": {"sharpe": sharpe, "max_dd": -0.1, "trades": 50, "total_return": 0.05},
@@ -42,7 +46,7 @@ def fake_run(cfg, run_id, strategy="s1", tf="4h", verdict="noise", sharpe=0.3, p
            "by_symbol": {"BTCUSDT": {"sharpe": 0.5, "max_dd": -0.1, "total_return": 0.1, "trades": 25},
                          "ETHUSDT": {"sharpe": -0.2, "max_dd": -0.2, "total_return": -0.05, "trades": 25}},
            "regime_split": [{"regime": "trending", "trades": 30, "win_rate": 0.4, "avg_r": 0.1}],
-           "folds": folds, "parent_run_id": parent, "created_at": "2026-10-01T00:00:00+00:00"}
+           "folds": folds, "parent_run_id": parent, "lineage_id": lineage_id, "created_at": created_at}
     grid = pd.DataFrame([{"n": n, "k": k, "sharpe": n / 10 - k} for n in (10, 20) for k in (1, 2)])
     sens = pd.DataFrame([{"param": "n", "step": s, "value": 20 * (1 + s), "sharpe": sharpe + s} for s in (-0.2, 0.2)])
     write_run(cfg, rec, {"oos_daily": daily, "grid": grid, "sensitivity": sens,
@@ -85,17 +89,62 @@ def test_child_inherits_lineage_and_edge_requires_reason(cfg):
     assert e.decision.tolist() == ["kill"] and e.reason.iloc[0] == "fails random-entry"
 
 
-def test_paper_approval_only_for_candidates_and_never_live(cfg):
+def test_paper_approval_needs_a_candidate_with_a_passed_exam_and_never_live(cfg):
     fake_run(cfg, "n1", verdict="noise")
     fake_run(cfg, "c1", strategy="s2", verdict="candidate")
     with pytest.raises(PermissionError):
         db.approve_paper(cfg, "n1", "me")
+    with pytest.raises(PermissionError, match="unjudged"):
+        db.approve_paper(cfg, "c1", "me")
+    jid = db.record_judgement(cfg, {
+        "strategy": "s2", "timeframe": "4h", "strategy_hash": "abc", "child_run_id": "c1",
+        "parent_run_id": None, "lineage_id": "c1", "decision": "promote", "reasons": [],
+        "holdout_status": "pending", "holdout_reason": "too_short"})
+    for status, code in (("pending", "too_short"), ("blocked", "budget_spent"), ("failed", "failed")):
+        db.update_holdout(cfg, jid, status, code)
+        with pytest.raises(PermissionError, match=status):
+            db.approve_paper(cfg, "c1", "me")
+    db.update_holdout(cfg, jid, "passed", "passed")
     db.approve_paper(cfg, "c1", "me")
     assert db.current_status(cfg, "s2", "4h", "candidate") == "paper"
     with pytest.raises(PermissionError):
         db.set_status(cfg, "s2", "4h", "live", "me")
     with pytest.raises(PermissionError):
         db.set_status(cfg, "s2", "4h", "paper", "me")
+
+
+def test_harness_edges_cannot_be_overwritten_by_hand(cfg):
+    fake_run(cfg, "p")
+    fake_run(cfg, "c", parent="p")
+    db.add_edge(cfg, "p", "c", "kill", "Deflated Sharpe 0.82 < 0.95 (N=1)", decided_by="harness")
+    with pytest.raises(PermissionError, match="harness"):
+        db.add_edge(cfg, "p", "c", "promote", "I like it")
+    e = db.read_table(cfg, db.lineage_edges)
+    assert e.decision.tolist() == ["kill"] and e.decided_by.tolist() == ["harness"]
+
+
+def test_a_harness_judged_child_cannot_be_re_parented_by_hand(cfg):
+    fake_run(cfg, "p")
+    fake_run(cfg, "q")
+    fake_run(cfg, "c", parent="p")
+    db.add_edge(cfg, "p", "c", "kill", "gates failed", decided_by="harness")
+    with pytest.raises(PermissionError, match="harness"):
+        db.add_edge(cfg, "q", "c", "promote", "a better parent")
+    assert db.run_row(cfg, "c")["parent_run_id"] == "p"
+    assert db.read_table(cfg, db.lineage_edges).parent_run_id.tolist() == ["p"]
+
+
+def test_lab_link_refuses_a_harness_edge_cleanly(cfg):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    fake_run(cfg, "p")
+    fake_run(cfg, "c", parent="p")
+    db.add_edge(cfg, "p", "c", "kill", "gates failed", decided_by="harness")
+    r = CliRunner().invoke(app, ["link", "p", "c", "--decision", "promote", "--reason", "I like it",
+                                 "--config", str(cfg.path)])
+    assert r.exit_code == 1 and "harness" in r.output
+    assert isinstance(r.exception, SystemExit)           # a clean refusal, not an uncaught PermissionError
 
 
 def _labels(seq):

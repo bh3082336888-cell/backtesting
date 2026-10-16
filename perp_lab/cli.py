@@ -180,8 +180,60 @@ def link(parent: str, child: str, decision: str = typer.Option(..., help="promot
          config: Optional[str] = CfgOpt):
     """Record a hand-made lineage edge (Phase 3's judge writes these itself)."""
     from perp_lab.store.db import add_edge
-    add_edge(load_config(config), parent, child, decision, reason, decided_by="human")
+    try:
+        add_edge(load_config(config), parent, child, decision, reason, decided_by="human")
+    except PermissionError as e:
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(1)
     typer.echo(f"{parent} → {child} [{decision}] {reason}")
+
+
+@app.command("holdout-init")
+def holdout_init(config: Optional[str] = CfgOpt):
+    """Create the empty holdout audit log (once). Exams refuse to run without it."""
+    from perp_lab.judge.budget import init_log
+    try:
+        p = init_log(load_config(config))
+    except FileExistsError as e:
+        typer.secho(str(e), fg="red")
+        raise typer.Exit(1)
+    typer.echo(f"created {p}")
+
+
+@app.command()
+def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers: Optional[int] = None,
+          config: Optional[str] = CfgOpt):
+    """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam."""
+    from perp_lab.judge.judge import JudgeRefused, attempt_exam
+    from perp_lab.judge.judge import judge as run_judge
+    cfg = load_config(config)
+    try:
+        j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers, attempt=attempt_exam)
+    except JudgeRefused as e:
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(2)
+    again = " (already judged)" if j.get("existing") else ""
+    typer.secho(f"{j['strategy']} @ {j['timeframe']}  →  {j['decision'].upper()}{again}", bold=True,
+                fg="green" if j["decision"] == "promote" else "red")
+    for r in j["reasons"]:
+        typer.echo(f"  ✗ {r}")
+    dsr = "—" if j["dsr"] is None else f"{j['dsr']:.2f}"
+    typer.echo(f"Deflated Sharpe {dsr} (N={j['n_trials']})   holdout: {j['holdout_status']} ({j['holdout_reason']})")
+    typer.echo(f"verdict: {j['verdict_path']}")
+
+
+@app.command()
+def exam(config: Optional[str] = CfgOpt):
+    """Attempt the holdout exam for every pending promotion (budget rules apply)."""
+    from perp_lab.judge.judge import exam_pending
+    done = exam_pending(load_config(config))
+    if not done:
+        typer.echo("no pending exams")
+    for j in done:
+        err = f" ERROR: {j['error']}" if "error" in j else ""
+        typer.echo(f"{j['strategy']} @ {j['timeframe']}: {j['holdout_status']} ({j['holdout_reason']}){err}")
+    if any("error" in j for j in done):
+        raise typer.Exit(1)
 
 
 @app.command()

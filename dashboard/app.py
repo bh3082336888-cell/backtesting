@@ -158,7 +158,7 @@ def _fold_bands(fig, folds: pd.DataFrame):
 
 def page_detail():
     runs = all_runs()
-    wf = runs[runs.validation_mode.isin(["walkforward", "IS", "holdout"])]
+    wf = runs[runs.validation_mode.isin(["walkforward", "IS"])]
     if wf.empty:
         st.info("No runs yet.")
         return
@@ -173,6 +173,7 @@ def page_detail():
 
     st.header(f"{s} @ {tf}")
     st.markdown(f"**Hypothesis:** {r.hypothesis}")
+    judgement_section(rid)
     st.caption(f"run `{rid}` · plugin `{(r.strategy_hash or '')[:10]}` · mode **{r.validation_mode}** · "
                f"{r.date_start} → {r.date_end} · status **{status}**")
     if r.validation_mode == "IS":
@@ -309,6 +310,29 @@ def page_detail():
     paper_section(r, rid, status)
 
 
+def judgement_section(rid):
+    j = db.judgement_for_run(CFG, rid)
+    if j is None:
+        st.caption("Not judged. `lab judge` decides promote or kill and, if promoted, runs the holdout exam.")
+        return
+    st.subheader("Judge")
+    c = st.columns(4)
+    c[0].metric("Decision", j["decision"].upper())
+    c[1].metric("Deflated Sharpe", fmt2(j["dsr"]), help=f"N = {j['n_trials']} trials, SR0 = {fmt2(j['sr0'])} (daily)")
+    c[2].metric("Beats parent", "—" if j["beats_parent_frac"] is None else f"{j['beats_parent_frac']:.0%}")
+    c[3].metric("Holdout", j["holdout_status"], help=j["holdout_reason"])
+    for x in j["reasons"]:
+        st.markdown(f"- {x}")
+    if j["holdout_run_id"]:
+        h = db.run_row(CFG, j["holdout_run_id"])  # uncached: the exam run may be newer than the cache
+        if h is None:
+            st.caption(f"Holdout run {j['holdout_run_id']} not found in the store.")
+        else:
+            trades = int(h["trades"]) if h["trades"] is not None and pd.notna(h["trades"]) else 0
+            st.caption(f"Holdout {h['date_start']} → {h['date_end']}: Sharpe {fmt2(h['sharpe'])}, "
+                       f"return {fmt_pct(h['total_return'])}, {trades} trades (shown to you, never to the proposer)")
+
+
 def paper_section(r, rid, status):
     st.subheader("Paper")
     runs = all_runs()
@@ -318,16 +342,25 @@ def paper_section(r, rid, status):
         if status == "paper":
             st.info("Approved for paper. Start it with `lab paper " + rid + "`.")
         elif r.verdict == "candidate" and status != "retired":
-            with st.form(f"approve_{rid}"):
-                who = st.text_input("Approver")
-                note = st.text_input("Note")
-                if st.form_submit_button("Approve for paper trading"):
-                    if not who.strip():
-                        st.error("Approver name required.")
-                    else:
-                        db.approve_paper(CFG, rid, who.strip(), note)
-                        st.cache_data.clear()
-                        st.rerun()
+            j = db.judgement_for_run(CFG, rid)
+            if j is None or j["holdout_status"] != "passed":
+                held = "not judged" if j is None else f"{j['holdout_status']} ({j['holdout_reason']})"
+                st.caption(f"Paper approval needs a passed holdout exam. Holdout: {held}.")
+            else:
+                with st.form(f"approve_{rid}"):
+                    who = st.text_input("Approver")
+                    note = st.text_input("Note")
+                    if st.form_submit_button("Approve for paper trading"):
+                        if not who.strip():
+                            st.error("Approver name required.")
+                        else:
+                            try:
+                                db.approve_paper(CFG, rid, who.strip(), note)
+                            except PermissionError as e:
+                                st.error(str(e))
+                            else:
+                                st.cache_data.clear()
+                                st.rerun()
         else:
             st.caption(f"Paper approval is only offered for walk-forward candidates. This run is '{r.verdict}'.")
     if papers.empty:
@@ -443,5 +476,20 @@ def page_lineage():
 PAGES = {"Strategies": page_strategies, "Strategy detail": page_detail, "Pairs": page_pairs,
          "Lineage": page_lineage}
 page = st.sidebar.radio("Perp Lab", list(PAGES), key="page")
+
+
+def holdout_caption() -> str:
+    from perp_lab.judge.budget import BudgetLogError, reads_used
+    jc = CFG.get("judge") or {}
+    opens = (CFG.holdout_start + pd.Timedelta(days=jc.get("min_holdout_days", 0))).date()
+    try:
+        used = f"{reads_used(CFG)}/{jc.get('holdout_max_reads')}"
+    except BudgetLogError:
+        used = "log not initialised (`lab holdout-init`)"
+    return (f"holdout reads: {used}  \nearliest exam date: {opens} (funding data arrives a month "
+            "at a time, so it can be a few days later)")
+
+
 st.sidebar.caption(f"store: {CFG.get('store', {}).get('url')}  \nholdout from {CFG.holdout_start.date()} (locked)")
+st.sidebar.caption(holdout_caption())
 PAGES[page]()
