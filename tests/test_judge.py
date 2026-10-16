@@ -263,3 +263,16 @@ def test_real_plugins_pass_the_holdout_dated_check(cfg, name, monkeypatch):
     from perp_lab.strategy import load_strategy_class
     monkeypatch.setattr("perp_lab.strategy.STRATEGY_DIR", REPO / "strategies")
     assert lookahead_failures(cfg, load_strategy_class(name)) == []
+
+
+def test_a_parent_edited_while_its_walk_forward_runs_gets_no_judgement(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("noise", NOISE), "donchian_atr_wide": ("candidate", STRONG)})
+    f = plugins / "donchian_atr.py"
+
+    def editing(cfg, name, *a, **kw):
+        if name == "donchian_atr":
+            f.write_text(f.read_text() + "\n# edited mid-run\n")
+        return v(cfg, name, *a, **kw)
+    with pytest.raises(RuntimeError, match="parent donchian_atr changed while its walk-forward ran; re-run lab judge"):
+        judge(cfg, "donchian_atr_wide", "4h", validate=editing)
+    assert v.calls == ["donchian_atr"] and db.read_table(cfg, db.judgements).empty

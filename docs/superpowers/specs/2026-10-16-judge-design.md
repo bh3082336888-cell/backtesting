@@ -78,7 +78,9 @@ the dashboard shows judgements and the holdout budget.
    first`. Then: the latest walk-forward run of the parent at the child's timeframe whose
    `strategy_hash` equals the parent's current `plugin_hash` and whose symbol universe equals
    the child's. If none, run the parent's walk-forward first (recorded like any run; it counts
-   as a trial).
+   as a trial). If that run's `strategy_hash` is not the parent hash that was checked (the
+   parent was edited during its run), stop with an error (exit 1) before any judgement is
+   recorded: `parent P changed while its walk-forward ran; re-run lab judge`.
 6. **Child walk-forward** via `validate_strategy(..., parent_run_id=parent_run, lineage_id=family)`.
    If the run's `strategy_hash` is not the hash being judged (the plugin was edited during the
    run), stop with an error (exit 1) before any judgement is recorded:

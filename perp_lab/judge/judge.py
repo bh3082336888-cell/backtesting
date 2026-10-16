@@ -146,10 +146,12 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     universe = symbols or cfg.symbols
     parent_row = None
     if parent is not None:
-        parent_row = db.latest_wf_run(cfg, parent, tf, plugin_hash(parent), universe,
-                                      lineage_id=family)
+        ph = plugin_hash(parent)
+        parent_row = db.latest_wf_run(cfg, parent, tf, ph, universe, lineage_id=family)
         if parent_row is None:
             prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family)
+            if prec["strategy_hash"] != ph:   # the parent run measured other code than was checked
+                raise RuntimeError(f"parent {parent} changed while its walk-forward ran; re-run lab judge")
             parent_row = db.run_row(cfg, prec["run_id"])
 
     rec, _ = validate(cfg, name, tf, symbols, workers=workers,
