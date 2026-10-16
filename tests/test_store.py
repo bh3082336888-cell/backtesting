@@ -21,7 +21,8 @@ def cfg(tmp_path):
     return load_config(p)
 
 
-def fake_run(cfg, run_id, strategy="s1", tf="4h", verdict="noise", sharpe=0.3, parent=None, mode="walkforward"):
+def fake_run(cfg, run_id, strategy="s1", tf="4h", verdict="noise", sharpe=0.3, parent=None, mode="walkforward",
+             strategy_hash="abc", created_at="2026-10-01T00:00:00+00:00", universe=None):
     idx = pd.date_range("2024-01-01", periods=120, freq="D", tz="UTC")
     rng = np.random.default_rng(abs(hash(run_id)) % 2**32)
     daily = pd.DataFrame({"BTCUSDT": rng.normal(0, 0.01, 120), "ETHUSDT": rng.normal(0, 0.01, 120)}, index=idx)
@@ -29,9 +30,9 @@ def fake_run(cfg, run_id, strategy="s1", tf="4h", verdict="noise", sharpe=0.3, p
     folds = [{"fold": i, "train_start": str(idx[0].date()), "train_end": str(idx[30 * i].date()),
               "test_start": str(idx[30 * i].date()), "test_end": str(idx[min(30 * i + 30, 119)].date()),
               "combo": "n=20", "params": {"n": 20}, "is_score": 1.0} for i in range(1, 4)]
-    rec = {"run_id": run_id, "strategy": strategy, "strategy_hash": "abc", "hypothesis": "h",
+    rec = {"run_id": run_id, "strategy": strategy, "strategy_hash": strategy_hash, "hypothesis": "h",
            "params": {"grid": {"n": [10, 20], "k": [1, 2]}, "defaults": {"n": 20, "k": 1}},
-           "universe": ["BTCUSDT", "ETHUSDT"], "timeframes": [tf], "validation_mode": mode,
+           "universe": universe or ["BTCUSDT", "ETHUSDT"], "timeframes": [tf], "validation_mode": mode,
            "date_start": "2024-01-01", "date_end": "2024-04-30", "status": verdict,
            "fail_reasons": [] if verdict == "candidate" else ["x"],
            "metrics": {"sharpe": sharpe, "max_dd": -0.1, "trades": 50, "total_return": 0.05},
@@ -42,7 +43,7 @@ def fake_run(cfg, run_id, strategy="s1", tf="4h", verdict="noise", sharpe=0.3, p
            "by_symbol": {"BTCUSDT": {"sharpe": 0.5, "max_dd": -0.1, "total_return": 0.1, "trades": 25},
                          "ETHUSDT": {"sharpe": -0.2, "max_dd": -0.2, "total_return": -0.05, "trades": 25}},
            "regime_split": [{"regime": "trending", "trades": 30, "win_rate": 0.4, "avg_r": 0.1}],
-           "folds": folds, "parent_run_id": parent, "created_at": "2026-10-01T00:00:00+00:00"}
+           "folds": folds, "parent_run_id": parent, "created_at": created_at}
     grid = pd.DataFrame([{"n": n, "k": k, "sharpe": n / 10 - k} for n in (10, 20) for k in (1, 2)])
     sens = pd.DataFrame([{"param": "n", "step": s, "value": 20 * (1 + s), "sharpe": sharpe + s} for s in (-0.2, 0.2)])
     write_run(cfg, rec, {"oos_daily": daily, "grid": grid, "sensitivity": sens,

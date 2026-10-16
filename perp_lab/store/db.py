@@ -115,6 +115,30 @@ status_log = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True)),
 )
 
+judgements = sa.Table(
+    "judgements", md,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("strategy", sa.String(128), nullable=False, index=True),
+    sa.Column("timeframe", sa.String(8), nullable=False),
+    sa.Column("strategy_hash", sa.String(64), nullable=False),
+    sa.Column("child_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=True),
+    sa.Column("parent_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=True),
+    sa.Column("lineage_id", sa.String(64), index=True),
+    sa.Column("decision", sa.String(16), nullable=False),          # promote | kill
+    sa.Column("reasons", sa.JSON, nullable=False),
+    sa.Column("dsr", sa.Float), sa.Column("n_trials", sa.Integer), sa.Column("sr0", sa.Float),
+    sa.Column("parent_passed", sa.Boolean), sa.Column("beats_parent_frac", sa.Float),
+    sa.Column("holdout_status", sa.String(16), nullable=False),    # n/a | pending | passed | failed | blocked
+    sa.Column("holdout_reason", sa.String(32), nullable=False),    # fixed code, never a number
+    sa.Column("holdout_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True)),
+    sa.Column("updated_at", sa.DateTime(timezone=True)),
+    sa.UniqueConstraint("strategy_hash", "timeframe"),
+)
+
+DECISIONS = {"promote", "kill"}
+HOLDOUT_STATUSES = {"n/a", "pending", "passed", "failed", "blocked"}
+
 APPROVABLE_STATUSES = {"paper", "retired"}   # "live" deliberately absent
 
 
@@ -286,6 +310,114 @@ def add_edge(cfg, parent_run_id: str, child_run_id: str, decision: str, reason: 
         c.execute(lineage_edges.insert().values(parent_run_id=parent_run_id, child_run_id=child_run_id,
                                                 decision=decision, reason=reason, decided_by=decided_by,
                                                 created_at=_now()))
+
+
+# ---------------------------------------------------------------- judgements (Phase 3)
+
+def _row(r) -> dict | None:
+    return dict(r._mapping) if r is not None else None
+
+
+def record_judgement(cfg, row: dict) -> int:
+    """Insert one judgement. A second judgement of the same (strategy_hash, timeframe), e.g. two
+    judges racing, returns the first one's id instead of failing."""
+    if row["decision"] not in DECISIONS:
+        raise ValueError(f"decision must be one of {sorted(DECISIONS)}")
+    if row["holdout_status"] not in HOLDOUT_STATUSES:
+        raise ValueError(f"holdout_status must be one of {sorted(HOLDOUT_STATUSES)}")
+    now = _now()
+    try:
+        with engine(cfg).begin() as c:
+            return int(c.execute(judgements.insert().values(**row, created_at=now, updated_at=now))
+                       .inserted_primary_key[0])
+    except sa.exc.IntegrityError:
+        existing = get_judgement(cfg, row["strategy_hash"], row["timeframe"])
+        if existing is None:
+            raise
+        return existing["id"]
+
+
+def _judgement_where(cfg, where) -> dict | None:
+    with engine(cfg).connect() as c:
+        return _row(c.execute(sa.select(judgements).where(where)).first())
+
+
+def get_judgement(cfg, strategy_hash: str, timeframe: str) -> dict | None:
+    return _judgement_where(cfg, sa.and_(judgements.c.strategy_hash == strategy_hash,
+                                         judgements.c.timeframe == timeframe))
+
+
+def get_judgement_by_id(cfg, jid: int) -> dict | None:
+    return _judgement_where(cfg, judgements.c.id == jid)
+
+
+def judgement_for_run(cfg, run_id: str) -> dict | None:
+    return _judgement_where(cfg, judgements.c.child_run_id == run_id)
+
+
+def update_holdout(cfg, jid: int, status: str, reason: str, holdout_run_id: str | None = None) -> None:
+    if status not in HOLDOUT_STATUSES:
+        raise ValueError(f"holdout_status must be one of {sorted(HOLDOUT_STATUSES)}")
+    vals = {"holdout_status": status, "holdout_reason": reason, "updated_at": _now()}
+    if holdout_run_id is not None:
+        vals["holdout_run_id"] = holdout_run_id
+    with engine(cfg).begin() as c:
+        c.execute(judgements.update().where(judgements.c.id == jid).values(**vals))
+
+
+def pending_judgements(cfg) -> list[dict]:
+    with engine(cfg).connect() as c:
+        rows = c.execute(sa.select(judgements).where(judgements.c.holdout_status == "pending")
+                         .order_by(judgements.c.created_at, judgements.c.id))
+        return [dict(r._mapping) for r in rows]
+
+
+def run_row(cfg, run_id: str) -> dict | None:
+    with engine(cfg).connect() as c:
+        return _row(c.execute(sa.select(runs).where(runs.c.run_id == run_id)).first())
+
+
+def latest_wf_run(cfg, strategy: str, timeframe: str, strategy_hash: str, universe: list[str]) -> dict | None:
+    """Most recent walk-forward run of exactly this plugin version, timeframe and symbol universe."""
+    with engine(cfg).connect() as c:
+        rows = c.execute(sa.select(runs).where(sa.and_(
+            runs.c.strategy == strategy, runs.c.timeframe == timeframe,
+            runs.c.strategy_hash == strategy_hash, runs.c.validation_mode == "walkforward"))
+            .order_by(runs.c.created_at.desc())).all()
+    for r in rows:
+        if list(r.universe or []) == list(universe):
+            return dict(r._mapping)
+    return None
+
+
+def family_of(cfg, strategy: str) -> str | None:
+    """A plugin name's family: that of its first judgement, else of its first walk-forward run.
+    Looked up by name so editing or re-running a root never starts a new family."""
+    with engine(cfg).connect() as c:
+        j = c.execute(sa.select(judgements.c.lineage_id).where(sa.and_(
+            judgements.c.strategy == strategy, judgements.c.lineage_id.isnot(None)))
+            .order_by(judgements.c.created_at, judgements.c.id).limit(1)).first()
+        if j:
+            return j[0]
+        r = c.execute(sa.select(runs.c.lineage_id).where(sa.and_(
+            runs.c.strategy == strategy, runs.c.validation_mode == "walkforward",
+            runs.c.lineage_id.isnot(None))).order_by(runs.c.created_at).limit(1)).first()
+    return r[0] if r else None
+
+
+def trial_stats(cfg) -> tuple[int, float]:
+    """N = distinct (strategy_hash, timeframe) among walk-forward runs, store-wide; V = sample
+    variance of the daily Sharpes of the latest run of each (0.0 when N < 2)."""
+    with engine(cfg).connect() as c:
+        df = pd.read_sql(sa.select(runs.c.strategy_hash, runs.c.timeframe, runs.c.sharpe, runs.c.created_at)
+                         .where(sa.and_(runs.c.validation_mode == "walkforward", runs.c.sharpe.isnot(None))), c)
+    df = df.dropna(subset=["strategy_hash", "timeframe"])
+    if df.empty:
+        return 0, 0.0
+    latest = df.sort_values("created_at").groupby(["strategy_hash", "timeframe"]).tail(1)
+    n = len(latest)
+    v = float((latest.sharpe / np.sqrt(365)).var(ddof=1)) if n >= 2 else 0.0
+    return n, v
 
 
 # ---------------------------------------------------------------- status
