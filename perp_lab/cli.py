@@ -204,11 +204,11 @@ def holdout_init(config: Optional[str] = CfgOpt):
 def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers: Optional[int] = None,
           config: Optional[str] = CfgOpt):
     """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam."""
-    from perp_lab.judge.judge import JudgeRefused
+    from perp_lab.judge.judge import JudgeRefused, attempt_exam
     from perp_lab.judge.judge import judge as run_judge
     cfg = load_config(config)
     try:
-        j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers)
+        j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers, attempt=attempt_exam)
     except JudgeRefused as e:
         typer.secho(f"refused: {e}", fg="red")
         raise typer.Exit(2)
@@ -220,6 +220,17 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
     dsr = "—" if j["dsr"] is None else f"{j['dsr']:.2f}"
     typer.echo(f"Deflated Sharpe {dsr} (N={j['n_trials']})   holdout: {j['holdout_status']} ({j['holdout_reason']})")
     typer.echo(f"verdict: {j['verdict_path']}")
+
+
+@app.command()
+def exam(config: Optional[str] = CfgOpt):
+    """Attempt the holdout exam for every pending promotion (budget rules apply)."""
+    from perp_lab.judge.judge import exam_pending
+    done = exam_pending(load_config(config))
+    if not done:
+        typer.echo("no pending exams")
+    for j in done:
+        typer.echo(f"{j['strategy']} @ {j['timeframe']}: {j['holdout_status']} ({j['holdout_reason']})")
 
 
 @app.command()
