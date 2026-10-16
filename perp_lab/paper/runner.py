@@ -222,8 +222,10 @@ class PaperRunner:
 
     async def _quotes_loop(self, sym, stop_evt):
         book = self.books[sym]
+        csym = ccxt_symbol(sym, self.quote)
         while not stop_evt.is_set():
-            t = await acall_with_backoff(self.ex.watch_ticker, ccxt_symbol(sym, self.quote))
+            # bookTicker stream: Binance USD-M's ticker stream carries no bid/ask.
+            t = (await acall_with_backoff(self.ex.watch_bids_asks, [csym])).get(csym) or {}
             bid, ask = t.get("bid"), t.get("ask")
             if bid and ask:
                 had = len(book.trades)

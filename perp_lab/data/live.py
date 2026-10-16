@@ -130,10 +130,16 @@ async def watch_closed(exchange, symbol: str, tf: str, quote: str = "USDT"):
         by_ts = {int(r[0]): r for r in rows}
         latest = max(by_ts)
         if pending_ts is not None and latest > pending_ts:
-            if pending_ts in by_ts:
-                yield ohlcv_to_candles([by_ts[pending_ts]], tf).iloc[0]
+            row = by_ts.get(pending_ts)
+            if row is None:
+                # ccxt.pro returns only candles updated since the last call, so the batch that opens
+                # a new candle usually lacks the closed one. Its final values come from REST.
+                got = await acall_with_backoff(exchange.fetch_ohlcv, sym, tf, since=pending_ts, limit=1)
+                row = next((r for r in got if int(r[0]) == pending_ts), None)
+            if row is not None:
+                yield ohlcv_to_candles([row], tf).iloc[0]
             else:
-                log.warning("%s %s: closed candle %s fell out of the stream cache; refetch on restart",
+                log.warning("%s %s: closed candle %s missing from stream and REST; refetch on restart",
                             symbol, tf, pending_ts)
         if pending_ts is None or latest > pending_ts:
             pending_ts = latest
