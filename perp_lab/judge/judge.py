@@ -96,8 +96,8 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
 
     existing = db.get_judgement(cfg, h, tf)
-    if existing:
-        return {**existing, "verdict_path": str(verdict_path(cfg, name, tf, h)), "existing": True}
+    if existing:   # (re)write its verdict under the judged strategy's name, even for a renamed copy
+        return {**finish(cfg, existing["id"]), "existing": True}
 
     family = resolve_family(name)
     fails = causality_failures(load_strategy_class(name))
@@ -151,7 +151,11 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         db.add_edge(cfg, parent_row["run_id"], child["run_id"], decision,
                     "; ".join(reasons) or "passed every gate", decided_by="harness")
     if decision == "promote" and attempt is not None:
-        attempt(cfg, jid)
+        try:
+            attempt(cfg, jid)
+        except Exception:
+            finish(cfg, jid)   # the verdict file must exist even when the exam could not start
+            raise
     return finish(cfg, jid)
 
 

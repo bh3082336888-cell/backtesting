@@ -54,8 +54,10 @@ the dashboard shows judgements and the holdout budget.
 2. **Pre-checks** (refuse, exit code 2, nothing recorded):
    - `PARENT` names a plugin that doesn't exist.
    - The child file is byte-identical to its parent (same `plugin_hash`).
-3. **Idempotency.** If a judgement exists for this `(strategy_hash, timeframe)`, print it and
-   exit 0. No new trial is created.
+3. **Idempotency.** If a judgement exists for this `(strategy_hash, timeframe)`, rewrite its
+   verdict file, print it and exit 0. No new trial is created. The verdict and the printed
+   header name the strategy that was judged, so a renamed byte-identical copy reports the
+   original's judgement.
 4. **Lookahead check** with `causality.assert_causal` on the default params and every grid
    corner. Failure → judgement `kill`, reason `lookahead`, no walk-forward run, not a trial.
 5. **Parent run.** The latest walk-forward run of the parent at the child's timeframe whose
@@ -76,7 +78,9 @@ the dashboard shows judgements and the holdout budget.
 9. **Record** the judgement; when there is a parent, also the lineage edge
    (`decided_by="harness"`, reason = the joined reasons).
 10. **If promoted**, attempt the exam (see Holdout exam). Outcome sets `holdout_status`.
-11. **Write the public verdict** and print a summary.
+11. **Write the public verdict** and print a summary. The verdict file is written even when
+    the exam cannot start (e.g. the holdout log was never initialised) or crashes; the error is
+    then re-raised (exit 1).
 
 `lab exam` retries every judgement with `holdout_status = pending`, oldest first, through the
 same budget checks.

@@ -213,7 +213,7 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
         typer.secho(f"refused: {e}", fg="red")
         raise typer.Exit(2)
     again = " (already judged)" if j.get("existing") else ""
-    typer.secho(f"{strategy} @ {tf}  →  {j['decision'].upper()}{again}", bold=True,
+    typer.secho(f"{j['strategy']} @ {j['timeframe']}  →  {j['decision'].upper()}{again}", bold=True,
                 fg="green" if j["decision"] == "promote" else "red")
     for r in j["reasons"]:
         typer.echo(f"  ✗ {r}")

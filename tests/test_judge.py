@@ -141,3 +141,27 @@ def test_a_lookahead_kill_belongs_to_its_family(cfg, plugins):
     add_plugin(plugins, "cheater", CHEATER)
     j = judge(cfg, "cheater", "4h", validate=StubValidate({}))
     assert j["decision"] == "kill" and j["lineage_id"] == "family:donchian_atr"
+
+
+def test_rejudging_rewrites_a_missing_verdict(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("noise", NOISE)})
+    a = judge(cfg, "donchian_atr", "4h", validate=v)
+    Path(a["verdict_path"]).unlink()
+    b = judge(cfg, "donchian_atr", "4h", validate=v)
+    assert b["existing"] is True and b["id"] == a["id"] and Path(b["verdict_path"]).exists()
+
+
+def test_a_renamed_identical_copy_returns_the_original_judgement(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("noise", NOISE)})
+    a = judge(cfg, "donchian_atr", "4h", validate=v)
+    add_plugin(plugins, "copy_root", (plugins / "donchian_atr.py").read_text())
+    b = judge(cfg, "copy_root", "4h", validate=v)
+    assert b["existing"] is True and b["id"] == a["id"] and b["strategy"] == "donchian_atr"
+    assert b["verdict_path"] == a["verdict_path"] and Path(b["verdict_path"]).exists()
+
+
+def test_cli_names_the_judgement_it_returns(cfg, plugins):
+    judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    add_plugin(plugins, "copy_root", (plugins / "donchian_atr.py").read_text())
+    r = CliRunner().invoke(app, ["judge", "copy_root", "--tf", "4h", "--config", str(cfg.path)])
+    assert r.exit_code == 0 and "donchian_atr @ 4h" in r.output and "already judged" in r.output

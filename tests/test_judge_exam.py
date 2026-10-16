@@ -123,6 +123,15 @@ def test_a_crashed_exam_still_writes_its_verdict(cfg, plugins):
     assert (out["holdout_status"], out["holdout_reason"]) == ("pending", "exam_error")
 
 
+def test_an_exam_that_cannot_start_still_writes_its_verdict(cfg, plugins):
+    with pytest.raises(budget.BudgetLogError):          # the holdout log was never initialised
+        judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(0.003))
+    [j] = db.pending_judgements(cfg)
+    p = verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"])
+    out = json.loads(p.read_text())
+    assert (out["holdout_status"], out["holdout_reason"]) == ("pending", "awaiting_exam")
+
+
 def test_one_crashing_exam_does_not_block_the_others(cfg, plugins):
     budget.init_log(cfg)
     add_plugin(plugins, "other_root", WIDE_TEXT.replace('PARENT = "donchian_atr"\n', ""))
