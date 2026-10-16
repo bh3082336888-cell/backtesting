@@ -266,6 +266,25 @@ def test_a_parent_edited_while_its_walk_forward_runs_gets_no_judgement(cfg, plug
         if name == "donchian_atr":
             f.write_text(f.read_text() + "\n# edited mid-run\n")
         return v(cfg, name, *a, **kw)
-    with pytest.raises(RuntimeError, match="parent donchian_atr changed while its walk-forward ran; re-run lab judge"):
+    with pytest.raises(RuntimeError, match="parent donchian_atr changed while it was being checked or run; re-run lab judge"):
         judge(cfg, "donchian_atr_wide", "4h", validate=editing)
     assert v.calls == ["donchian_atr"] and db.read_table(cfg, db.judgements).empty
+
+
+def test_a_parent_edited_during_its_lookahead_check_gets_no_judgement(cfg, plugins, monkeypatch):
+    # the parent's hash is taken before its lookahead check, so code edited after the check
+    # (and never checked) can't be walked forward and accepted as the baseline
+    import perp_lab.judge.judge as jm
+    real, f = jm.lookahead_failures, plugins / "donchian_atr.py"
+
+    def editing(cfg, cls):
+        out = real(cfg, cls)
+        if cls.name == "donchian_atr":
+            f.write_text(f.read_text() + "\n# edited after its check\n")
+        return out
+
+    monkeypatch.setattr(jm, "lookahead_failures", editing)
+    v = StubValidate({"donchian_atr": ("noise", NOISE), "donchian_atr_wide": ("candidate", STRONG)})
+    with pytest.raises(RuntimeError, match="parent donchian_atr changed while it was being checked or run"):
+        judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    assert db.read_table(cfg, db.judgements).empty

@@ -140,18 +140,19 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
             "reasons": [f"lookahead: {f}" for f in fails], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
 
+    ph = plugin_hash(parent) if parent is not None else None   # before the check: the checked version
     if parent is not None and lookahead_failures(cfg, load_strategy_class(parent)):
         raise JudgeRefused(f"parent {parent} fails the lookahead check; fix or judge it first")
 
     universe = symbols or cfg.symbols
     parent_row = None
     if parent is not None:
-        ph = plugin_hash(parent)
         parent_row = db.latest_wf_run(cfg, parent, tf, ph, universe, lineage_id=family)
         if parent_row is None:
             prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family)
             if prec["strategy_hash"] != ph:   # the parent run measured other code than was checked
-                raise RuntimeError(f"parent {parent} changed while its walk-forward ran; re-run lab judge")
+                raise RuntimeError(f"parent {parent} changed while it was being checked or run; "
+                                   "re-run lab judge")
             parent_row = db.run_row(cfg, prec["run_id"])
 
     rec, _ = validate(cfg, name, tf, symbols, workers=workers,
