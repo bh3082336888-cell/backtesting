@@ -257,8 +257,10 @@ Each test is written first and seen failing.
 - **Budget:** cap reached; second family read refused; same-judgement retry allowed; missing
   and corrupt log refuse; two threads racing for the last read → exactly one mint; minimum
   length → pending.
-- **Single minter:** no module in `perp_lab/` other than `judge/budget.py` references
-  `issue_holdout_token` (AST scan).
+- **Single minter:** no module in `perp_lab/`, `dashboard/` or `strategies/` other than
+  `judge/budget.py` references `issue_holdout_token`, and none outside `perp_lab/holdout.py`
+  references `_MINT_KEY` or calls `HoldoutToken(` directly (AST scan anchored on the repo root,
+  so it cannot pass vacuously from another directory).
 - **Paper gate:** candidate with holdout `pending` / `failed` / `blocked` refused; `passed` accepted.
 - **Verdict:** a verdict for an examined judgement contains no key or value derived from the
   holdout run (checked against the holdout run's metric values).

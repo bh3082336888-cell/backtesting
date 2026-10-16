@@ -110,18 +110,57 @@ def test_two_judges_racing_for_the_last_read(cfg, monkeypatch):
     assert sorted(got) == [False, True] and budget.reads_used(cfg) == 1
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+MINTERS = {"perp_lab/judge/budget.py"}     # may call issue_holdout_token
+TOKEN_HOME = "perp_lab/holdout.py"          # the only file that may touch _MINT_KEY or build a HoldoutToken
+
+
+def _name(node) -> str | None:
+    return (node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute)
+            else node.name if isinstance(node, ast.alias)
+            else node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None)
+
+
+def token_offenders(root: Path) -> tuple[list[str], list[str]]:
+    """(files scanned, offenders) under root's perp_lab/, dashboard/ and strategies/."""
+    scanned, offenders = [], []
+    for d in ("perp_lab", "dashboard", "strategies"):
+        for p in sorted((root / d).rglob("*.py")):
+            rel = p.relative_to(root).as_posix()
+            scanned.append(rel)
+            if rel == TOKEN_HOME:
+                continue
+            for node in ast.walk(ast.parse(p.read_text())):
+                name = _name(node)
+                if name == "issue_holdout_token" and rel not in MINTERS:
+                    offenders.append(f"{rel}: issue_holdout_token")
+                if name == "_MINT_KEY":
+                    offenders.append(f"{rel}: _MINT_KEY")
+                if isinstance(node, ast.Call) and _name(node.func) == "HoldoutToken":
+                    offenders.append(f"{rel}: HoldoutToken(")
+    return scanned, offenders
+
+
 def test_only_budget_mints_holdout_tokens():
-    allowed = {Path("perp_lab/holdout.py"), Path("perp_lab/judge/budget.py")}
-    offenders = []
-    for p in [*Path("perp_lab").rglob("*.py"), *Path("dashboard").rglob("*.py")]:
-        if p in allowed:
-            continue
-        for node in ast.walk(ast.parse(p.read_text())):
-            name = (node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute)
-                    else node.name if isinstance(node, ast.alias) else None)
-            if name == "issue_holdout_token":
-                offenders.append(str(p))
+    scanned, offenders = token_offenders(ROOT)
+    assert {"perp_lab/judge/budget.py", "dashboard/app.py", "strategies/donchian_atr.py"} <= set(scanned)
     assert offenders == []
+
+
+def test_the_token_scan_flags_every_way_around_the_budget(tmp_path):
+    for d in ("perp_lab/judge", "dashboard", "strategies"):
+        (tmp_path / d).mkdir(parents=True)
+    (tmp_path / "perp_lab/holdout.py").write_text("_MINT_KEY = object()\nt = HoldoutToken('f', 'r', 'n', _MINT_KEY)\n")
+    (tmp_path / "perp_lab/judge/budget.py").write_text("from perp_lab.holdout import issue_holdout_token\n")
+    (tmp_path / "perp_lab/sneaky.py").write_text("from perp_lab.holdout import _MINT_KEY\n")
+    (tmp_path / "dashboard/forge.py").write_text("import perp_lab.holdout as h\nt = h.HoldoutToken('f', 'r', 'n', k)\n")
+    (tmp_path / "strategies/evil.py").write_text("from perp_lab.holdout import issue_holdout_token\n")
+    (tmp_path / "strategies/getter.py").write_text("import perp_lab.holdout as h\nk = getattr(h, '_MINT_KEY')\n")
+    assert sorted(token_offenders(tmp_path)[1]) == [
+        "dashboard/forge.py: HoldoutToken(", "perp_lab/sneaky.py: _MINT_KEY",
+        "strategies/evil.py: issue_holdout_token", "strategies/getter.py: _MINT_KEY"]
 
 
 def test_cli_holdout_init_runs_once(cfg):
