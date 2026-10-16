@@ -201,6 +201,28 @@ def holdout_init(config: Optional[str] = CfgOpt):
 
 
 @app.command()
+def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers: Optional[int] = None,
+          config: Optional[str] = CfgOpt):
+    """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam."""
+    from perp_lab.judge.judge import JudgeRefused
+    from perp_lab.judge.judge import judge as run_judge
+    cfg = load_config(config)
+    try:
+        j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers)
+    except JudgeRefused as e:
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(2)
+    again = " (already judged)" if j.get("existing") else ""
+    typer.secho(f"{strategy} @ {tf}  →  {j['decision'].upper()}{again}", bold=True,
+                fg="green" if j["decision"] == "promote" else "red")
+    for r in j["reasons"]:
+        typer.echo(f"  ✗ {r}")
+    dsr = "—" if j["dsr"] is None else f"{j['dsr']:.2f}"
+    typer.echo(f"Deflated Sharpe {dsr} (N={j['n_trials']})   holdout: {j['holdout_status']} ({j['holdout_reason']})")
+    typer.echo(f"verdict: {j['verdict_path']}")
+
+
+@app.command()
 def dashboard(port: int = 8501, config: Optional[str] = CfgOpt):
     """Launch the Streamlit dashboard."""
     import subprocess
