@@ -123,6 +123,17 @@ def test_harness_edges_cannot_be_overwritten_by_hand(cfg):
     assert e.decision.tolist() == ["kill"] and e.decided_by.tolist() == ["harness"]
 
 
+def test_a_harness_judged_child_cannot_be_re_parented_by_hand(cfg):
+    fake_run(cfg, "p")
+    fake_run(cfg, "q")
+    fake_run(cfg, "c", parent="p")
+    db.add_edge(cfg, "p", "c", "kill", "gates failed", decided_by="harness")
+    with pytest.raises(PermissionError, match="harness"):
+        db.add_edge(cfg, "q", "c", "promote", "a better parent")
+    assert db.run_row(cfg, "c")["parent_run_id"] == "p"
+    assert db.read_table(cfg, db.lineage_edges).parent_run_id.tolist() == ["p"]
+
+
 def test_lab_link_refuses_a_harness_edge_cleanly(cfg):
     from typer.testing import CliRunner
 

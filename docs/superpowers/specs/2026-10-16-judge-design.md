@@ -45,7 +45,8 @@ Moved: `assert_causal` and its synthetic-bar generator move from `tests/` into
 `tests/test_lookahead.py` imports them from there.
 
 Changed: `validate_strategy` accepts an explicit `lineage_id`; `approve_paper` gains the
-holdout requirement; `add_edge` refuses to overwrite an edge with `decided_by="harness"`;
+holdout requirement; `add_edge` refuses to overwrite an edge with `decided_by="harness"`,
+and refuses any human edge to a child run that already has a harness edge (no re-parenting);
 the dashboard shows judgements and the holdout budget.
 
 ## Flow: `lab judge STRATEGY --tf TF [--symbols ...] [--workers N]`
@@ -242,7 +243,8 @@ judge:
   including the idempotent re-print), 2 refused by a pre-check, 1 error.
 - `lab exam`: retry pending exams; prints each outcome.
 - `lab holdout-init`: create the empty holdout log, once.
-- `lab link`: unchanged for human edges, but refuses to overwrite a harness edge.
+- `lab link`: unchanged for human edges, but refuses to overwrite a harness edge or to give
+  a harness-judged child run another parent.
 
 ## Testing
 
@@ -261,7 +263,8 @@ Each test is written first and seen failing.
 - **Verdict:** a verdict for an examined judgement contains no key or value derived from the
   holdout run (checked against the holdout run's metric values).
 - **Family identity:** re-judging a root on another timeframe keeps its `lineage_id`.
-- **Edges:** `lab link` refuses to overwrite a harness edge.
+- **Edges:** `lab link` refuses to overwrite a harness edge; a human edge cannot re-parent a
+  child run the harness judged.
 - **End to end** on small synthetic data (temp config and store): a kill with reasons; a
   promotion left `pending` because the window is short; a promotion examined and passed.
 

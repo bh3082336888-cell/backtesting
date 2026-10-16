@@ -302,11 +302,15 @@ def add_edge(cfg, parent_run_id: str, child_run_id: str, decision: str, reason: 
             runs.c.run_id.in_([parent_run_id, child_run_id])))}
         if ids != {parent_run_id, child_run_id}:
             raise ValueError(f"unknown run(s): {({parent_run_id, child_run_id} - ids)}")
-        prev = c.execute(sa.select(lineage_edges.c.decided_by).where(sa.and_(
-            lineage_edges.c.parent_run_id == parent_run_id,
-            lineage_edges.c.child_run_id == child_run_id))).first()
-        if prev and prev[0] == "harness" and decided_by != "harness":
-            raise PermissionError("this edge was decided by the harness and can't be overwritten by hand")
+        if decided_by != "harness":
+            judged = c.execute(sa.select(lineage_edges.c.parent_run_id).where(sa.and_(
+                lineage_edges.c.child_run_id == child_run_id,
+                lineage_edges.c.decided_by == "harness"))).first()
+            if judged and judged[0] == parent_run_id:
+                raise PermissionError("this edge was decided by the harness and can't be overwritten by hand")
+            if judged:
+                raise PermissionError(f"run {child_run_id} was judged by the harness against {judged[0]}; "
+                                      "its lineage can't be changed by hand")
         lin = c.execute(sa.select(runs.c.lineage_id).where(runs.c.run_id == parent_run_id)).scalar()
         c.execute(runs.update().where(runs.c.run_id == child_run_id).values(
             parent_run_id=parent_run_id, lineage_id=lin))
