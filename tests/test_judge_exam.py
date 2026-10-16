@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 from perp_lab.cli import app
 from perp_lab.judge import budget
 from perp_lab.judge.exam import ExamResult
-from perp_lab.judge.judge import VERDICT_KEYS, attempt_exam, exam_pending, judge
+from perp_lab.judge.judge import VERDICT_KEYS, attempt_exam, exam_pending, judge, verdict_path
 from perp_lab.store import db
 from perp_lab.validate import walkforward as wfm
 from tests.conftest import market_config
@@ -97,6 +97,64 @@ def test_exam_crash_keeps_pending_and_retry_uses_no_new_read(cfg, plugins):
     assert j["holdout_reason"] == "exam_error" and budget.reads_used(cfg) == 1
     [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
     assert done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_an_edited_plugin_waits_and_spends_no_read(cfg, plugins):
+    budget.init_log(cfg)
+    judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(0.003), days=100)
+    f = plugins / "donchian_atr.py"
+    original = f.read_text()
+    f.write_text(original + "\n# edited\n")
+    [j] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    assert (j["holdout_status"], j["holdout_reason"]) == ("pending", "plugin_changed")
+    assert budget.reads_used(cfg) == 0
+    f.write_text(original)
+    [j] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    assert j["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_a_crashed_exam_still_writes_its_verdict(cfg, plugins):
+    budget.init_log(cfg)
+    with pytest.raises(RuntimeError, match="exam crashed"):
+        judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(0.003, fail=True))
+    j = db.pending_judgements(cfg)[0]
+    p = verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"])
+    out = json.loads(p.read_text())
+    assert (out["holdout_status"], out["holdout_reason"]) == ("pending", "exam_error")
+
+
+def test_one_crashing_exam_does_not_block_the_others(cfg, plugins):
+    budget.init_log(cfg)
+    add_plugin(plugins, "other_root", WIDE_TEXT.replace('PARENT = "donchian_atr"\n', ""))
+    outcomes = {"donchian_atr": ("candidate", STRONG), "other_root": ("candidate", STRONG + 0.0005)}
+    for name in ("donchian_atr", "other_root"):
+        judged(cfg, name, outcomes, stub_run(0.003), days=100)
+    good = stub_run(0.003)
+
+    def run(cfg, name, tf, symbols, params, token, end):
+        if name == "donchian_atr":
+            raise RuntimeError("exam crashed")
+        return good(cfg, name, tf, symbols, params, token, end)
+    a, b = exam_pending(cfg, run=run, end_fn=end_after(200))
+    assert a["strategy"] == "donchian_atr" and "error" in a
+    assert (a["holdout_status"], a["holdout_reason"]) == ("pending", "exam_error")
+    assert b["strategy"] == "other_root" and b["holdout_status"] == "passed" and "error" not in b
+
+
+def test_a_judgement_that_already_has_a_result_is_never_re_examined(cfg, plugins):
+    budget.init_log(cfg)
+
+    def boom(*a, **k):
+        raise AssertionError("must not run")
+    outcomes = {"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)}
+    done = judged(cfg, "donchian_atr", outcomes, stub_run(0.003))
+    blocked = judged(cfg, "donchian_atr_wide", outcomes, stub_run(0.003))
+    assert blocked["holdout_status"] == "blocked" and budget.reads_used(cfg) == 1
+    again = attempt_exam(cfg, done["id"], run=boom, end_fn=end_after(200))
+    assert again["holdout_status"] == "passed" and again["holdout_run_id"] == done["holdout_run_id"]
+    again = attempt_exam(cfg, blocked["id"], run=boom, end_fn=end_after(200))
+    assert (again["holdout_status"], again["holdout_reason"]) == ("blocked", "family_examined")
+    assert budget.reads_used(cfg) == 1
 
 
 def _numbers(o):

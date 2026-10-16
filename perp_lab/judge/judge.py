@@ -179,6 +179,9 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     j = db.get_judgement_by_id(cfg, jid)
     if j is None or j["holdout_status"] != "pending":
         return j
+    if plugin_hash(j["strategy"]) != j["strategy_hash"]:
+        db.update_holdout(cfg, jid, "pending", "plugin_changed")   # never exam code that was not judged
+        return finish(cfg, jid)
     child = db.run_row(cfg, j["child_run_id"])
     s = run_summary(child["run_dir"])
     syms, tf = s["universe"], j["timeframe"]
@@ -190,19 +193,27 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
         return finish(cfg, jid)
     try:
         res = run(cfg, j["strategy"], tf, syms, s["sensitivity"]["base_params"], token, end)
+        jc = cfg["judge"]
+        ok, reasons, detail = gates.holdout_consistent(
+            res.portfolio, len(res.trades), oos_portfolio(child["run_dir"]),
+            min_trades=jc["holdout_min_trades"], floor_pct=jc["holdout_floor_pct"],
+            block=jc["bootstrap_block_days"], n_boot=HOLDOUT_BOOT, seed=gates.seed_from(child["run_id"]))
+        hrid = _record_holdout_run(cfg, j, s, res, ok, reasons, detail)
+        db.update_holdout(cfg, jid, "passed" if ok else "failed", "passed" if ok else "failed", hrid)
     except Exception:
         db.update_holdout(cfg, jid, "pending", "exam_error")   # same judgement may retry on the same read
+        finish(cfg, jid)                                        # the verdict file must still exist
         raise
-    jc = cfg["judge"]
-    ok, reasons, detail = gates.holdout_consistent(
-        res.portfolio, len(res.trades), oos_portfolio(child["run_dir"]),
-        min_trades=jc["holdout_min_trades"], floor_pct=jc["holdout_floor_pct"],
-        block=jc["bootstrap_block_days"], n_boot=HOLDOUT_BOOT, seed=gates.seed_from(child["run_id"]))
-    hrid = _record_holdout_run(cfg, j, s, res, ok, reasons, detail)
-    db.update_holdout(cfg, jid, "passed" if ok else "failed", "passed" if ok else "failed", hrid)
     return finish(cfg, jid)
 
 
 def exam_pending(cfg, **kw) -> list[dict]:
-    """Retry every pending exam, oldest first."""
-    return [attempt_exam(cfg, j["id"], **kw) for j in db.pending_judgements(cfg)]
+    """Retry every pending exam, oldest first; one crashing exam never blocks the rest."""
+    out = []
+    for j in db.pending_judgements(cfg):
+        try:
+            out.append(attempt_exam(cfg, j["id"], **kw))
+        except Exception as e:
+            log.exception("exam for judgement %s failed", j["id"])
+            out.append({**finish(cfg, j["id"]), "error": f"{type(e).__name__}: {e}"})
+    return out
