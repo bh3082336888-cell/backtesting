@@ -73,6 +73,9 @@ the dashboard shows judgements and the holdout budget.
    the child's. If none, run the parent's walk-forward first (recorded like any run; it counts
    as a trial).
 6. **Child walk-forward** via `validate_strategy(..., parent_run_id=parent_run, lineage_id=family)`.
+   If the run's `strategy_hash` is not the hash being judged (the plugin was edited during the
+   run), stop with an error (exit 1) before any judgement is recorded:
+   `NAME changed while it was being judged; re-run lab judge`.
 7. **Gates** (section below) on the child. A strategy's *absolute gates* are: walk-forward
    verdict `candidate` and Deflated Sharpe ≥ `dsr_min`. The parent's absolute gates are
    evaluated the same way, with the same N, at the time the child is judged.

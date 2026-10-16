@@ -138,6 +138,8 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
 
     rec, _ = validate(cfg, name, tf, symbols, workers=workers,
                       parent_run_id=parent_row["run_id"] if parent_row else None, lineage_id=family)
+    if rec["strategy_hash"] != h:   # the run measured other code than the version being judged
+        raise RuntimeError(f"{name} changed while it was being judged; re-run lab judge")
     child = db.run_row(cfg, rec["run_id"])
     n, v = db.trial_stats(cfg)
     cr = oos_portfolio(child["run_dir"])

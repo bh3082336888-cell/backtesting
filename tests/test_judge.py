@@ -188,3 +188,15 @@ def test_a_parent_that_fails_the_lookahead_check_is_refused(cfg, plugins):
     with pytest.raises(JudgeRefused, match="parent cheater fails the lookahead check; fix or judge it first"):
         judge(cfg, "honest_child", "4h", validate=v)
     assert v.calls == [] and db.read_table(cfg, db.judgements).empty and db.read_table(cfg, db.runs).empty
+
+
+def test_a_plugin_edited_while_it_is_judged_gets_no_judgement(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("candidate", STRONG)})
+    f = plugins / "donchian_atr.py"
+
+    def editing(cfg, name, *a, **kw):
+        f.write_text(f.read_text() + "\n# edited mid-run\n")
+        return v(cfg, name, *a, **kw)
+    with pytest.raises(RuntimeError, match="donchian_atr changed while it was being judged; re-run lab judge"):
+        judge(cfg, "donchian_atr", "4h", validate=editing)
+    assert v.calls == ["donchian_atr"] and db.read_table(cfg, db.judgements).empty
