@@ -70,9 +70,11 @@ the dashboard shows judgements and the holdout budget.
    cannot be verified and fails the check the same way
    (`defaults: no signals on synthetic data; causality cannot be verified`).
    The check runs twice: on the synthetic bars at their default (2023) dates, and on synthetic
-   bars dated across the holdout start (60 days before it, so the cut points fall about 44 and
-   14 days either side). Lookahead keyed to holdout dates is caught here (reasons prefixed
-   `holdout-dated:`), before any walk-forward or holdout read, without touching holdout data.
+   hourly bars dated from 60 days before the holdout start to 30 days past today, cut every
+   30 days from 45 days before the holdout start. Lookahead keyed to holdout dates is caught
+   here (reasons prefixed `holdout-dated:`), before any walk-forward or holdout read, without
+   touching holdout data. Because the exam window keeps growing after a judgement, the exam
+   step repeats the dated check up to the window's actual end just before the read (see 10).
    The no-signals rule applies only to the default-dated run: a plugin may honestly be quiet
    in the dated span (e.g. a seasonal strategy), and that is not lookahead.
 5. **Parent run.** First the parent must pass the same lookahead check; if it fails, refuse
@@ -114,6 +116,9 @@ the dashboard shows judgements and the holdout budget.
    queued. A failure while superseding still writes the child's
    verdict before the error propagates.
 10. **If promoted**, attempt the exam (see Holdout exam). Outcome sets `holdout_status`.
+    Just before the budget is asked for a read, the dated lookahead check is re-run over
+    `[60 days before holdout_start, exam window end]`; a failure blocks the exam with reason
+    `lookahead` and no read is spent.
 11. **Write the public verdict** and print a summary. The verdict file is written even when
     the exam cannot start (e.g. the holdout log was never initialised) or crashes; the error is
     then re-raised (exit 1).
@@ -231,7 +236,7 @@ New table `judgements` (created by `md.create_all`; no changes to existing colum
 | `reasons` | JSON list |
 | `dsr`, `n_trials`, `sr0` | floats / int |
 | `parent_passed`, `beats_parent_frac` | null when no parent |
-| `holdout_status`, `holdout_reason` | `n/a` for kills; the reason is a fixed code (`awaiting_exam`, `too_short`, `budget_spent`, `family_examined`, `superseded`, `exam_error`, `plugin_changed`, `passed`, `failed`), never a number |
+| `holdout_status`, `holdout_reason` | `n/a` for kills; the reason is a fixed code (`awaiting_exam`, `too_short`, `budget_spent`, `family_examined`, `superseded`, `exam_error`, `plugin_changed`, `lookahead`, `passed`, `failed`), never a number |
 | `holdout_run_id` | FK runs, null until examined |
 | `created_at`, `updated_at` | |
 

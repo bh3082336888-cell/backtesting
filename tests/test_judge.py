@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
@@ -319,3 +320,29 @@ def test_an_honest_seasonal_plugin_is_not_killed_by_the_dated_run(cfg, plugins):
     from perp_lab.strategy import load_strategy_class
     add_plugin(plugins, "seasonal", SEASONAL)
     assert lookahead_failures(cfg, load_strategy_class("seasonal")) == []
+
+
+def date_peek(day: str, parent: bool = True) -> str:
+    text = DATE_PEEK.replace('"2026-07-01"', f'"{day}"')
+    return text if parent else text.replace('PARENT = "donchian_atr"\n', "")
+
+
+TODAY = pd.Timestamp("2026-10-16", tz="UTC")
+
+
+@pytest.mark.parametrize("day", ["2026-07-01", "2026-08-20", "2026-09-10", "2026-11-01"])
+def test_the_dated_check_covers_the_holdout_up_to_a_month_past_today(cfg, plugins, monkeypatch, day):
+    import perp_lab.judge.judge as jm
+    from perp_lab.strategy import load_strategy_class
+    monkeypatch.setattr(jm, "_now", lambda: TODAY, raising=False)
+    add_plugin(plugins, "peek", date_peek(day))
+    fails = lookahead_failures(cfg, load_strategy_class("peek"))
+    assert any(f.startswith("holdout-dated: ") and "features at cut" in f for f in fails)
+
+
+@pytest.mark.parametrize("name", REAL_PLUGINS)
+def test_real_plugins_pass_a_long_dated_window(cfg, name, monkeypatch):
+    from perp_lab.judge.judge import dated_lookahead_failures
+    from perp_lab.strategy import load_strategy_class
+    monkeypatch.setattr("perp_lab.strategy.STRATEGY_DIR", REPO / "strategies")
+    assert dated_lookahead_failures(cfg, load_strategy_class(name), pd.Timestamp("2027-06-30", tz="UTC")) == []

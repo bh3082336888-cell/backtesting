@@ -357,3 +357,18 @@ def test_supersede_does_nothing_when_the_read_record_cannot_be_read(cfg, plugins
     assert child["decision"] == "promote"
     r = db.get_judgement_by_id(cfg, root["id"])
     assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "awaiting_exam")
+
+
+def test_lookahead_after_the_judged_span_blocks_the_exam_before_any_read(cfg, plugins, monkeypatch):
+    # judged on 2026-10-16 the dated check covers to mid-November; the exam window later runs to
+    # 2027-03-08, so the check is repeated over the actual window just before the read is spent
+    import perp_lab.judge.judge as jm
+    from tests.test_judge import date_peek
+    monkeypatch.setattr(jm, "_now", lambda: pd.Timestamp("2026-10-16", tz="UTC"), raising=False)
+    budget.init_log(cfg)
+    add_plugin(plugins, "latepeek", date_peek("2027-02-01", parent=False))
+    j = judged(cfg, "latepeek", {"latepeek": ("candidate", STRONG)}, stub_run(0.003), days=100)
+    assert j["decision"] == "promote" and j["holdout_reason"] == "too_short"
+    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(250))
+    assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "lookahead")
+    assert budget.reads_used(cfg) == 0

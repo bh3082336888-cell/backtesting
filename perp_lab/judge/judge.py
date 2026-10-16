@@ -89,16 +89,38 @@ def resolve_family(cfg, name: str) -> str:
     return fam
 
 
-HOLDOUT_LEAD_DAYS = 60
+DATED_LEAD_DAYS = 60       # dated synthetic bars start this long before the holdout
+DATED_FIRST_CUT_DAYS = 45  # first cut point, before the holdout start
+DATED_CUT_EVERY_DAYS = 30
+DATED_AHEAD_DAYS = 30      # at judge time, cover the holdout up to this far past today
+_HOUR = pd.Timedelta(hours=1)
+
+
+def _now() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC")
+
+
+def dated_lookahead_failures(cfg, cls, until: pd.Timestamp) -> list[str]:
+    """The causality check on synthetic hourly bars dated from DATED_LEAD_DAYS before the holdout
+    start to `until`, cut every DATED_CUT_EVERY_DAYS from DATED_FIRST_CUT_DAYS before the holdout
+    start, so lookahead keyed to any date in that span is seen. No real data. The no-signals rule
+    does not apply: a plugin may honestly be quiet in this span."""
+    start = cfg.holdout_start - pd.Timedelta(days=DATED_LEAD_DAYS)
+    cuts, d = [], cfg.holdout_start - pd.Timedelta(days=DATED_FIRST_CUT_DAYS)
+    while d <= until:
+        cuts.append(int((d - start) / _HOUR))
+        d += pd.Timedelta(days=DATED_CUT_EVERY_DAYS)
+    bars = synthetic_bars(n=int((until - start) / _HOUR) + 24, seed=1, start=str(start.date()))
+    return [f"holdout-dated: {f}"
+            for f in causality_failures(cls, bars, cuts=cuts, require_signals=False)]
 
 
 def lookahead_failures(cfg, cls) -> list[str]:
-    """The causality check twice: on synthetic bars at their default dates, and on synthetic bars
-    dated across the holdout start (cut points about 44 and 14 days either side), so lookahead
-    keyed to holdout dates is caught before any walk-forward or holdout read. No real data."""
-    start = cfg.holdout_start - pd.Timedelta(days=HOLDOUT_LEAD_DAYS)
-    late = causality_failures(cls, synthetic_bars(seed=1, start=str(start.date())), require_signals=False)
-    return list(dict.fromkeys(causality_failures(cls) + [f"holdout-dated: {f}" for f in late]))
+    """The causality check at the synthetic bars' default dates, plus the dated check over the
+    holdout up to DATED_AHEAD_DAYS past today. attempt_exam repeats the dated check over the
+    actual exam window just before the read, so dates after the judged span are covered too."""
+    until = max(_now(), cfg.holdout_start) + pd.Timedelta(days=DATED_AHEAD_DAYS)
+    return list(dict.fromkeys(causality_failures(cls) + dated_lookahead_failures(cfg, cls, until)))
 
 
 def supersede(cfg, parent: str, tf: str, family: str) -> None:
@@ -271,6 +293,9 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     syms, tf = s["universe"], j["timeframe"]
     end = end_fn(cfg, syms, tf)
     days = max(0, (end - cfg.holdout_start).days)
+    if dated_lookahead_failures(cfg, load_strategy_class(j["strategy"]), end):
+        db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
+        return finish(cfg, jid)
     chk, token = budget.mint(cfg, j["lineage_id"], jid, days)
     if token is None:
         db.update_holdout(cfg, jid, chk.status, chk.code)
