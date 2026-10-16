@@ -9,6 +9,7 @@ from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, judge, lookahead_fa
 from perp_lab.store import db
 from tests.judge_fixtures import (CHEATER, NOISE, STRONG, WEAK, WIDE_TEXT, StubValidate, add_plugin,
                                   plugins, series)  # noqa: F401
+from tests.conftest import REAL_PLUGINS, REPO
 from tests.test_store import cfg  # noqa: F401
 
 
@@ -248,14 +249,6 @@ def test_lookahead_keyed_to_holdout_dates_is_caught_before_any_run(cfg, plugins)
     assert j["decision"] == "kill" and j["child_run_id"] is None and v.calls == []
     assert any(r.startswith("lookahead: holdout-dated: ") for r in j["reasons"])
     assert not any(r.startswith("lookahead: defaults") for r in j["reasons"])   # honest on 2023 dates
-
-
-REPO = Path(__file__).resolve().parents[1]
-REAL_PLUGINS = sorted(p.stem for p in (REPO / "strategies").glob("*.py") if not p.stem.startswith("_"))
-
-
-def test_real_plugins_are_found():
-    assert {"donchian_atr", "donchian_atr_wide", "bb_vwap_reversion", "funding_fade"} <= set(REAL_PLUGINS)
 
 
 @pytest.mark.parametrize("name", REAL_PLUGINS)

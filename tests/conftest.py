@@ -11,6 +11,11 @@ from perp_lab.validate.causality import synthetic_bars as make_bars  # noqa: F40
 
 H = 3_600_000
 
+# The repo's real plugins, found from this file rather than the working directory, so a test
+# run from elsewhere fails loudly instead of collecting an empty parameter set.
+REPO = Path(__file__).resolve().parents[1]
+REAL_PLUGINS = sorted(p.stem for p in (REPO / "strategies").glob("*.py") if not p.stem.startswith("_"))
+
 
 def flat_bars(n=50, price=100.0, tf_ms=H, start="2023-01-01"):
     t0 = int(pd.Timestamp(start, tz="UTC").value // 10**6)
