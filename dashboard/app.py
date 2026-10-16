@@ -324,9 +324,13 @@ def judgement_section(rid):
     for x in j["reasons"]:
         st.markdown(f"- {x}")
     if j["holdout_run_id"]:
-        h = all_runs().set_index("run_id").loc[j["holdout_run_id"]]
-        st.caption(f"Holdout {h.date_start} → {h.date_end}: Sharpe {fmt2(h.sharpe)}, "
-                   f"return {fmt_pct(h.total_return)}, {int(h.trades or 0)} trades (shown to you, never to the proposer)")
+        h = db.run_row(CFG, j["holdout_run_id"])  # uncached: the exam run may be newer than the cache
+        if h is None:
+            st.caption(f"Holdout run {j['holdout_run_id']} not found in the store.")
+        else:
+            trades = int(h["trades"]) if h["trades"] is not None and pd.notna(h["trades"]) else 0
+            st.caption(f"Holdout {h['date_start']} → {h['date_end']}: Sharpe {fmt2(h['sharpe'])}, "
+                       f"return {fmt_pct(h['total_return'])}, {trades} trades (shown to you, never to the proposer)")
 
 
 def paper_section(r, rid, status):

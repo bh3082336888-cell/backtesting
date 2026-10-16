@@ -65,6 +65,23 @@ def test_judgement_panel_shows_holdout_details_to_the_human(populated):
     assert any("Holdout 2024-01-01" in c.value for c in at.caption)
 
 
+def test_judgement_panel_survives_a_missing_holdout_run(populated):
+    _judge_c1(populated, "passed", "passed", holdout_run_id="ghost")
+    at = _detail("alpha_child @ 4h")
+    assert not at.exception, [e.message for e in at.exception]
+    assert any("not found" in c.value for c in at.caption)
+
+
+def test_judgement_panel_survives_a_holdout_run_without_trades(populated):
+    fake_run(populated, "h2", strategy="alpha_child", mode="holdout", verdict="failed")
+    with db.engine(populated).begin() as c:
+        c.execute(db.runs.update().where(db.runs.c.run_id == "h2").values(trades=None))
+    _judge_c1(populated, "failed", "failed", holdout_run_id="h2")
+    at = _detail("alpha_child @ 4h")
+    assert not at.exception, [e.message for e in at.exception]
+    assert any("0 trades" in c.value for c in at.caption)
+
+
 def test_sidebar_shows_the_holdout_budget(populated):
     at = AppTest.from_file("../dashboard/app.py", default_timeout=60)
     at.run()
