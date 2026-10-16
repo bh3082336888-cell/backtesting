@@ -325,3 +325,35 @@ def test_a_plugin_edited_mid_walk_forward_is_not_recorded(tmp_path, plugins, fre
     with pytest.raises(RuntimeError, match="donchian_atr changed during its walk-forward"):
         pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
     assert db.read_table(cfg, db.runs).empty
+
+
+class Interrupted(BaseException):
+    """Stands in for Ctrl-C / a killed process: not an Exception, so no handler records exam_error."""
+
+
+def test_a_parent_holding_a_read_is_never_superseded_even_after_an_interrupt(cfg, plugins):
+    # the audit log, not the reason code, says whether the parent holds the family's read
+    budget.init_log(cfg)
+
+    def interrupted(*a, **kw):
+        raise Interrupted
+
+    with pytest.raises(Interrupted):
+        judged(cfg, "donchian_atr", FAMILY, interrupted)
+    root = db.pending_judgements(cfg)[0]
+    assert root["holdout_reason"] == "awaiting_exam" and budget.reads_used(cfg) == 1
+    child = judged(cfg, "donchian_atr_wide", FAMILY, stub_run(0.003))
+    assert child["decision"] == "promote"
+    r = db.get_judgement_by_id(cfg, root["id"])
+    assert r["holdout_status"] == "pending"
+    done = {j["id"]: j for j in exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))}
+    assert done[root["id"]]["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_supersede_does_nothing_when_the_read_record_cannot_be_read(cfg, plugins):
+    # no holdout log: whether the parent holds a read is unknown, so leave it queued
+    root = judge(cfg, "donchian_atr", "4h", validate=StubValidate(FAMILY))
+    child = judge(cfg, "donchian_atr_wide", "4h", validate=StubValidate(FAMILY))
+    assert child["decision"] == "promote"
+    r = db.get_judgement_by_id(cfg, root["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "awaiting_exam")

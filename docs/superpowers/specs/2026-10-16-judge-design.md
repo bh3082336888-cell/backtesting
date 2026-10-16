@@ -106,8 +106,10 @@ the dashboard shows judgements and the holdout budget.
    and its verdict is rewritten: a promoted child either beat its passing parent or its
    parent did not pass, so the parent's queued exam must not spend the family's single read.
    Only a parent judgement in the child's own family is superseded (a re-pointed PARENT must
-   not cancel another family's exam), and never one at `pending`/`exam_error`: it already holds
-   the family's read and retries on it. A failure while superseding still writes the child's
+   not cancel another family's exam), and never one that already holds the family's read
+   according to the audit log (`budget.holds_read`: its exam crashed, was interrupted, or later
+   waited as `plugin_changed`); it retries on that read. If the log can't be read, it is left
+   queued. A failure while superseding still writes the child's
    verdict before the error propagates.
 10. **If promoted**, attempt the exam (see Holdout exam). Outcome sets `holdout_status`.
 11. **Write the public verdict** and print a summary. The verdict file is written even when

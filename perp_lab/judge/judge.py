@@ -105,13 +105,19 @@ def supersede(cfg, parent: str, tf: str, family: str) -> None:
     """A promoted child either beat its passing parent or its parent did not pass, so the
     parent's queued exam must not spend the family's single read: block it as superseded.
     Only within the child's own family (a re-pointed PARENT must not cancel another family's
-    exam), and never a parent whose exam crashed after its read (exam_error): it already holds
-    the family's read and retries on it."""
+    exam), and never a parent that already holds the family's read according to the audit log
+    (an exam that crashed, was interrupted or later waited as plugin_changed): it retries on that
+    read. If the log can't be read, whether it holds a read is unknown, so it is left queued."""
     pj = db.get_judgement(cfg, plugin_hash(parent), tf)
-    if (pj is not None and pj["holdout_status"] == "pending" and pj["lineage_id"] == family
-            and pj["holdout_reason"] != "exam_error"):
-        db.update_holdout(cfg, pj["id"], "blocked", "superseded")
-        finish(cfg, pj["id"])
+    if pj is None or pj["holdout_status"] != "pending" or pj["lineage_id"] != family:
+        return
+    try:
+        if budget.holds_read(cfg, pj["id"], pj["lineage_id"]):
+            return
+    except budget.BudgetLogError:
+        return
+    db.update_holdout(cfg, pj["id"], "blocked", "superseded")
+    finish(cfg, pj["id"])
 
 
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
