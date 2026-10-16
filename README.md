@@ -59,14 +59,20 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 
 - A plugin names its parent with a module-level `PARENT = "name"`; without one it starts a family.
 - A family is `"family:<root plugin name>"`, found by walking PARENT links, so a whole PARENT chain
-  (e.g. `donchian_atr` and `donchian_atr_wide`) shares one family and therefore one holdout read. Parent runs
-  are reused only within the family, so the first `lab judge donchian_atr_wide` re-runs the parent once under
-  the family rather than reusing an older plain run.
-- Gates: the walk-forward verdict, a **Deflated Sharpe ≥ 0.95** with N = distinct plugin versions
-  store-wide, and, against a parent that passed, beating it in ≥ 95% of paired block-bootstrap resamples.
+  (e.g. `donchian_atr` and `donchian_atr_wide`) shares one family and therefore one holdout read. A plugin
+  that was already judged keeps its family, so deleting its PARENT line later doesn't start a new one. Parent
+  runs are reused only within the family, so the first `lab judge donchian_atr_wide` re-runs the parent once
+  under the family rather than reusing an older plain run.
+- The lookahead check runs at judge time on the plugin and on its parent (a cheating parent is refused),
+  on synthetic bars in which every column moves; a plugin that never signals there is killed as unverifiable.
+- Gates: the walk-forward verdict, a **Deflated Sharpe ≥ 0.95** with N = distinct (plugin version,
+  timeframe) pairs among walk-forward runs store-wide, and, against a parent that passed, beating it in ≥ 95%
+  of paired block-bootstrap resamples.
 - A promoted plugin gets **one holdout exam per family**, under a global cap of 10 reads, and only
-  once the holdout has 180 days of complete data (from about 2026-12-28). The exam runs frozen params and must be
-  positive and no worse than the walk-forward record's p5 for that length.
+  once the holdout has 180 days of complete data (from about 2026-12-28). The exam runs frozen params and must
+  make ≥ 10 holdout trades, be positive, and be no worse than the walk-forward record's p5 for that length.
+- When a child is promoted, its parent's exam, if still pending, is blocked with reason `superseded`, so the
+  family's one read goes to its best member.
 - If a plugin file is edited after it was judged, its pending exam waits with holdout status `pending` and
   reason `plugin_changed` (no read is spent) until the judged version is restored; an edited plugin is a new
   version and is judged separately.
@@ -86,9 +92,9 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 | Entry rejected if liquidation price sits inside the stop | engine step 4 |
 | OOS is the headline; IS is shown greyed and labelled | `validate/pipeline.py` report |
 | A strategy must beat random-entry (same exits, matched frequency) p95 OOS | `validate/benchmarks.py` |
-| Only the budget can unlock the holdout; one read per family, 10 in total, after 180 days | `judge/budget.py`, `tests/test_budget.py` |
+| Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days (plugin code is not sandboxed yet, so this assumes honest plugins) | `judge/budget.py`, `tests/test_budget.py` |
 | Paper approval needs a passed holdout exam | `store/db.py::approve_paper`, `tests/test_store.py` |
-| Harness lineage edges can't be overwritten by hand | `store/db.py::add_edge` |
+| Harness lineage edges can't be overwritten by hand, nor a harness-judged run re-parented | `store/db.py::add_edge` |
 | Verdicts never carry holdout numbers | `judge/judge.py::write_verdict`, `tests/test_judge_exam.py` |
 
 ## Modelling choices (and their bias)

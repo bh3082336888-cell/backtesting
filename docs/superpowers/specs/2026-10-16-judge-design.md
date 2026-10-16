@@ -13,6 +13,8 @@ still approves paper in the dashboard. Nothing sets `live`.
 
 The harness is the judge: nothing a strategy or a proposer does can influence scoring.
 Safety-critical rules (holdout access, budget, gates) are enforced in code, not prompts.
+Until plugins run in a sandbox (a Phase 3b requirement, at the end), that guarantee holds for
+honest plugin code only: a plugin runs in the judge's process.
 
 ## Decisions
 
@@ -216,7 +218,9 @@ New table `judgements` (created by `md.create_all`; no changes to existing colum
 
 ## Dashboard
 
-- Sidebar: `holdout reads: used / cap` and the date the exam window reaches `min_holdout_days`.
+- Sidebar: `holdout reads: used / cap` and the **earliest exam date** (`holdout_start` +
+  `min_holdout_days`). Funding data arrives a month at a time, so the exam window can reach
+  `min_holdout_days` a few days later than that.
 - Strategy detail: judgement panel (decision, reasons, DSR / N / SR0, parent comparison,
   holdout status and, for the human, holdout metrics). The approve button is disabled with
   the reason when the paper gate isn't met.
@@ -264,7 +268,13 @@ Each test is written first and seen failing.
 - **Paper gate:** candidate with holdout `pending` / `failed` / `blocked` refused; `passed` accepted.
 - **Verdict:** a verdict for an examined judgement contains no key or value derived from the
   holdout run (checked against the holdout run's metric values).
-- **Family identity:** re-judging a root on another timeframe keeps its `lineage_id`.
+- **Family identity:** re-judging a root on another timeframe keeps its `lineage_id`; a judged
+  child whose `PARENT` line is removed keeps its family, and so does its descendant.
+- **Lookahead:** a plugin peeking at the next bar of any exchange column (e.g. `oi.shift(-1)`) is
+  reported; a plugin that never signals is reported as unverifiable; every real plugin passes;
+  a child whose parent fails the check is refused.
+- **Superseded:** a promoted child blocks its pending parent (`superseded`) and the family's
+  read goes to the child; a killed child leaves the parent queued.
 - **Edges:** `lab link` refuses to overwrite a harness edge; a human edge cannot re-parent a
   child run the harness judged.
 - **End to end** on small synthetic data (temp config and store): a kill with reasons; a
@@ -283,3 +293,11 @@ Each test is written first and seen failing.
   the holdout log, and never imports `perp_lab.judge` or `perp_lab.holdout`.
 - The proposer submits work only by writing a plugin to `strategies/` and invoking `lab judge`
   as a subprocess.
+- Plugin code, proposer-written or not, is untrusted: it must run in a sandboxed subprocess
+  with no filesystem or network access, receiving only the bars it is given.
+- The proposer has no read access to `data/` (it holds the holdout prices).
+- The proposer sees only `lab judge`'s exit code and the verdict file, never its stdout or
+  stderr.
+- Until that sandbox exists, the "nothing a strategy does can influence scoring" guarantee
+  holds only for honest plugins: a plugin running in the judge's process could read `data/`
+  directly or forge an unlogged token via `_MINT_KEY`.

@@ -90,3 +90,4 @@ def test_sidebar_shows_the_holdout_budget(populated):
     at = AppTest.from_file("../dashboard/app.py", default_timeout=60)
     at.run()
     assert any("holdout reads: 0/10" in c.value for c in at.sidebar.caption)
+    assert any("earliest exam date: 2026-12-28" in c.value for c in at.sidebar.caption)

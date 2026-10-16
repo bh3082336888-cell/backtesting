@@ -486,7 +486,8 @@ def holdout_caption() -> str:
         used = f"{reads_used(CFG)}/{jc.get('holdout_max_reads')}"
     except BudgetLogError:
         used = "log not initialised (`lab holdout-init`)"
-    return f"holdout reads: {used}  \nexams open from {opens}"
+    return (f"holdout reads: {used}  \nearliest exam date: {opens} (funding data arrives a month "
+            "at a time, so it can be a few days later)")
 
 
 st.sidebar.caption(f"store: {CFG.get('store', {}).get('url')}  \nholdout from {CFG.holdout_start.date()} (locked)")
