@@ -59,8 +59,9 @@ the dashboard shows judgements and the holdout budget.
 4. **Lookahead check** with `causality.assert_causal` on the default params and every grid
    corner. Failure → judgement `kill`, reason `lookahead`, no walk-forward run, not a trial.
 5. **Parent run.** The latest walk-forward run of the parent at the child's timeframe whose
-   `strategy_hash` equals the parent's current `plugin_hash`. If none, run the parent's
-   walk-forward first (recorded like any run; it counts as a trial).
+   `strategy_hash` equals the parent's current `plugin_hash` and whose symbol universe equals
+   the child's. If none, run the parent's walk-forward first (recorded like any run; it counts
+   as a trial).
 6. **Child walk-forward** via `validate_strategy(..., parent_run_id=parent_run, lineage_id=family)`.
 7. **Gates** (section below) on the child. A strategy's *absolute gates* are: walk-forward
    verdict `candidate` and Deflated Sharpe ≥ `dsr_min`. The parent's absolute gates are
@@ -132,6 +133,8 @@ Too few trades is a fail ("not enough evidence"); the read is spent either way.
   Measured on complete data, not the calendar; 180 calendar days is 2026-12-28.
 - **Order of checks:** length → cap → family. Outcomes: `pending: holdout too short`,
   `blocked: budget spent`, `blocked: family already examined`, or mint.
+- **Initialisation:** `lab holdout-init` creates the empty log once and refuses if it already
+  exists, so the record of reads is never reset.
 - **Fail closed:** missing, unreadable or malformed log → refuse with an error, never assume
   zero reads.
 - **Concurrency:** count-and-mint happens under an exclusive file lock
@@ -178,7 +181,7 @@ New table `judgements` (created by `md.create_all`; no changes to existing colum
 | `reasons` | JSON list |
 | `dsr`, `n_trials`, `sr0` | floats / int |
 | `parent_passed`, `beats_parent_frac` | null when no parent |
-| `holdout_status`, `holdout_reason` | `n/a` for kills |
+| `holdout_status`, `holdout_reason` | `n/a` for kills; the reason is a fixed code (`awaiting_exam`, `too_short`, `budget_spent`, `family_examined`, `exam_error`, `passed`, `failed`), never a number |
 | `holdout_run_id` | FK runs, null until examined |
 | `created_at`, `updated_at` | |
 
@@ -213,6 +216,7 @@ judge:
 - `lab judge STRATEGY --tf TF [--symbols] [--workers]`: exit 0 judged (promote or kill,
   including the idempotent re-print), 2 refused by a pre-check, 1 error.
 - `lab exam`: retry pending exams; prints each outcome.
+- `lab holdout-init`: create the empty holdout log, once.
 - `lab link`: unchanged for human edges, but refuses to overwrite a harness edge.
 
 ## Testing
@@ -220,8 +224,9 @@ judge:
 Each test is written first and seen failing.
 
 - **Gates:** literal expected values on hand-built series, including the DSR reference value
-  above; SR0 = 0 at N = 1; beats-parent on identical series ≈ 0.5 and on a dominating child
-  ≥ 0.95; holdout fails on < 10 trades, on negative Sharpe, and below the bootstrap floor.
+  above; SR0 = 0 at N = 1; beats-parent scores 0 on identical series (ties are not wins) and
+  1 for a child with the same spread and a higher mean; holdout fails on < 10 trades, on
+  negative Sharpe, and below the bootstrap floor.
 - **Budget:** cap reached; second family read refused; same-judgement retry allowed; missing
   and corrupt log refuse; two threads racing for the last read → exactly one mint; minimum
   length → pending.
