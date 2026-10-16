@@ -259,3 +259,51 @@ def test_end_to_end_real_walk_forward_on_a_synthetic_market(tmp_path, plugins, f
     assert j["decision"] in {"promote", "kill"} and j["n_trials"] == 1
     assert j["holdout_status"] == "n/a" if j["decision"] == "kill" else j["holdout_status"] in {"passed", "failed"}
     assert set(json.loads(Path(j["verdict_path"]).read_text())) == VERDICT_KEYS
+
+
+def test_a_parent_whose_exam_crashed_is_not_superseded(cfg, plugins):
+    # the crashed parent already holds the family's read; superseding it would spend that read
+    # on nothing, so it stays pending (exam_error) and retries on the same read
+    budget.init_log(cfg)
+    with pytest.raises(RuntimeError, match="exam crashed"):
+        judged(cfg, "donchian_atr", FAMILY, stub_run(0.003, fail=True))
+    root = db.pending_judgements(cfg)[0]
+    child = judged(cfg, "donchian_atr_wide", FAMILY, stub_run(0.003))
+    assert child["decision"] == "promote"
+    r = db.get_judgement_by_id(cfg, root["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error")
+    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    assert done["id"] == root["id"] and done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_a_parent_judged_in_another_family_is_not_superseded(cfg, plugins):
+    # "kid" was first judged as a root (family:kid); a later version names rootb as its PARENT
+    # but keeps family:kid, so promoting it must not cancel family:rootb's queued exam
+    budget.init_log(cfg)
+    root_text = WIDE_TEXT.replace('PARENT = "donchian_atr"\n', "")
+    add_plugin(plugins, "rootb", root_text + "# rootb\n")
+    add_plugin(plugins, "kid", root_text + "# kid v1\n")
+    outcomes = {"rootb": ("candidate", STRONG), "kid": ("candidate", STRONG + 0.0005)}
+    rb = judged(cfg, "rootb", outcomes, stub_run(0.003), days=100)
+    judged(cfg, "kid", outcomes, stub_run(0.003), days=100)
+    add_plugin(plugins, "kid", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "rootb"') + "# kid v2\n")
+    kid2 = judged(cfg, "kid", outcomes, stub_run(0.003), days=100)
+    assert kid2["decision"] == "promote" and kid2["lineage_id"] == "family:kid"
+    r = db.get_judgement_by_id(cfg, rb["id"])
+    assert r["lineage_id"] == "family:rootb"
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "too_short")
+
+
+def test_a_failed_supersede_still_writes_the_childs_verdict(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    budget.init_log(cfg)
+    judged(cfg, "donchian_atr", FAMILY, stub_run(0.003), days=100)
+
+    def boom(*a, **kw):
+        raise RuntimeError("supersede failed")
+
+    monkeypatch.setattr(jm, "supersede", boom)
+    with pytest.raises(RuntimeError, match="supersede failed"):
+        judged(cfg, "donchian_atr_wide", FAMILY, stub_run(0.003), days=100)
+    j = [x for x in db.pending_judgements(cfg) if x["strategy"] == "donchian_atr_wide"][0]
+    assert verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"]).exists()

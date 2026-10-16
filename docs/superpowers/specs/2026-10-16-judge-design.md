@@ -95,6 +95,10 @@ the dashboard shows judgements and the holdout budget.
    `holdout_status` is `pending`, that judgement becomes `blocked` with reason `superseded`
    and its verdict is rewritten: a promoted child either beat its passing parent or its
    parent did not pass, so the parent's queued exam must not spend the family's single read.
+   Only a parent judgement in the child's own family is superseded (a re-pointed PARENT must
+   not cancel another family's exam), and never one at `pending`/`exam_error`: it already holds
+   the family's read and retries on it. A failure while superseding still writes the child's
+   verdict before the error propagates.
 10. **If promoted**, attempt the exam (see Holdout exam). Outcome sets `holdout_status`.
 11. **Write the public verdict** and print a summary. The verdict file is written even when
     the exam cannot start (e.g. the holdout log was never initialised) or crashes; the error is

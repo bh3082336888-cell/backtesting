@@ -89,11 +89,15 @@ def resolve_family(cfg, name: str) -> str:
     return fam
 
 
-def supersede(cfg, parent: str, tf: str) -> None:
+def supersede(cfg, parent: str, tf: str, family: str) -> None:
     """A promoted child either beat its passing parent or its parent did not pass, so the
-    parent's queued exam must not spend the family's single read: block it as superseded."""
+    parent's queued exam must not spend the family's single read: block it as superseded.
+    Only within the child's own family (a re-pointed PARENT must not cancel another family's
+    exam), and never a parent whose exam crashed after its read (exam_error): it already holds
+    the family's read and retries on it."""
     pj = db.get_judgement(cfg, plugin_hash(parent), tf)
-    if pj is not None and pj["holdout_status"] == "pending":
+    if (pj is not None and pj["holdout_status"] == "pending" and pj["lineage_id"] == family
+            and pj["holdout_reason"] != "exam_error"):
         db.update_holdout(cfg, pj["id"], "blocked", "superseded")
         finish(cfg, pj["id"])
 
@@ -171,13 +175,14 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if parent_row is not None:
         db.add_edge(cfg, parent_row["run_id"], child["run_id"], decision,
                     "; ".join(reasons) or "passed every gate", decided_by="harness")
-    if decision == "promote" and parent is not None:
-        supersede(cfg, parent, tf)
-    if decision == "promote" and attempt is not None:
+    if decision == "promote":
         try:
-            attempt(cfg, jid)
+            if parent is not None:
+                supersede(cfg, parent, tf, family)
+            if attempt is not None:
+                attempt(cfg, jid)
         except Exception:
-            finish(cfg, jid)   # the verdict file must exist even when the exam could not start
+            finish(cfg, jid)   # the verdict file must exist even when this step fails
             raise
     return finish(cfg, jid)
 
