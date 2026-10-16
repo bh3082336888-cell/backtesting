@@ -12,7 +12,7 @@ lab tail                              # ccxt: stitch parquet → now
 lab strategies                        # plugins + hypotheses
 lab walkforward donchian_atr --tf 4h  # OOS walk-forward + full validation → ./runs/<id>/report.md
 lab backtest donchian_atr --tf 4h     # single fixed-param run (IN-SAMPLE, labelled as such)
-lab dashboard                         # Streamlit: strategies, detail, pairs, lineage
+lab dashboard                         # Streamlit on localhost: strategies, detail, pairs, lineage (--address 0.0.0.0 to expose)
 lab ingest                            # record any run dir not yet in the store
 lab link PARENT_RUN CHILD_RUN --decision kill --reason "..."   # hand-made lineage edge
 lab paper RUN_ID                      # only runs approved for paper in the dashboard
