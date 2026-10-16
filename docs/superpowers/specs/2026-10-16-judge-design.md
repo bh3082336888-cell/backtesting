@@ -66,7 +66,9 @@ the dashboard shows judgements and the holdout budget.
    peek at any column is seen. A plugin whose default params emit no signal on those bars
    cannot be verified and fails the check the same way
    (`defaults: no signals on synthetic data; causality cannot be verified`).
-5. **Parent run.** The latest walk-forward run of the parent at the child's timeframe whose
+5. **Parent run.** First the parent must pass the same lookahead check; if it fails, refuse
+   (exit code 2, nothing recorded): `parent P fails the lookahead check; fix or judge it
+   first`. Then: the latest walk-forward run of the parent at the child's timeframe whose
    `strategy_hash` equals the parent's current `plugin_hash` and whose symbol universe equals
    the child's. If none, run the parent's walk-forward first (recorded like any run; it counts
    as a trial).

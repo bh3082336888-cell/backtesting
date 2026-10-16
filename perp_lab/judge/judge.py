@@ -1,7 +1,7 @@
 """The judge: promote or kill a strategy plugin against its parent, with no human involved.
 
 Spec: docs/superpowers/specs/2026-10-16-judge-design.md. Flow: pre-checks -> idempotency ->
-lookahead -> parent run -> child walk-forward -> gates -> decision -> judgement + lineage edge ->
+lookahead (the child's, then the parent's) -> parent run -> child walk-forward -> gates -> decision -> judgement + lineage edge ->
 (a promotion supersedes its parent's pending exam) -> (optional holdout exam via `attempt`) ->
 public verdict.
 """
@@ -123,6 +123,9 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
             "parent_run_id": None, "lineage_id": family, "decision": "kill",
             "reasons": [f"lookahead: {f}" for f in fails], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
+
+    if parent is not None and causality_failures(load_strategy_class(parent)):
+        raise JudgeRefused(f"parent {parent} fails the lookahead check; fix or judge it first")
 
     universe = symbols or cfg.symbols
     parent_row = None

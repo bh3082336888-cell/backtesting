@@ -179,3 +179,12 @@ def test_a_judged_child_keeps_its_family_when_its_parent_line_is_removed(cfg, pl
     add_plugin(plugins, "grandchild", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "donchian_atr_wide"')
                + "# grandchild variant\n")
     assert judge(cfg, "grandchild", "4h", validate=v)["lineage_id"] == "family:donchian_atr"
+
+
+def test_a_parent_that_fails_the_lookahead_check_is_refused(cfg, plugins):
+    add_plugin(plugins, "cheater", CHEATER)
+    add_plugin(plugins, "honest_child", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "cheater"'))
+    v = StubValidate({"cheater": ("candidate", STRONG), "honest_child": ("candidate", STRONG)})
+    with pytest.raises(JudgeRefused, match="parent cheater fails the lookahead check; fix or judge it first"):
+        judge(cfg, "honest_child", "4h", validate=v)
+    assert v.calls == [] and db.read_table(cfg, db.judgements).empty and db.read_table(cfg, db.runs).empty
