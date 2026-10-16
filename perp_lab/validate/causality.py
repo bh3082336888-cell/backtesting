@@ -3,6 +3,10 @@
 For several cut points k: features computed on bars[:k] must equal features computed on
 the full series for rows < k, and the engine must emit identical signals for bars < k-1.
 Any use of future data breaks one of the two.
+
+At judge time every column a plugin can read moves (a peek at an all-NaN or constant column
+would go unseen), and a plugin that never signals is reported, since the check proves nothing
+about it.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ def synthetic_bars(n=3000, seed=0, start="2023-01-01", funding_every=8, tf_ms=H)
 
 
 def assert_causal(strat_factory, bars):
+    """Raises AssertionError on a lookahead; returns the full-series run (with its signals)."""
     full = strat_factory()
     f_full = full.prepare(bars)
     assert f_full.index.equals(bars.index), "prepare() must return features on the bars index"
@@ -59,20 +64,53 @@ def assert_causal(strat_factory, bars):
         a = [x for x in r_full.signals if x[0] < k - 1]
         b = [x for x in r_cut.signals if x[0] < k - 1]
         assert a == b, f"signals diverge before cut {k}"
+    return r_full
+
+
+EXTRAS_SEED = 7
+NO_SIGNALS = "defaults: no signals on synthetic data; causality cannot be verified"
+
+
+def with_moving_columns(bars: pd.DataFrame, seed: int = EXTRAS_SEED) -> pd.DataFrame:
+    """A copy of bars in which each exchange column that is missing, all-NaN or constant gets
+    seeded, non-constant values. Each value at row t depends only on rows <= t."""
+    out = bars.copy()
+    n = len(out)
+    rng = np.random.default_rng(seed)
+    close = out["close"].to_numpy(dtype=float)
+    volume = out["volume"].to_numpy(dtype=float)
+    oi = 1e6 * np.exp(np.cumsum(rng.normal(0, 0.01, n)))
+    taker = volume * rng.uniform(0.3, 0.7, n)
+    fills = {
+        "oi": oi, "oi_value": oi * close,
+        "quote_volume": volume * close, "trades": rng.integers(50, 5000, n).astype(float),
+        "taker_buy_volume": taker, "taker_buy_quote_volume": taker * close,
+        "regime_adx": np.clip(25 + np.cumsum(rng.normal(0, 1, n)), 5, 80),
+        "funding_interval_h": np.where((np.arange(n) // 500) % 2 == 0, 8.0, 4.0),
+    }
+    for c, v in fills.items():
+        if c not in out or out[c].nunique() <= 1:
+            out[c] = v
+    return out
 
 
 def causality_failures(cls, bars: pd.DataFrame | None = None) -> list[str]:
     """assert_causal on the default params and every grid corner; one line per failing variant.
 
-    A crash on synthetic data disqualifies a plugin as surely as a peek at the future."""
-    bars = synthetic_bars(seed=1) if bars is None else bars
+    Runs on a copy of the bars in which every column moves. A crash on synthetic data
+    disqualifies a plugin as surely as a peek at the future, and so does never signalling
+    with its default params: then nothing about its causality is verified."""
+    bars = with_moving_columns(synthetic_bars(seed=1) if bars is None else bars)
     variants = [{}] + [{k: v} for k, vals in cls.grid.items() for v in (vals[0], vals[-1])]
     out = []
     for kw in variants:
         try:
-            assert_causal(lambda: cls(**kw), bars)
+            r = assert_causal(lambda: cls(**kw), bars)
         except Exception as e:
             label = ", ".join(f"{k}={v}" for k, v in kw.items()) or "defaults"
             msg = str(e).splitlines()[0] if str(e) else ""
             out.append(f"{label}: {type(e).__name__}: {msg}" if msg else f"{label}: {type(e).__name__}")
+            continue
+        if not kw and not r.signals:
+            out.append(NO_SIGNALS)
     return out

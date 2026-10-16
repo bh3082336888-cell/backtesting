@@ -60,6 +60,12 @@ the dashboard shows judgements and the holdout budget.
    original's judgement.
 4. **Lookahead check** with `causality.assert_causal` on the default params and every grid
    corner. Failure → judgement `kill`, reason `lookahead`, no walk-forward run, not a trial.
+   The synthetic bars first get seeded, causal, non-constant values in every column the
+   generator leaves NaN or constant (`oi`, `oi_value`, `quote_volume`, `trades`,
+   `taker_buy_volume`, `taker_buy_quote_volume`, `regime_adx`, `funding_interval_h`), so a
+   peek at any column is seen. A plugin whose default params emit no signal on those bars
+   cannot be verified and fails the check the same way
+   (`defaults: no signals on synthetic data; causality cannot be verified`).
 5. **Parent run.** The latest walk-forward run of the parent at the child's timeframe whose
    `strategy_hash` equals the parent's current `plugin_hash` and whose symbol universe equals
    the child's. If none, run the parent's walk-forward first (recorded like any run; it counts
