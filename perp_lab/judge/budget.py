@@ -1,8 +1,10 @@
 """Holdout budget: the only code allowed to unlock the holdout.
 
 The audit log written by issue_holdout_token is the record of reads. One read = one distinct
-judgement_id (entries without one count by nonce). Under an exclusive file lock: a judgement
-that already holds a read may retry (its result was never published); otherwise the exam
+judgement_id (entries without one count by nonce). judgement_id must be an int (not None, not
+a bool). Under an exclusive file lock: a judgement that already holds a read may retry (its
+result was never published) only for the same lineage_id; a judgement_id logged under another
+lineage is not a retry and meets every rule below. Otherwise the exam
 window must be at least min_holdout_days, total reads stay under holdout_max_reads, and each
 family gets one read. A missing or malformed log refuses; it never means "zero reads".
 """
@@ -67,8 +69,10 @@ def reads_used(cfg) -> int:
 
 
 def check(cfg, entries: list[dict], lineage_id: str, judgement_id: int, window_days: int) -> BudgetCheck:
+    if not isinstance(judgement_id, int) or isinstance(judgement_id, bool):
+        raise TypeError(f"judgement_id must be an int, got {judgement_id!r}")
     jc = cfg["judge"]
-    if any(e.get("judgement_id") == judgement_id for e in entries):
+    if any(e.get("judgement_id") == judgement_id and e["lineage_id"] == lineage_id for e in entries):
         return BudgetCheck("mint", "retry")
     if window_days < jc["min_holdout_days"]:
         return BudgetCheck("pending", "too_short")

@@ -60,6 +60,28 @@ def test_the_same_judgement_may_retry_without_a_new_read(cfg):
     assert budget.reads_used(cfg) == 1
 
 
+def test_a_judgement_id_must_be_an_int(cfg):
+    p = budget.init_log(cfg)
+    for bad in (None, True):
+        with pytest.raises(TypeError, match="judgement_id must be an int"):
+            budget.mint(cfg, "fam", bad, 200)
+    assert p.read_text() == ""
+
+
+def test_a_reused_judgement_id_in_another_family_is_not_a_retry(cfg):
+    cfg.raw["judge"]["holdout_max_reads"] = 1
+    budget.init_log(cfg)
+    assert budget.mint(cfg, "a", 1, 200)[0] == BudgetCheck("mint", "ok")
+    assert budget.mint(cfg, "b", 1, 200) == (BudgetCheck("blocked", "budget_spent"), None)
+    assert budget.reads_used(cfg) == 1
+
+
+def test_a_reused_judgement_id_still_obeys_the_length_rule(cfg):
+    budget.init_log(cfg)
+    budget.mint(cfg, "a", 1, 200)
+    assert budget.mint(cfg, "b", 1, 0) == (BudgetCheck("pending", "too_short"), None)
+
+
 def test_global_cap(cfg):
     cfg.raw["judge"]["holdout_max_reads"] = 2
     budget.init_log(cfg)
