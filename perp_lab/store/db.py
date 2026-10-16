@@ -302,6 +302,11 @@ def add_edge(cfg, parent_run_id: str, child_run_id: str, decision: str, reason: 
             runs.c.run_id.in_([parent_run_id, child_run_id])))}
         if ids != {parent_run_id, child_run_id}:
             raise ValueError(f"unknown run(s): {({parent_run_id, child_run_id} - ids)}")
+        prev = c.execute(sa.select(lineage_edges.c.decided_by).where(sa.and_(
+            lineage_edges.c.parent_run_id == parent_run_id,
+            lineage_edges.c.child_run_id == child_run_id))).first()
+        if prev and prev[0] == "harness" and decided_by != "harness":
+            raise PermissionError("this edge was decided by the harness and can't be overwritten by hand")
         lin = c.execute(sa.select(runs.c.lineage_id).where(runs.c.run_id == parent_run_id)).scalar()
         c.execute(runs.update().where(runs.c.run_id == child_run_id).values(
             parent_run_id=parent_run_id, lineage_id=lin))
@@ -441,7 +446,7 @@ def current_status(cfg, strategy: str, timeframe: str, verdict: str | None) -> s
 
 
 def approve_paper(cfg, run_id: str, approver: str, note: str = "") -> None:
-    """Human approval gate. Only a walk-forward 'candidate' can enter paper."""
+    """Human approval gate. Only a walk-forward 'candidate' whose holdout exam passed can enter paper."""
     with engine(cfg).begin() as c:
         r = c.execute(sa.select(runs.c.strategy, runs.c.timeframe, runs.c.verdict, runs.c.validation_mode)
                       .where(runs.c.run_id == run_id)).first()
@@ -450,6 +455,12 @@ def approve_paper(cfg, run_id: str, approver: str, note: str = "") -> None:
         if r.validation_mode != "walkforward" or r.verdict != "candidate":
             raise PermissionError(f"run {run_id} is '{r.verdict}' ({r.validation_mode}); only walk-forward "
                                   "candidates can be approved for paper")
+        j = c.execute(sa.select(judgements.c.holdout_status)
+                      .where(judgements.c.child_run_id == run_id)).first()
+        held = j[0] if j else "unjudged"
+        if held != "passed":
+            raise PermissionError(f"run {run_id} has no passed holdout exam (holdout: {held}); "
+                                  "paper needs one (`lab judge`, then `lab exam`)")
         c.execute(status_log.insert().values(strategy=r.strategy, timeframe=r.timeframe, run_id=run_id,
                                              status="paper", set_by=approver, note=note, created_at=_now()))
 

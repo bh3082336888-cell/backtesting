@@ -180,7 +180,11 @@ def link(parent: str, child: str, decision: str = typer.Option(..., help="promot
          config: Optional[str] = CfgOpt):
     """Record a hand-made lineage edge (Phase 3's judge writes these itself)."""
     from perp_lab.store.db import add_edge
-    add_edge(load_config(config), parent, child, decision, reason, decided_by="human")
+    try:
+        add_edge(load_config(config), parent, child, decision, reason, decided_by="human")
+    except PermissionError as e:
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(1)
     typer.echo(f"{parent} → {child} [{decision}] {reason}")
 
 
