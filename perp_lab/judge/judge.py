@@ -97,7 +97,7 @@ def lookahead_failures(cfg, cls) -> list[str]:
     dated across the holdout start (cut points about 44 and 14 days either side), so lookahead
     keyed to holdout dates is caught before any walk-forward or holdout read. No real data."""
     start = cfg.holdout_start - pd.Timedelta(days=HOLDOUT_LEAD_DAYS)
-    late = causality_failures(cls, synthetic_bars(seed=1, start=str(start.date())))
+    late = causality_failures(cls, synthetic_bars(seed=1, start=str(start.date())), require_signals=False)
     return list(dict.fromkeys(causality_failures(cls) + [f"holdout-dated: {f}" for f in late]))
 
 

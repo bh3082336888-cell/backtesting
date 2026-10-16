@@ -94,12 +94,13 @@ def with_moving_columns(bars: pd.DataFrame, seed: int = EXTRAS_SEED) -> pd.DataF
     return out
 
 
-def causality_failures(cls, bars: pd.DataFrame | None = None) -> list[str]:
+def causality_failures(cls, bars: pd.DataFrame | None = None, *, require_signals: bool = True) -> list[str]:
     """assert_causal on the default params and every grid corner; one line per failing variant.
 
     Runs on a copy of the bars in which every column moves. A crash on synthetic data
     disqualifies a plugin as surely as a peek at the future, and so does never signalling
-    with its default params: then nothing about its causality is verified."""
+    with its default params: then nothing about its causality is verified. Callers checking
+    extra date ranges pass require_signals=False: a plugin may honestly be quiet there."""
     bars = with_moving_columns(synthetic_bars(seed=1) if bars is None else bars)
     variants = [{}] + [{k: v} for k, vals in cls.grid.items() for v in (vals[0], vals[-1])]
     out = []
@@ -111,6 +112,6 @@ def causality_failures(cls, bars: pd.DataFrame | None = None) -> list[str]:
             msg = str(e).splitlines()[0] if str(e) else ""
             out.append(f"{label}: {type(e).__name__}: {msg}" if msg else f"{label}: {type(e).__name__}")
             continue
-        if not kw and not r.signals:
+        if require_signals and not kw and not r.signals:
             out.append(NO_SIGNALS)
     return out

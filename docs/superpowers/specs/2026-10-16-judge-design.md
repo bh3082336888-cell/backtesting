@@ -73,6 +73,8 @@ the dashboard shows judgements and the holdout budget.
    bars dated across the holdout start (60 days before it, so the cut points fall about 44 and
    14 days either side). Lookahead keyed to holdout dates is caught here (reasons prefixed
    `holdout-dated:`), before any walk-forward or holdout read, without touching holdout data.
+   The no-signals rule applies only to the default-dated run: a plugin may honestly be quiet
+   in the dated span (e.g. a seasonal strategy), and that is not lookahead.
 5. **Parent run.** First the parent must pass the same lookahead check; if it fails, refuse
    (exit code 2, nothing recorded): `parent P fails the lookahead check; fix or judge it
    first`. Then: the latest walk-forward run of the parent at the child's timeframe whose

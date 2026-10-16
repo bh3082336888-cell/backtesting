@@ -247,7 +247,7 @@ def test_lookahead_keyed_to_holdout_dates_is_caught_before_any_run(cfg, plugins)
     v = StubValidate({})
     j = judge(cfg, "datepeek", "4h", validate=v)
     assert j["decision"] == "kill" and j["child_run_id"] is None and v.calls == []
-    assert any(r.startswith("lookahead: holdout-dated: ") for r in j["reasons"])
+    assert any(r.startswith("lookahead: holdout-dated: ") and "features at cut" in r for r in j["reasons"])
     assert not any(r.startswith("lookahead: defaults") for r in j["reasons"])   # honest on 2023 dates
 
 
@@ -288,3 +288,34 @@ def test_a_parent_edited_during_its_lookahead_check_gets_no_judgement(cfg, plugi
     with pytest.raises(RuntimeError, match="parent donchian_atr changed while it was being checked or run"):
         judge(cfg, "donchian_atr_wide", "4h", validate=v)
     assert db.read_table(cfg, db.judgements).empty
+
+
+SEASONAL = '''"""Honest momentum, active November to April only (sell in May and go away)."""
+import numpy as np
+from perp_lab.indicators import atr
+from perp_lab.strategy import HOLD, Strategy, enter
+
+
+class Seasonal(Strategy):
+    params = {}
+
+    def prepare(self, bars):
+        winter = bars.index.month.isin([11, 12, 1, 2, 3, 4])
+        mom = np.sign(bars.close - bars.close.shift(1)).where(winter, 0.0)
+        return bars[[]].assign(sig=mom, atr=atr(bars, 14))
+
+    def bracket(self, ctx, side):
+        return ctx["close"] - side * 2 * ctx["atr"], None
+
+    def entry(self, ctx):
+        s = ctx["sig"]
+        if s != s or s == 0:
+            return HOLD
+        return enter(int(s), *self.bracket(ctx, int(s)))
+'''
+
+
+def test_an_honest_seasonal_plugin_is_not_killed_by_the_dated_run(cfg, plugins):
+    from perp_lab.strategy import load_strategy_class
+    add_plugin(plugins, "seasonal", SEASONAL)
+    assert lookahead_failures(cfg, load_strategy_class("seasonal")) == []
