@@ -76,4 +76,8 @@ def test_latest_wf_run_matches_hash_and_universe(cfg):
     assert db.latest_wf_run(cfg, "p", "4h", "hp", ["BTCUSDT", "ETHUSDT"])["run_id"] == "new"
     assert db.latest_wf_run(cfg, "p", "4h", "hp", ["BTCUSDT"])["run_id"] == "btc_only"
     assert db.latest_wf_run(cfg, "p", "1h", "hp", ["BTCUSDT", "ETHUSDT"]) is None
+    fake_run(cfg, "fam", strategy="q", strategy_hash="hq", lineage_id="family:q")
+    assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"], lineage_id="family:q")["run_id"] == "fam"
+    assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"], lineage_id="family:z") is None
+    assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"])["run_id"] == "fam"
     assert db.run_row(cfg, "new")["strategy_hash"] == "hp" and db.run_row(cfg, "nope") is None

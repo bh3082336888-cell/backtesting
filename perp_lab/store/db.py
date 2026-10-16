@@ -382,14 +382,18 @@ def run_row(cfg, run_id: str) -> dict | None:
         return _row(c.execute(sa.select(runs).where(runs.c.run_id == run_id)).first())
 
 
-def latest_wf_run(cfg, strategy: str, timeframe: str, strategy_hash: str, universe: list[str]) -> dict | None:
-    """Most recent walk-forward run of exactly this plugin version, timeframe and symbol universe."""
+def latest_wf_run(cfg, strategy: str, timeframe: str, strategy_hash: str, universe: list[str], *,
+                  lineage_id: str | None = None) -> dict | None:
+    """Most recent walk-forward run of exactly this plugin version, timeframe and symbol universe
+    (and, when given, family)."""
     with engine(cfg).connect() as c:
         rows = c.execute(sa.select(runs).where(sa.and_(
             runs.c.strategy == strategy, runs.c.timeframe == timeframe,
             runs.c.strategy_hash == strategy_hash, runs.c.validation_mode == "walkforward"))
             .order_by(runs.c.created_at.desc())).all()
     for r in rows:
+        if lineage_id is not None and r.lineage_id != lineage_id:
+            continue
         if list(r.universe or []) == list(universe):
             return dict(r._mapping)
     return None

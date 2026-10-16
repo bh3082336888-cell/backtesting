@@ -48,7 +48,7 @@ def test_child_that_beats_a_passing_parent_is_promoted_into_its_family(cfg, plug
     v = StubValidate({"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)})
     j = judge(cfg, "donchian_atr_wide", "4h", validate=v)
     assert j["decision"] == "promote" and j["beats_parent_frac"] == 1.0
-    assert j["lineage_id"] == db.run_row(cfg, j["parent_run_id"])["lineage_id"]
+    assert j["lineage_id"] == db.run_row(cfg, j["parent_run_id"])["lineage_id"] == "family:donchian_atr"
 
 
 def test_a_noise_parent_neither_lowers_nor_raises_the_bar(cfg, plugins):
@@ -59,7 +59,7 @@ def test_a_noise_parent_neither_lowers_nor_raises_the_bar(cfg, plugins):
 
 def test_an_existing_parent_run_is_reused(cfg, plugins):
     v = StubValidate({"donchian_atr": ("noise", NOISE), "donchian_atr_wide": ("candidate", STRONG)})
-    v(cfg, "donchian_atr", "4h")
+    v(cfg, "donchian_atr", "4h", lineage_id="family:donchian_atr")
     judge(cfg, "donchian_atr_wide", "4h", validate=v)
     assert v.calls == ["donchian_atr", "donchian_atr_wide"]
 
@@ -107,3 +107,37 @@ def test_cli_refusal_exits_2(cfg, plugins):
     add_plugin(plugins, "orphan", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "nope"'))
     r = CliRunner().invoke(app, ["judge", "orphan", "--tf", "4h", "--config", str(cfg.path)])
     assert r.exit_code == 2 and "refused" in r.output
+
+
+def test_a_plain_walk_forward_run_from_another_family_is_not_reused(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("noise", NOISE), "donchian_atr_wide": ("candidate", STRONG)})
+    v(cfg, "donchian_atr", "1h")
+    v(cfg, "donchian_atr", "4h")
+    j = judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    assert v.calls == ["donchian_atr", "donchian_atr", "donchian_atr", "donchian_atr_wide"]
+    assert j["lineage_id"] == "family:donchian_atr"
+    assert db.run_row(cfg, j["parent_run_id"])["lineage_id"] == "family:donchian_atr"
+    assert judge(cfg, "donchian_atr", "4h", validate=v)["lineage_id"] == "family:donchian_atr"
+
+
+def test_a_grandchild_judged_first_shares_the_root_family(cfg, plugins):
+    text = WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "donchian_atr_wide"') + "# grandchild variant\n"
+    add_plugin(plugins, "grandchild", text)
+    v = StubValidate({"donchian_atr_wide": ("noise", NOISE), "grandchild": ("candidate", STRONG),
+                      "donchian_atr": ("noise", NOISE)})
+    a = judge(cfg, "grandchild", "4h", validate=v)
+    b = judge(cfg, "donchian_atr", "4h", validate=v)
+    assert a["lineage_id"] == b["lineage_id"] == "family:donchian_atr"
+
+
+def test_a_parent_chain_loop_is_refused(cfg, plugins):
+    add_plugin(plugins, "loop_a", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "loop_b"') + "# a\n")
+    add_plugin(plugins, "loop_b", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "loop_a"') + "# b\n")
+    with pytest.raises(JudgeRefused, match="loops"):
+        judge(cfg, "loop_a", "4h", validate=StubValidate({}))
+
+
+def test_a_lookahead_kill_belongs_to_its_family(cfg, plugins):
+    add_plugin(plugins, "cheater", CHEATER)
+    j = judge(cfg, "cheater", "4h", validate=StubValidate({}))
+    assert j["decision"] == "kill" and j["lineage_id"] == "family:donchian_atr"

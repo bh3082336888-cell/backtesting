@@ -65,6 +65,19 @@ def finish(cfg, jid: int) -> dict:
     return {**j, "verdict_path": str(write_verdict(cfg, j))}
 
 
+def resolve_family(name: str) -> str:
+    """The family of a plugin: that of the root of its PARENT chain, by name, so it never splits."""
+    path, cur = [name], name
+    while (p := plugin_parent(cur)) is not None:
+        if p in path:
+            raise JudgeRefused(f"PARENT chain loops: {' → '.join(path + [p])}")
+        if p not in list_plugins():
+            raise JudgeRefused(f"PARENT '{p}' is not a plugin in strategies/")
+        path.append(p)
+        cur = p
+    return f"family:{cur}"
+
+
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
           validate: Callable = validate_strategy, attempt: Callable | None = None) -> dict:
     jc = cfg["judge"]
@@ -82,7 +95,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if existing:
         return {**existing, "verdict_path": str(verdict_path(cfg, name, tf, h)), "existing": True}
 
-    family = db.family_of(cfg, parent if parent else name)
+    family = resolve_family(name)
     fails = causality_failures(load_strategy_class(name))
     if fails:
         jid = db.record_judgement(cfg, {
@@ -94,11 +107,11 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     universe = symbols or cfg.symbols
     parent_row = None
     if parent is not None:
-        parent_row = db.latest_wf_run(cfg, parent, tf, plugin_hash(parent), universe)
+        parent_row = db.latest_wf_run(cfg, parent, tf, plugin_hash(parent), universe,
+                                      lineage_id=family)
         if parent_row is None:
-            prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=db.family_of(cfg, parent))
+            prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family)
             parent_row = db.run_row(cfg, prec["run_id"])
-        family = parent_row["lineage_id"]
 
     rec, _ = validate(cfg, name, tf, symbols, workers=workers,
                       parent_run_id=parent_row["run_id"] if parent_row else None, lineage_id=family)
@@ -125,7 +138,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     decision = "kill" if reasons else "promote"
     jid = db.record_judgement(cfg, {
         "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": child["run_id"],
-        "parent_run_id": parent_row["run_id"] if parent_row else None, "lineage_id": child["lineage_id"],
+        "parent_run_id": parent_row["run_id"] if parent_row else None, "lineage_id": family,
         "decision": decision, "reasons": reasons, "dsr": d["dsr"], "n_trials": n, "sr0": d["sr0"],
         "parent_passed": parent_passed, "beats_parent_frac": frac,
         "holdout_status": "pending" if decision == "promote" else "n/a",
