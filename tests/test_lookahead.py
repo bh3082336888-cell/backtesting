@@ -5,34 +5,15 @@ computed on the full series for rows < k, and the engine must emit identical
 signals for bars < k-1. Any use of future data breaks one of the two.
 """
 
-import numpy as np
-import pandas as pd
 import pytest
 
 from perp_lab.engine.backtest import EngineParams, run_backtest
 from perp_lab.indicators import atr
 from perp_lab.strategy import HOLD, RandomEntry, Strategy, enter, list_plugins, load_strategy_class
+from perp_lab.validate.causality import CUTS, assert_causal  # noqa: F401
 from tests.conftest import make_bars
 
 PLUGINS = list_plugins()
-CUTS = [400, 1100, 1777, 2500]
-
-
-def assert_causal(strat_factory, bars):
-    full = strat_factory()
-    f_full = full.prepare(bars)
-    assert f_full.index.equals(bars.index), "prepare() must return features on the bars index"
-    r_full = run_backtest(full, bars, f_full, symbol="X", tf="1h", ep=EngineParams(), record_signals=True)
-    for k in CUTS:
-        cut = bars.iloc[:k]
-        s = strat_factory()
-        f_cut = s.prepare(cut)
-        pd.testing.assert_frame_equal(f_full.iloc[:k], f_cut, check_exact=False, rtol=1e-9, atol=1e-12,
-                                      obj=f"features at cut {k}")
-        r_cut = run_backtest(s, cut, f_cut, symbol="X", tf="1h", ep=EngineParams(), record_signals=True)
-        a = [x for x in r_full.signals if x[0] < k - 1]
-        b = [x for x in r_cut.signals if x[0] < k - 1]
-        assert a == b, f"signals diverge before cut {k}"
 
 
 def test_plugins_discovered():
