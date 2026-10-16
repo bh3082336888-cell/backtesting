@@ -65,17 +65,22 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
   under the family rather than reusing an older plain run.
 - The lookahead check runs at judge time on the plugin and on its parent (a cheating parent is refused),
   on synthetic bars in which every column moves; a plugin that never signals there is killed as unverifiable.
+  It runs again on synthetic bars dated across the holdout (to a month past today) so lookahead keyed to
+  holdout dates is caught, and once more over the actual exam window just before a holdout read; a hit
+  there blocks the exam with reason `lookahead` and spends no read.
 - Gates: the walk-forward verdict, a **Deflated Sharpe ≥ 0.95** with N = distinct (plugin version,
-  timeframe) pairs among walk-forward runs store-wide, and, against a parent that passed, beating it in ≥ 95%
-  of paired block-bootstrap resamples.
+  timeframe) pairs among walk-forward runs store-wide and the luck correction based on the spread no-edge
+  strategies would show over the same track (≈ 1.5 annualised OOS Sharpe needed at N = 6 over 4 years),
+  and, against a parent that passed, beating it in ≥ 95% of paired block-bootstrap resamples.
 - A promoted plugin gets **one holdout exam per family**, under a global cap of 10 reads, and only
   once the holdout has 180 days of complete data (from about 2026-12-28). The exam runs frozen params and must
   make ≥ 10 holdout trades, be positive, and be no worse than the walk-forward record's p5 for that length.
-- When a child is promoted, its parent's exam, if still pending, is blocked with reason `superseded`, so the
-  family's one read goes to its best member.
+- When a child is promoted, its parent's exam, if still pending in the same family, is blocked with reason
+  `superseded`, so the family's one read goes to its best member, unless the audit log shows the parent
+  already holds that read (a crashed or interrupted exam), in which case it keeps it and retries.
 - If a plugin file is edited after it was judged, its pending exam waits with holdout status `pending` and
-  reason `plugin_changed` (no read is spent) until the judged version is restored; an edited plugin is a new
-  version and is judged separately.
+  reason `plugin_changed` (no new read is spent; one already spent by a crashed exam stays with it) until the
+  judged version is restored; an edited plugin is a new version and is judged separately.
 - `lab exam` reports each failing exam with ` ERROR: ...`, continues with the rest, and exits 1 if any failed.
 - **Paper approval needs a passed exam**, for every strategy.
 - Public verdicts in `runs/verdicts/` carry the holdout outcome as status and code only, never numbers.

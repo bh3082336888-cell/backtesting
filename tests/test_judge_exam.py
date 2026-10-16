@@ -259,3 +259,139 @@ def test_end_to_end_real_walk_forward_on_a_synthetic_market(tmp_path, plugins, f
     assert j["decision"] in {"promote", "kill"} and j["n_trials"] == 1
     assert j["holdout_status"] == "n/a" if j["decision"] == "kill" else j["holdout_status"] in {"passed", "failed"}
     assert set(json.loads(Path(j["verdict_path"]).read_text())) == VERDICT_KEYS
+
+
+def test_a_parent_whose_exam_crashed_is_not_superseded(cfg, plugins):
+    # the crashed parent already holds the family's read; superseding it would spend that read
+    # on nothing, so it stays pending (exam_error) and retries on the same read
+    budget.init_log(cfg)
+    with pytest.raises(RuntimeError, match="exam crashed"):
+        judged(cfg, "donchian_atr", FAMILY, stub_run(0.003, fail=True))
+    root = db.pending_judgements(cfg)[0]
+    child = judged(cfg, "donchian_atr_wide", FAMILY, stub_run(0.003))
+    assert child["decision"] == "promote"
+    r = db.get_judgement_by_id(cfg, root["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error")
+    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    assert done["id"] == root["id"] and done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_a_parent_judged_in_another_family_is_not_superseded(cfg, plugins):
+    # "kid" was first judged as a root (family:kid); a later version names rootb as its PARENT
+    # but keeps family:kid, so promoting it must not cancel family:rootb's queued exam
+    budget.init_log(cfg)
+    root_text = WIDE_TEXT.replace('PARENT = "donchian_atr"\n', "")
+    add_plugin(plugins, "rootb", root_text + "# rootb\n")
+    add_plugin(plugins, "kid", root_text + "# kid v1\n")
+    outcomes = {"rootb": ("candidate", STRONG), "kid": ("candidate", STRONG + 0.0005)}
+    rb = judged(cfg, "rootb", outcomes, stub_run(0.003), days=100)
+    judged(cfg, "kid", outcomes, stub_run(0.003), days=100)
+    add_plugin(plugins, "kid", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "rootb"') + "# kid v2\n")
+    kid2 = judged(cfg, "kid", outcomes, stub_run(0.003), days=100)
+    assert kid2["decision"] == "promote" and kid2["lineage_id"] == "family:kid"
+    r = db.get_judgement_by_id(cfg, rb["id"])
+    assert r["lineage_id"] == "family:rootb"
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "too_short")
+
+
+def test_a_failed_supersede_still_writes_the_childs_verdict(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    budget.init_log(cfg)
+    judged(cfg, "donchian_atr", FAMILY, stub_run(0.003), days=100)
+
+    def boom(*a, **kw):
+        raise RuntimeError("supersede failed")
+
+    monkeypatch.setattr(jm, "supersede", boom)
+    with pytest.raises(RuntimeError, match="supersede failed"):
+        judged(cfg, "donchian_atr_wide", FAMILY, stub_run(0.003), days=100)
+    j = [x for x in db.pending_judgements(cfg) if x["strategy"] == "donchian_atr_wide"][0]
+    assert verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"]).exists()
+
+
+def test_a_plugin_edited_mid_walk_forward_is_not_recorded(tmp_path, plugins, fresh_wf_caches, monkeypatch):
+    # validate_strategy hashes the plugin at the start and the end; a run that mixed versions is
+    # refused before anything is recorded, so a later `lab judge` can't reuse it as a baseline
+    from perp_lab.validate import pipeline
+    cfg = market_config(tmp_path, validation={"random_seeds": 5, "mc_iterations": 200})
+    real, f = pipeline.walkforward, plugins / "donchian_atr.py"
+
+    def editing(*a, **kw):
+        out = real(*a, **kw)
+        f.write_text(f.read_text() + "\n# edited mid-run\n")
+        return out
+
+    monkeypatch.setattr(pipeline, "walkforward", editing)
+    with pytest.raises(RuntimeError, match="donchian_atr changed during its walk-forward"):
+        pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    assert db.read_table(cfg, db.runs).empty
+
+
+class Interrupted(BaseException):
+    """Stands in for Ctrl-C / a killed process: not an Exception, so no handler records exam_error."""
+
+
+def test_a_parent_holding_a_read_is_never_superseded_even_after_an_interrupt(cfg, plugins):
+    # the audit log, not the reason code, says whether the parent holds the family's read
+    budget.init_log(cfg)
+
+    def interrupted(*a, **kw):
+        raise Interrupted
+
+    with pytest.raises(Interrupted):
+        judged(cfg, "donchian_atr", FAMILY, interrupted)
+    root = db.pending_judgements(cfg)[0]
+    assert root["holdout_reason"] == "awaiting_exam" and budget.reads_used(cfg) == 1
+    child = judged(cfg, "donchian_atr_wide", FAMILY, stub_run(0.003))
+    assert child["decision"] == "promote"
+    r = db.get_judgement_by_id(cfg, root["id"])
+    assert r["holdout_status"] == "pending"
+    done = {j["id"]: j for j in exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))}
+    assert done[root["id"]]["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_supersede_does_nothing_when_the_read_record_cannot_be_read(cfg, plugins):
+    # no holdout log: whether the parent holds a read is unknown, so leave it queued
+    root = judge(cfg, "donchian_atr", "4h", validate=StubValidate(FAMILY))
+    child = judge(cfg, "donchian_atr_wide", "4h", validate=StubValidate(FAMILY))
+    assert child["decision"] == "promote"
+    r = db.get_judgement_by_id(cfg, root["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "awaiting_exam")
+
+
+def test_lookahead_after_the_judged_span_blocks_the_exam_before_any_read(cfg, plugins, monkeypatch):
+    # judged on 2026-10-16 the dated check covers to mid-November; the exam window later runs to
+    # 2027-03-08, so the check is repeated over the actual window just before the read is spent
+    import perp_lab.judge.judge as jm
+    from tests.test_judge import date_peek
+    monkeypatch.setattr(jm, "_now", lambda: pd.Timestamp("2026-10-16", tz="UTC"), raising=False)
+    budget.init_log(cfg)
+    add_plugin(plugins, "latepeek", date_peek("2027-02-01", parent=False))
+    j = judged(cfg, "latepeek", {"latepeek": ("candidate", STRONG)}, stub_run(0.003), days=100)
+    assert j["decision"] == "promote" and j["holdout_reason"] == "too_short"
+    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(250))
+    assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "lookahead")
+    assert budget.reads_used(cfg) == 0
+
+
+def test_lookahead_in_the_last_days_of_the_exam_window_blocks_the_exam(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    from tests.test_judge import date_peek
+    monkeypatch.setattr(jm, "_now", lambda: pd.Timestamp("2026-10-16", tz="UTC"))
+    budget.init_log(cfg)
+    add_plugin(plugins, "tailpeek", date_peek("2026-12-20", parent=False))
+    judged(cfg, "tailpeek", {"tailpeek": ("candidate", STRONG)}, stub_run(0.003), days=100)
+    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(180))   # window ends 2026-12-28
+    assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "lookahead")
+    assert budget.reads_used(cfg) == 0
+
+
+def test_an_honest_seasonal_plugin_is_not_blocked_at_exam_time(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    from tests.test_judge import SEASONAL
+    monkeypatch.setattr(jm, "_now", lambda: pd.Timestamp("2026-10-16", tz="UTC"))
+    budget.init_log(cfg)
+    add_plugin(plugins, "seasonal", SEASONAL)
+    judged(cfg, "seasonal", {"seasonal": ("candidate", STRONG)}, stub_run(0.003), days=100)
+    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(100))   # window May-Oct only
+    assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "too_short")

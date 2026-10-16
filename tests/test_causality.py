@@ -1,16 +1,22 @@
 import pytest
 
 from perp_lab.indicators import atr
-from perp_lab.strategy import HOLD, Strategy, enter, list_plugins, load_strategy_class
+from perp_lab.strategy import HOLD, Strategy, enter, load_strategy_class
 from perp_lab.validate.causality import causality_failures
+from tests.conftest import REAL_PLUGINS, REPO
 from tests.test_lookahead import Cheater
 
 EXCHANGE_COLUMNS = ["oi", "oi_value", "quote_volume", "trades", "taker_buy_volume",
                     "taker_buy_quote_volume", "regime_adx", "funding_interval_h"]
 
 
-@pytest.mark.parametrize("name", list_plugins())
-def test_every_real_plugin_has_no_causality_failures(name):
+def test_real_plugins_are_found():
+    assert {"donchian_atr", "donchian_atr_wide", "bb_vwap_reversion", "funding_fade"} <= set(REAL_PLUGINS)
+
+
+@pytest.mark.parametrize("name", REAL_PLUGINS)
+def test_every_real_plugin_has_no_causality_failures(name, monkeypatch):
+    monkeypatch.setattr("perp_lab.strategy.STRATEGY_DIR", REPO / "strategies")
     assert causality_failures(load_strategy_class(name)) == []
 
 

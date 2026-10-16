@@ -69,16 +69,32 @@ the dashboard shows judgements and the holdout budget.
    peek at any column is seen. A plugin whose default params emit no signal on those bars
    cannot be verified and fails the check the same way
    (`defaults: no signals on synthetic data; causality cannot be verified`).
+   The check runs twice: on the synthetic bars at their default (2023) dates, and on synthetic
+   hourly bars dated from 60 days before the holdout start to 30 days past today, cut every
+   30 days from 45 days before the holdout start and always at the span's end (the end cut
+   catches any peek that starts before it; the spaced cuts catch peeks confined to a stretch).
+   A span that hasn't reached the holdout has nothing to check. Lookahead keyed to holdout dates is caught
+   here (reasons prefixed `holdout-dated:`), before any walk-forward or holdout read, without
+   touching holdout data. Because the exam window keeps growing after a judgement, the exam
+   step repeats the dated check up to the window's actual end just before the read (see 10).
+   The no-signals rule applies only to the default-dated run: a plugin may honestly be quiet
+   in the dated span (e.g. a seasonal strategy), and that is not lookahead.
 5. **Parent run.** First the parent must pass the same lookahead check; if it fails, refuse
    (exit code 2, nothing recorded): `parent P fails the lookahead check; fix or judge it
    first`. Then: the latest walk-forward run of the parent at the child's timeframe whose
    `strategy_hash` equals the parent's current `plugin_hash` and whose symbol universe equals
    the child's. If none, run the parent's walk-forward first (recorded like any run; it counts
-   as a trial).
+   as a trial). The parent's hash is taken before its lookahead check; if the run's
+   `strategy_hash` is not that hash (the parent was edited during its check or its run),
+   stop with an error (exit 1) before any judgement is recorded:
+   `parent P changed while it was being checked or run; re-run lab judge`.
 6. **Child walk-forward** via `validate_strategy(..., parent_run_id=parent_run, lineage_id=family)`.
    If the run's `strategy_hash` is not the hash being judged (the plugin was edited during the
    run), stop with an error (exit 1) before any judgement is recorded:
-   `NAME changed while it was being judged; re-run lab judge`.
+   `NAME changed while it was being judged; re-run lab judge`. `validate_strategy` itself hashes
+   the plugin at its start and again before recording; a run whose plugin changed in between
+   (its worker pool and sensitivity pass load the plugin separately, so it would mix versions)
+   is refused and not recorded, so a later `lab judge` can never reuse it as a parent baseline.
 7. **Gates** (section below) on the child. A strategy's *absolute gates* are: walk-forward
    verdict `candidate` and Deflated Sharpe ≥ `dsr_min`. The parent's absolute gates are
    evaluated the same way, with the same N, at the time the child is judged.
@@ -95,7 +111,16 @@ the dashboard shows judgements and the holdout budget.
    `holdout_status` is `pending`, that judgement becomes `blocked` with reason `superseded`
    and its verdict is rewritten: a promoted child either beat its passing parent or its
    parent did not pass, so the parent's queued exam must not spend the family's single read.
+   Only a parent judgement in the child's own family is superseded (a re-pointed PARENT must
+   not cancel another family's exam), and never one that already holds the family's read
+   according to the audit log (`budget.holds_read`: its exam crashed, was interrupted, or later
+   waited as `plugin_changed`); it retries on that read. If the log can't be read, it is left
+   queued. A failure while superseding still writes the child's
+   verdict before the error propagates.
 10. **If promoted**, attempt the exam (see Holdout exam). Outcome sets `holdout_status`.
+    Just before the budget is asked for a read, the dated lookahead check is re-run over
+    `[60 days before holdout_start, exam window end]`, also trying the exam's frozen params as a
+    variant; a failure blocks the exam with reason `lookahead` and no read is spent.
 11. **Write the public verdict** and print a summary. The verdict file is written even when
     the exam cannot start (e.g. the holdout log was never initialised) or crashes; the error is
     then re-raised (exit 1).
@@ -125,8 +150,12 @@ returns `r` (T days):
 
 - `SR` = mean(r) / std(r) (daily, not annualised); skew and kurtosis (Pearson, not excess) of r.
 - `N` = number of distinct `(strategy_hash, timeframe)` among all walk-forward runs in the store.
-- `V` = sample variance of the daily Sharpes (annualised / √365) of the latest run per
-  `(strategy_hash, timeframe)`; needs N ≥ 2.
+- `V` = the no-edge sampling variance of a daily Sharpe over the candidate's own track,
+  `1/(T−1)` (changed 2026-10-16 from the variance measured across past trials: one trial whose
+  true Sharpe is far from zero — e.g. `bb_vwap_reversion` 15m at −4.30, ruined by costs —
+  inflated the measured spread to 1.92 annualised and put the bar at ≈ 3.3 annualised OOS
+  Sharpe for every later strategy; with `1/(T−1)` it is ≈ 1.5 at N = 6 over 4 years and
+  ≈ 2.0 at N = 50). The parent is judged with the same N and its own T.
 - `SR0` = 0 if N = 1, else `√V · ((1−γ)·Φ⁻¹(1−1/N) + γ·Φ⁻¹(1−1/(N·e)))`, γ = 0.5772156649.
 - `DSR = Φ((SR − SR0)·√(T−1) / √(1 − skew·SR + (kurt−1)/4·SR²))`.
 - Gate: `DSR ≥ dsr_min` (0.95).
@@ -209,7 +238,7 @@ New table `judgements` (created by `md.create_all`; no changes to existing colum
 | `reasons` | JSON list |
 | `dsr`, `n_trials`, `sr0` | floats / int |
 | `parent_passed`, `beats_parent_frac` | null when no parent |
-| `holdout_status`, `holdout_reason` | `n/a` for kills; the reason is a fixed code (`awaiting_exam`, `too_short`, `budget_spent`, `family_examined`, `superseded`, `exam_error`, `plugin_changed`, `passed`, `failed`), never a number |
+| `holdout_status`, `holdout_reason` | `n/a` for kills; the reason is a fixed code (`awaiting_exam`, `too_short`, `budget_spent`, `family_examined`, `superseded`, `exam_error`, `plugin_changed`, `lookahead`, `passed`, `failed`), never a number |
 | `holdout_run_id` | FK runs, null until examined |
 | `created_at`, `updated_at` | |
 

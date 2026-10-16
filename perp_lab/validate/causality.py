@@ -48,13 +48,13 @@ def synthetic_bars(n=3000, seed=0, start="2023-01-01", funding_every=8, tf_ms=H)
     return df
 
 
-def assert_causal(strat_factory, bars):
+def assert_causal(strat_factory, bars, cuts: list[int] | None = None):
     """Raises AssertionError on a lookahead; returns the full-series run (with its signals)."""
     full = strat_factory()
     f_full = full.prepare(bars)
     assert f_full.index.equals(bars.index), "prepare() must return features on the bars index"
     r_full = run_backtest(full, bars, f_full, symbol="X", tf="1h", ep=EngineParams(), record_signals=True)
-    for k in CUTS:
+    for k in (CUTS if cuts is None else cuts):
         cut = bars.iloc[:k]
         s = strat_factory()
         f_cut = s.prepare(cut)
@@ -94,23 +94,27 @@ def with_moving_columns(bars: pd.DataFrame, seed: int = EXTRAS_SEED) -> pd.DataF
     return out
 
 
-def causality_failures(cls, bars: pd.DataFrame | None = None) -> list[str]:
+def causality_failures(cls, bars: pd.DataFrame | None = None, *, cuts: list[int] | None = None,
+                       require_signals: bool = True, params: dict | None = None) -> list[str]:
     """assert_causal on the default params and every grid corner; one line per failing variant.
 
     Runs on a copy of the bars in which every column moves. A crash on synthetic data
     disqualifies a plugin as surely as a peek at the future, and so does never signalling
-    with its default params: then nothing about its causality is verified."""
+    with its default params: then nothing about its causality is verified. Callers checking
+    extra date ranges pass require_signals=False: a plugin may honestly be quiet there."""
     bars = with_moving_columns(synthetic_bars(seed=1) if bars is None else bars)
     variants = [{}] + [{k: v} for k, vals in cls.grid.items() for v in (vals[0], vals[-1])]
+    if params and params not in variants:   # e.g. the walk-forward's frozen exam params
+        variants.append(dict(params))
     out = []
     for kw in variants:
         try:
-            r = assert_causal(lambda: cls(**kw), bars)
+            r = assert_causal(lambda: cls(**kw), bars, cuts)
         except Exception as e:
             label = ", ".join(f"{k}={v}" for k, v in kw.items()) or "defaults"
             msg = str(e).splitlines()[0] if str(e) else ""
             out.append(f"{label}: {type(e).__name__}: {msg}" if msg else f"{label}: {type(e).__name__}")
             continue
-        if not kw and not r.signals:
+        if require_signals and not kw and not r.signals:
             out.append(NO_SIGNALS)
     return out

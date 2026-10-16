@@ -68,11 +68,21 @@ def reads_used(cfg) -> int:
     return len({_read_key(e) for e in read_log(log_path(cfg))})
 
 
+def _holds(entries: list[dict], judgement_id: int, lineage_id: str) -> bool:
+    return any(e.get("judgement_id") == judgement_id and e["lineage_id"] == lineage_id for e in entries)
+
+
+def holds_read(cfg, judgement_id: int, lineage_id: str) -> bool:
+    """Whether this judgement already holds its family's read (it was minted, whatever happened
+    after). Raises BudgetLogError if the log is missing or malformed: callers must not guess."""
+    return _holds(read_log(log_path(cfg)), judgement_id, lineage_id)
+
+
 def check(cfg, entries: list[dict], lineage_id: str, judgement_id: int, window_days: int) -> BudgetCheck:
     if not isinstance(judgement_id, int) or isinstance(judgement_id, bool):
         raise TypeError(f"judgement_id must be an int, got {judgement_id!r}")
     jc = cfg["judge"]
-    if any(e.get("judgement_id") == judgement_id and e["lineage_id"] == lineage_id for e in entries):
+    if _holds(entries, judgement_id, lineage_id):
         return BudgetCheck("mint", "retry")
     if window_days < jc["min_holdout_days"]:
         return BudgetCheck("pending", "too_short")

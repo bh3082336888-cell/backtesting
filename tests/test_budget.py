@@ -168,3 +168,13 @@ def test_cli_holdout_init_runs_once(cfg):
     assert r.exit_code == 0 and "created" in r.output
     r = CliRunner().invoke(app, ["holdout-init", "--config", str(cfg.path)])
     assert r.exit_code == 1 and "never reset" in r.output
+
+
+def test_holds_read_matches_judgement_and_family(cfg):
+    with pytest.raises(BudgetLogError):
+        budget.holds_read(cfg, 1, "fam")
+    budget.init_log(cfg)
+    assert budget.holds_read(cfg, 1, "fam") is False
+    budget.mint(cfg, "fam", 1, 200)
+    assert budget.holds_read(cfg, 1, "fam") is True
+    assert budget.holds_read(cfg, 2, "fam") is False and budget.holds_read(cfg, 1, "other") is False

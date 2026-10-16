@@ -22,7 +22,7 @@ from perp_lab.judge.exam import run_exam, window_end
 from perp_lab.runs import new_run_id, repo_commit, write_run
 from perp_lab.store import db
 from perp_lab.strategy import list_plugins, load_strategy_class, plugin_hash, plugin_parent
-from perp_lab.validate.causality import causality_failures
+from perp_lab.validate.causality import causality_failures, synthetic_bars
 from perp_lab.validate.pipeline import validate_strategy
 
 log = logging.getLogger(__name__)
@@ -89,13 +89,63 @@ def resolve_family(cfg, name: str) -> str:
     return fam
 
 
-def supersede(cfg, parent: str, tf: str) -> None:
+DATED_LEAD_DAYS = 60       # dated synthetic bars start this long before the holdout
+DATED_FIRST_CUT_DAYS = 45  # first cut point, before the holdout start
+DATED_CUT_EVERY_DAYS = 30
+DATED_AHEAD_DAYS = 30      # at judge time, cover the holdout up to this far past today
+_HOUR = pd.Timedelta(hours=1)
+
+
+def _now() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC")
+
+
+def dated_lookahead_failures(cfg, cls, until: pd.Timestamp, params: dict | None = None) -> list[str]:
+    """The causality check on synthetic hourly bars dated from DATED_LEAD_DAYS before the holdout
+    start to `until`, cut every DATED_CUT_EVERY_DAYS from DATED_FIRST_CUT_DAYS before the holdout
+    start and always at `until` itself, so lookahead keyed to any date before `until` is seen (the
+    end cut catches any peek that starts before it; the spaced cuts catch peeks confined to a
+    stretch). `params` (e.g. the exam's frozen params) is checked as one more variant. No real
+    data. The no-signals rule does not apply: a plugin may honestly be quiet in this span. A span
+    that hasn't reached the holdout has nothing to check."""
+    if until <= cfg.holdout_start:
+        return []
+    start = cfg.holdout_start - pd.Timedelta(days=DATED_LEAD_DAYS)
+    cuts, d = [], cfg.holdout_start - pd.Timedelta(days=DATED_FIRST_CUT_DAYS)
+    while d < until:
+        cuts.append(int((d - start) / _HOUR))
+        d += pd.Timedelta(days=DATED_CUT_EVERY_DAYS)
+    cuts.append(int((until - start) / _HOUR))
+    bars = synthetic_bars(n=cuts[-1] + 24, seed=1, start=str(start.date()))
+    return [f"holdout-dated: {f}"
+            for f in causality_failures(cls, bars, cuts=cuts, require_signals=False, params=params)]
+
+
+def lookahead_failures(cfg, cls) -> list[str]:
+    """The causality check at the synthetic bars' default dates, plus the dated check over the
+    holdout up to DATED_AHEAD_DAYS past today. attempt_exam repeats the dated check over the
+    actual exam window just before the read, so dates after the judged span are covered too."""
+    until = max(_now(), cfg.holdout_start) + pd.Timedelta(days=DATED_AHEAD_DAYS)
+    return list(dict.fromkeys(causality_failures(cls) + dated_lookahead_failures(cfg, cls, until)))
+
+
+def supersede(cfg, parent: str, tf: str, family: str) -> None:
     """A promoted child either beat its passing parent or its parent did not pass, so the
-    parent's queued exam must not spend the family's single read: block it as superseded."""
+    parent's queued exam must not spend the family's single read: block it as superseded.
+    Only within the child's own family (a re-pointed PARENT must not cancel another family's
+    exam), and never a parent that already holds the family's read according to the audit log
+    (an exam that crashed, was interrupted or later waited as plugin_changed): it retries on that
+    read. If the log can't be read, whether it holds a read is unknown, so it is left queued."""
     pj = db.get_judgement(cfg, plugin_hash(parent), tf)
-    if pj is not None and pj["holdout_status"] == "pending":
-        db.update_holdout(cfg, pj["id"], "blocked", "superseded")
-        finish(cfg, pj["id"])
+    if pj is None or pj["holdout_status"] != "pending" or pj["lineage_id"] != family:
+        return
+    try:
+        if budget.holds_read(cfg, pj["id"], pj["lineage_id"]):
+            return
+    except budget.BudgetLogError:
+        return
+    db.update_holdout(cfg, pj["id"], "blocked", "superseded")
+    finish(cfg, pj["id"])
 
 
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
@@ -116,7 +166,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         return {**finish(cfg, existing["id"]), "existing": True}
 
     family = resolve_family(cfg, name)
-    fails = causality_failures(load_strategy_class(name))
+    fails = lookahead_failures(cfg, load_strategy_class(name))
     if fails:
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
@@ -124,16 +174,19 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
             "reasons": [f"lookahead: {f}" for f in fails], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
 
-    if parent is not None and causality_failures(load_strategy_class(parent)):
+    ph = plugin_hash(parent) if parent is not None else None   # before the check: the checked version
+    if parent is not None and lookahead_failures(cfg, load_strategy_class(parent)):
         raise JudgeRefused(f"parent {parent} fails the lookahead check; fix or judge it first")
 
     universe = symbols or cfg.symbols
     parent_row = None
     if parent is not None:
-        parent_row = db.latest_wf_run(cfg, parent, tf, plugin_hash(parent), universe,
-                                      lineage_id=family)
+        parent_row = db.latest_wf_run(cfg, parent, tf, ph, universe, lineage_id=family)
         if parent_row is None:
             prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family)
+            if prec["strategy_hash"] != ph:   # the parent run measured other code than was checked
+                raise RuntimeError(f"parent {parent} changed while it was being checked or run; "
+                                   "re-run lab judge")
             parent_row = db.run_row(cfg, prec["run_id"])
 
     rec, _ = validate(cfg, name, tf, symbols, workers=workers,
@@ -141,9 +194,9 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if rec["strategy_hash"] != h:   # the run measured other code than the version being judged
         raise RuntimeError(f"{name} changed while it was being judged; re-run lab judge")
     child = db.run_row(cfg, rec["run_id"])
-    n, v = db.trial_stats(cfg)
+    n, _ = db.trial_stats(cfg)          # N store-wide; the spread is the no-edge one (gates)
     cr = oos_portfolio(child["run_dir"])
-    d = gates.deflated_sharpe(cr, n, v)
+    d = gates.deflated_sharpe(cr, n)
     reasons = list(rec.get("fail_reasons") or [])
     if d["dsr"] < jc["dsr_min"]:
         reasons.append(f"Deflated Sharpe {d['dsr']:.2f} < {jc['dsr_min']} (N={n})")
@@ -152,7 +205,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if parent_row is not None:
         pr = oos_portfolio(parent_row["run_dir"])
         parent_passed = bool(parent_row["verdict"] == "candidate"
-                             and gates.deflated_sharpe(pr, n, v)["dsr"] >= jc["dsr_min"])
+                             and gates.deflated_sharpe(pr, n)["dsr"] >= jc["dsr_min"])
         if parent_passed:
             frac = gates.beats_parent(cr, pr, block=jc["bootstrap_block_days"], n_boot=PARENT_BOOT,
                                       seed=gates.seed_from(child["run_id"]))
@@ -171,13 +224,14 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if parent_row is not None:
         db.add_edge(cfg, parent_row["run_id"], child["run_id"], decision,
                     "; ".join(reasons) or "passed every gate", decided_by="harness")
-    if decision == "promote" and parent is not None:
-        supersede(cfg, parent, tf)
-    if decision == "promote" and attempt is not None:
+    if decision == "promote":
         try:
-            attempt(cfg, jid)
+            if parent is not None:
+                supersede(cfg, parent, tf, family)
+            if attempt is not None:
+                attempt(cfg, jid)
         except Exception:
-            finish(cfg, jid)   # the verdict file must exist even when the exam could not start
+            finish(cfg, jid)   # the verdict file must exist even when this step fails
             raise
     return finish(cfg, jid)
 
@@ -245,6 +299,10 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     syms, tf = s["universe"], j["timeframe"]
     end = end_fn(cfg, syms, tf)
     days = max(0, (end - cfg.holdout_start).days)
+    if dated_lookahead_failures(cfg, load_strategy_class(j["strategy"]), end,
+                                params=s["sensitivity"]["base_params"]):
+        db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
+        return finish(cfg, jid)
     chk, token = budget.mint(cfg, j["lineage_id"], jid, days)
     if token is None:
         db.update_holdout(cfg, jid, chk.status, chk.code)

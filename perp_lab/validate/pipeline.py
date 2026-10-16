@@ -75,6 +75,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
                       lineage_id: str | None = None) -> tuple[dict, str]:
     from perp_lab.engine.metrics import monthly_table
 
+    h0 = plugin_hash(name)   # the version this run measures; checked again before recording
     cls = load_strategy_class(name)
     wf = walkforward(cfg, name, tf, symbols, workers)
     log.info("walkforward done; OOS Sharpe %.2f", wf.oos_summary["sharpe"])
@@ -89,7 +90,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
 
     rid = new_run_id()
     rec = {
-        "run_id": rid, "strategy": name, "strategy_hash": plugin_hash(name),
+        "run_id": rid, "strategy": name, "strategy_hash": h0,
         "hypothesis": cls.hypothesis(), "repo_commit": repo_commit(),
         "params": {"grid": cls.grid, "defaults": cls.params},
         "universe": wf.symbols, "timeframes": [tf],
@@ -115,6 +116,8 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
         "random_sharpes": pd.DataFrame({"sharpe": rnd.get("sharpes", [])}),
     }
     report = render_report(rec, reg, monthly)
+    if plugin_hash(name) != h0:   # workers/sensitivity load the plugin separately: mixed versions
+        raise RuntimeError(f"{name} changed during its walk-forward; nothing recorded, re-run it")
     d = write_run(cfg, rec, frames, report)
     rec["run_dir"] = str(d)
     return rec, report
