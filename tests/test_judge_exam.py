@@ -64,6 +64,15 @@ def test_a_passing_exam_is_recorded(cfg, plugins):
     assert [e["judgement_id"] for e in entries] == [j["id"]]
 
 
+def test_the_holdout_run_has_a_report(cfg, plugins):
+    budget.init_log(cfg)
+    j = judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(-0.003))
+    text = (Path(db.run_row(cfg, j["holdout_run_id"])["run_dir"]) / "report.md").read_text()
+    end = str((cfg.holdout_start + pd.Timedelta(days=200)).date())
+    assert "donchian_atr" in text and "2026-07-01" in text and end in text
+    assert "FAILED" in text and "holdout Sharpe" in text and '"atr_mult": 3.0' in text
+
+
 def test_a_failing_exam_is_recorded_with_its_reasons(cfg, plugins):
     budget.init_log(cfg)
     j = judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(-0.003))

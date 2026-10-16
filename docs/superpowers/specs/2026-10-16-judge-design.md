@@ -176,8 +176,9 @@ Too few trades is a fail ("not enough evidence"); the read is spent either way.
   processes). Per symbol: `load_bars(cfg, sym, tf, end=end, holdout=token)` from
   `history_start`, one continuous `run_backtest`, daily returns and trades (by signal time)
   sliced to the window. Portfolio = mean of daily returns, as in walk-forward.
-- **Record:** a run with `validation_mode="holdout"` (metrics, trades, report), linked from
-  the judgement by `holdout_run_id`. Not a lineage child, not a trial.
+- **Record:** a run with `validation_mode="holdout"` (metrics, trades, and a `report.md` with
+  the window, frozen params, pass/fail with reasons and key metrics), linked from the
+  judgement by `holdout_run_id`. Not a lineage child, not a trial.
 
 ## Who sees what
 

@@ -185,19 +185,50 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
 HOLDOUT_BOOT = 10_000
 
 
+def holdout_report(j: dict, res, ok: bool, reasons: list[str], m: dict, floor_pct: float) -> str:
+    """The holdout run's report.md, for the human (it stays in the run directory)."""
+    floor = "n/a" if m["floor"] is None else f"{m['floor']:.1%}"
+    return "\n".join([
+        f"# Holdout exam: {j['strategy']} @ {j['timeframe']}",
+        "",
+        f"Judgement {j['id']}, walk-forward run {j['child_run_id']}, family {j['lineage_id']}.",
+        "",
+        f"- Window: {res.start.date()} to {res.end.date()} (end exclusive), {m['days']} days",
+        f"- Frozen params (walk-forward modal): {json.dumps(res.params, sort_keys=True, default=str)}",
+        f"- Symbols: {', '.join(res.daily)}",
+        "",
+        f"## {'PASSED' if ok else 'FAILED'}",
+        "",
+        *([f"- {r}" for r in reasons] or ["- every check passed"]),
+        "",
+        "## Key metrics",
+        "",
+        "| metric | value |",
+        "|---|---|",
+        f"| Sharpe | {m['sharpe']:.2f} |",
+        f"| total return | {m['total_return']:.1%} |",
+        f"| max drawdown | {m['max_dd']:.1%} |",
+        f"| trades | {m['trades']} |",
+        f"| win rate | {m['win_rate']:.0%} |",
+        f"| walk-forward p{floor_pct:g} floor for this length | {floor} |",
+    ]) + "\n"
+
+
 def _record_holdout_run(cfg, j: dict, s: dict, res, ok: bool, reasons: list[str], detail: dict) -> str:
     rid = new_run_id()
+    metrics = {**summarize(res.portfolio, res.trades), "floor": detail["floor"]}
     rec = {"run_id": rid, "strategy": j["strategy"], "strategy_hash": j["strategy_hash"],
            "hypothesis": s.get("hypothesis"), "repo_commit": repo_commit(), "params": res.params,
            "universe": list(res.daily), "timeframes": [j["timeframe"]], "validation_mode": "holdout",
            "date_start": str(res.start.date()), "date_end": str(res.end.date()),
            "status": "passed" if ok else "failed", "fail_reasons": reasons,
-           "metrics": {**summarize(res.portfolio, res.trades), "floor": detail["floor"]},
+           "metrics": metrics,
            "lineage_id": j["lineage_id"], "parent_run_id": None,
            "created_at": datetime.now(timezone.utc).isoformat(),
            "notes": f"holdout exam of {j['child_run_id']} (judgement {j['id']})"}
     daily = pd.DataFrame({**res.daily, "PORTFOLIO": res.portfolio})
-    write_run(cfg, rec, {"holdout_trades": res.trades, "holdout_daily": daily})
+    write_run(cfg, rec, {"holdout_trades": res.trades, "holdout_daily": daily},
+              holdout_report(j, res, ok, reasons, metrics, cfg["judge"]["holdout_floor_pct"]))
     return rid
 
 
