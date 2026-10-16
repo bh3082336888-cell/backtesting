@@ -5,7 +5,7 @@ import pytest
 from typer.testing import CliRunner
 
 from perp_lab.cli import app
-from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, judge
+from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, judge, lookahead_failures
 from perp_lab.store import db
 from tests.judge_fixtures import (CHEATER, NOISE, STRONG, WEAK, WIDE_TEXT, StubValidate, add_plugin,
                                   plugins, series)  # noqa: F401
@@ -209,3 +209,57 @@ def test_a_broken_trial_does_not_raise_the_bar(cfg, plugins):
     v(cfg, "donchian_atr_wide", "4h")
     j = judge(cfg, "donchian_atr", "4h", validate=v)
     assert j["n_trials"] == 2 and j["sr0"] == pytest.approx(0.0136026191, abs=1e-9)
+
+
+DATE_PEEK = '''"""Honest momentum on ordinary dates; peeks at the next close on holdout dates."""
+import numpy as np
+import pandas as pd
+from perp_lab.indicators import atr
+from perp_lab.strategy import HOLD, Strategy, enter
+
+PARENT = "donchian_atr"
+
+
+class DatePeek(Strategy):
+    params = {}
+
+    def prepare(self, bars):
+        late = bars.index >= pd.Timestamp("2026-07-01", tz="UTC")
+        honest = np.sign(bars.close - bars.close.shift(1))
+        peek = np.sign(bars.close.shift(-1) - bars.close)
+        return bars[[]].assign(sig=honest.where(~late, peek), atr=atr(bars, 14))
+
+    def bracket(self, ctx, side):
+        return ctx["close"] - side * 2 * ctx["atr"], None
+
+    def entry(self, ctx):
+        s = ctx["sig"]
+        if s != s or s == 0:
+            return HOLD
+        side = int(s)
+        return enter(side, *self.bracket(ctx, side))
+'''
+
+
+def test_lookahead_keyed_to_holdout_dates_is_caught_before_any_run(cfg, plugins):
+    add_plugin(plugins, "datepeek", DATE_PEEK)
+    v = StubValidate({})
+    j = judge(cfg, "datepeek", "4h", validate=v)
+    assert j["decision"] == "kill" and j["child_run_id"] is None and v.calls == []
+    assert any(r.startswith("lookahead: holdout-dated: ") for r in j["reasons"])
+    assert not any(r.startswith("lookahead: defaults") for r in j["reasons"])   # honest on 2023 dates
+
+
+REPO = Path(__file__).resolve().parents[1]
+REAL_PLUGINS = sorted(p.stem for p in (REPO / "strategies").glob("*.py") if not p.stem.startswith("_"))
+
+
+def test_real_plugins_are_found():
+    assert {"donchian_atr", "donchian_atr_wide", "bb_vwap_reversion", "funding_fade"} <= set(REAL_PLUGINS)
+
+
+@pytest.mark.parametrize("name", REAL_PLUGINS)
+def test_real_plugins_pass_the_holdout_dated_check(cfg, name, monkeypatch):
+    from perp_lab.strategy import load_strategy_class
+    monkeypatch.setattr("perp_lab.strategy.STRATEGY_DIR", REPO / "strategies")
+    assert lookahead_failures(cfg, load_strategy_class(name)) == []

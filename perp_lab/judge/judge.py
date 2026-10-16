@@ -22,7 +22,7 @@ from perp_lab.judge.exam import run_exam, window_end
 from perp_lab.runs import new_run_id, repo_commit, write_run
 from perp_lab.store import db
 from perp_lab.strategy import list_plugins, load_strategy_class, plugin_hash, plugin_parent
-from perp_lab.validate.causality import causality_failures
+from perp_lab.validate.causality import causality_failures, synthetic_bars
 from perp_lab.validate.pipeline import validate_strategy
 
 log = logging.getLogger(__name__)
@@ -89,6 +89,18 @@ def resolve_family(cfg, name: str) -> str:
     return fam
 
 
+HOLDOUT_LEAD_DAYS = 60
+
+
+def lookahead_failures(cfg, cls) -> list[str]:
+    """The causality check twice: on synthetic bars at their default dates, and on synthetic bars
+    dated across the holdout start (cut points about 44 and 14 days either side), so lookahead
+    keyed to holdout dates is caught before any walk-forward or holdout read. No real data."""
+    start = cfg.holdout_start - pd.Timedelta(days=HOLDOUT_LEAD_DAYS)
+    late = causality_failures(cls, synthetic_bars(seed=1, start=str(start.date())))
+    return list(dict.fromkeys(causality_failures(cls) + [f"holdout-dated: {f}" for f in late]))
+
+
 def supersede(cfg, parent: str, tf: str, family: str) -> None:
     """A promoted child either beat its passing parent or its parent did not pass, so the
     parent's queued exam must not spend the family's single read: block it as superseded.
@@ -120,7 +132,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         return {**finish(cfg, existing["id"]), "existing": True}
 
     family = resolve_family(cfg, name)
-    fails = causality_failures(load_strategy_class(name))
+    fails = lookahead_failures(cfg, load_strategy_class(name))
     if fails:
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
@@ -128,7 +140,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
             "reasons": [f"lookahead: {f}" for f in fails], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
 
-    if parent is not None and causality_failures(load_strategy_class(parent)):
+    if parent is not None and lookahead_failures(cfg, load_strategy_class(parent)):
         raise JudgeRefused(f"parent {parent} fails the lookahead check; fix or judge it first")
 
     universe = symbols or cfg.symbols

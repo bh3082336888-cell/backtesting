@@ -69,6 +69,10 @@ the dashboard shows judgements and the holdout budget.
    peek at any column is seen. A plugin whose default params emit no signal on those bars
    cannot be verified and fails the check the same way
    (`defaults: no signals on synthetic data; causality cannot be verified`).
+   The check runs twice: on the synthetic bars at their default (2023) dates, and on synthetic
+   bars dated across the holdout start (60 days before it, so the cut points fall about 44 and
+   14 days either side). Lookahead keyed to holdout dates is caught here (reasons prefixed
+   `holdout-dated:`), before any walk-forward or holdout read, without touching holdout data.
 5. **Parent run.** First the parent must pass the same lookahead check; if it fails, refuse
    (exit code 2, nothing recorded): `parent P fails the lookahead check; fix or judge it
    first`. Then: the latest walk-forward run of the parent at the child's timeframe whose
