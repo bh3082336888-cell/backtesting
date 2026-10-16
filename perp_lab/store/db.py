@@ -415,7 +415,8 @@ def family_of(cfg, strategy: str) -> str | None:
 
 def trial_stats(cfg) -> tuple[int, float]:
     """N = distinct (strategy_hash, timeframe) among walk-forward runs, store-wide; V = sample
-    variance of the daily Sharpes of the latest run of each (0.0 when N < 2)."""
+    variance of the daily Sharpes of the latest run of each (0.0 when N < 2). The judge uses N
+    only; V is informational (the Deflated Sharpe uses the no-edge spread, see gates)."""
     with engine(cfg).connect() as c:
         df = pd.read_sql(sa.select(runs.c.strategy_hash, runs.c.timeframe, runs.c.sharpe, runs.c.created_at)
                          .where(sa.and_(runs.c.validation_mode == "walkforward", runs.c.sharpe.isnot(None))), c)

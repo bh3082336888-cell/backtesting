@@ -125,8 +125,12 @@ returns `r` (T days):
 
 - `SR` = mean(r) / std(r) (daily, not annualised); skew and kurtosis (Pearson, not excess) of r.
 - `N` = number of distinct `(strategy_hash, timeframe)` among all walk-forward runs in the store.
-- `V` = sample variance of the daily Sharpes (annualised / √365) of the latest run per
-  `(strategy_hash, timeframe)`; needs N ≥ 2.
+- `V` = the no-edge sampling variance of a daily Sharpe over the candidate's own track,
+  `1/(T−1)` (changed 2026-10-16 from the variance measured across past trials: one trial whose
+  true Sharpe is far from zero — e.g. `bb_vwap_reversion` 15m at −4.30, ruined by costs —
+  inflated the measured spread to 1.92 annualised and put the bar at ≈ 3.3 annualised OOS
+  Sharpe for every later strategy; with `1/(T−1)` it is ≈ 1.5 at N = 6 over 4 years and
+  ≈ 2.0 at N = 50). The parent is judged with the same N and its own T.
 - `SR0` = 0 if N = 1, else `√V · ((1−γ)·Φ⁻¹(1−1/N) + γ·Φ⁻¹(1−1/(N·e)))`, γ = 0.5772156649.
 - `DSR = Φ((SR − SR0)·√(T−1) / √(1 − skew·SR + (kurt−1)/4·SR²))`.
 - Gate: `DSR ≥ dsr_min` (0.95).

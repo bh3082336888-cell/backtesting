@@ -49,8 +49,14 @@ def dsr_from_moments(sr: float, t: int, skew: float, kurt: float, n_trials: int,
     return float(_N.cdf((sr - sr0) * math.sqrt(t - 1) / math.sqrt(den)))
 
 
-def deflated_sharpe(r: pd.Series, n_trials: int, var_trials: float) -> dict:
+def deflated_sharpe(r: pd.Series, n_trials: int, var_trials: float | None = None) -> dict:
+    """var_trials defaults to the no-edge sampling variance of a daily Sharpe over this track,
+    1/(T-1): the spread N unskilled strategies would show by luck alone. A spread measured across
+    past trials is inflated by any trial whose true Sharpe is far from zero (e.g. one ruined by
+    costs), which would make the bar unreachable for every later strategy."""
     sr, t, skew, kurt = moments(r)
+    if var_trials is None:
+        var_trials = 1.0 / (t - 1) if t > 1 else 0.0
     flat = t < 3 or float(r.dropna().std(ddof=1)) == 0
     return {"dsr": 0.0 if flat else dsr_from_moments(sr, t, skew, kurt, n_trials, var_trials),
             "sr0": expected_max_sharpe(n_trials, var_trials), "sr": sr, "t": t, "skew": skew, "kurt": kurt}

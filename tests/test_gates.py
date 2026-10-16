@@ -97,3 +97,10 @@ def test_positive_but_far_below_the_walk_forward_record_fails():
     ok, reasons, d = holdout_consistent(_noise(120, 6, mu=0.0003, sd=0.001), 25, WF, **KW)
     assert not ok and d["sharpe"] > 0 and d["cum_return"] < d["floor"]
     assert reasons == [r for r in reasons if r.startswith("holdout return")] and len(reasons) == 1
+
+
+def test_default_spread_is_the_no_edge_sampling_spread():
+    # with no var given, SR0 uses Var(SR) = 1/(T-1): the spread of Sharpe estimates of no-edge
+    # strategies over the candidate's own track length (T = 1461 days → 1/1460)
+    d = deflated_sharpe(_noise(1461, 7, mu=0.001), 10)
+    assert d["sr0"] == pytest.approx(0.041209121, abs=1e-9)

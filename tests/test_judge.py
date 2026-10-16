@@ -8,7 +8,7 @@ from perp_lab.cli import app
 from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, judge
 from perp_lab.store import db
 from tests.judge_fixtures import (CHEATER, NOISE, STRONG, WEAK, WIDE_TEXT, StubValidate, add_plugin,
-                                  plugins)  # noqa: F401
+                                  plugins, series)  # noqa: F401
 from tests.test_store import cfg  # noqa: F401
 
 
@@ -200,3 +200,12 @@ def test_a_plugin_edited_while_it_is_judged_gets_no_judgement(cfg, plugins):
     with pytest.raises(RuntimeError, match="donchian_atr changed while it was being judged; re-run lab judge"):
         judge(cfg, "donchian_atr", "4h", validate=editing)
     assert v.calls == ["donchian_atr"] and db.read_table(cfg, db.judgements).empty
+
+
+def test_a_broken_trial_does_not_raise_the_bar(cfg, plugins):
+    # a cost-ruined trial (Sharpe far below zero) widens the spread of past trials' Sharpes, but
+    # SR0 uses the no-edge sampling spread for the candidate's track length: 1/(1461-1) at N=2
+    v = StubValidate({"donchian_atr_wide": ("noise", series(-0.02, seed=9)), "donchian_atr": ("candidate", STRONG)})
+    v(cfg, "donchian_atr_wide", "4h")
+    j = judge(cfg, "donchian_atr", "4h", validate=v)
+    assert j["n_trials"] == 2 and j["sr0"] == pytest.approx(0.0136026191, abs=1e-9)

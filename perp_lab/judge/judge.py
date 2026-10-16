@@ -141,9 +141,9 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if rec["strategy_hash"] != h:   # the run measured other code than the version being judged
         raise RuntimeError(f"{name} changed while it was being judged; re-run lab judge")
     child = db.run_row(cfg, rec["run_id"])
-    n, v = db.trial_stats(cfg)
+    n, _ = db.trial_stats(cfg)          # N store-wide; the spread is the no-edge one (gates)
     cr = oos_portfolio(child["run_dir"])
-    d = gates.deflated_sharpe(cr, n, v)
+    d = gates.deflated_sharpe(cr, n)
     reasons = list(rec.get("fail_reasons") or [])
     if d["dsr"] < jc["dsr_min"]:
         reasons.append(f"Deflated Sharpe {d['dsr']:.2f} < {jc['dsr_min']} (N={n})")
@@ -152,7 +152,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if parent_row is not None:
         pr = oos_portfolio(parent_row["run_dir"])
         parent_passed = bool(parent_row["verdict"] == "candidate"
-                             and gates.deflated_sharpe(pr, n, v)["dsr"] >= jc["dsr_min"])
+                             and gates.deflated_sharpe(pr, n)["dsr"] >= jc["dsr_min"])
         if parent_passed:
             frac = gates.beats_parent(cr, pr, block=jc["bootstrap_block_days"], n_boot=PARENT_BOOT,
                                       seed=gates.seed_from(child["run_id"]))
