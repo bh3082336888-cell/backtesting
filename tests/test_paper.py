@@ -143,9 +143,9 @@ class _Proto:
 
 def test_ccxt_ws_drain_keeps_aiohttp_queue_accounting_balanced():
     """ccxt's receive loop drains aiohttp's websocket queue itself and carries only raw message sizes
-    onto the last entry. aiohttp 3.14 also counts 128 bytes of overhead per message, so each drained
+    onto the last entry. aiohttp 3.14.4 also counts 128 bytes of overhead per message, so each drained
     message leaked into the queue size until reading paused for good: Binance bookTicker went silent
-    ~25s in with the connection still open (live, 2026-10-15). Pinned aiohttp<3.14 in pyproject."""
+    ~25s in with the connection still open (live, 2026-10-15). Pinned aiohttp<3.14.4 in pyproject."""
     import json
 
     from aiohttp import WSMessage, WSMsgType
