@@ -166,6 +166,32 @@ def test_a_judgement_that_already_has_a_result_is_never_re_examined(cfg, plugins
     assert budget.reads_used(cfg) == 1
 
 
+FAMILY = {"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)}
+
+
+def test_a_promoted_child_supersedes_its_pending_parent(cfg, plugins):
+    budget.init_log(cfg)
+    root = judged(cfg, "donchian_atr", FAMILY, stub_run(0.003), days=100)
+    child = judged(cfg, "donchian_atr_wide", FAMILY, stub_run(0.003), days=100)
+    assert child["decision"] == "promote" and child["holdout_status"] == "pending"
+    r = db.get_judgement_by_id(cfg, root["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("blocked", "superseded")
+    out = json.loads(Path(root["verdict_path"]).read_text())
+    assert (out["holdout_status"], out["holdout_reason"]) == ("blocked", "superseded")
+    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    assert done["id"] == child["id"] and done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_a_killed_child_leaves_its_pending_parent_queued(cfg, plugins):
+    budget.init_log(cfg)
+    outcomes = {**FAMILY, "donchian_atr_wide": ("candidate", STRONG - 0.001)}
+    root = judged(cfg, "donchian_atr", outcomes, stub_run(0.003), days=100)
+    child = judged(cfg, "donchian_atr_wide", outcomes, stub_run(0.003), days=100)
+    assert child["decision"] == "kill"
+    r = db.get_judgement_by_id(cfg, root["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "too_short")
+
+
 def _numbers(o):
     if isinstance(o, dict):
         for v in o.values():

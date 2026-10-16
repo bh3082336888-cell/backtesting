@@ -2,7 +2,8 @@
 
 Spec: docs/superpowers/specs/2026-10-16-judge-design.md. Flow: pre-checks -> idempotency ->
 lookahead -> parent run -> child walk-forward -> gates -> decision -> judgement + lineage edge ->
-(optional holdout exam via `attempt`) -> public verdict.
+(a promotion supersedes its parent's pending exam) -> (optional holdout exam via `attempt`) ->
+public verdict.
 """
 
 from __future__ import annotations
@@ -82,6 +83,15 @@ def resolve_family(name: str) -> str:
     return f"family:{cur}"
 
 
+def supersede(cfg, parent: str, tf: str) -> None:
+    """A promoted child either beat its passing parent or its parent did not pass, so the
+    parent's queued exam must not spend the family's single read: block it as superseded."""
+    pj = db.get_judgement(cfg, plugin_hash(parent), tf)
+    if pj is not None and pj["holdout_status"] == "pending":
+        db.update_holdout(cfg, pj["id"], "blocked", "superseded")
+        finish(cfg, pj["id"])
+
+
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
           validate: Callable = validate_strategy, attempt: Callable | None = None) -> dict:
     jc = cfg["judge"]
@@ -150,6 +160,8 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if parent_row is not None:
         db.add_edge(cfg, parent_row["run_id"], child["run_id"], decision,
                     "; ".join(reasons) or "passed every gate", decided_by="harness")
+    if decision == "promote" and parent is not None:
+        supersede(cfg, parent, tf)
     if decision == "promote" and attempt is not None:
         try:
             attempt(cfg, jid)

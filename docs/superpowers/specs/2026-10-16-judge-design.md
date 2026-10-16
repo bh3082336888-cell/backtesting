@@ -82,7 +82,11 @@ the dashboard shows judgements and the holdout budget.
 
    Otherwise kill. Every failed check is listed as a reason.
 9. **Record** the judgement; when there is a parent, also the lineage edge
-   (`decided_by="harness"`, reason = the joined reasons).
+   (`decided_by="harness"`, reason = the joined reasons). When a child with a parent is
+   promoted and the parent's current version has a judgement at this timeframe whose
+   `holdout_status` is `pending`, that judgement becomes `blocked` with reason `superseded`
+   and its verdict is rewritten: a promoted child either beat its passing parent or its
+   parent did not pass, so the parent's queued exam must not spend the family's single read.
 10. **If promoted**, attempt the exam (see Holdout exam). Outcome sets `holdout_status`.
 11. **Write the public verdict** and print a summary. The verdict file is written even when
     the exam cannot start (e.g. the holdout log was never initialised) or crashes; the error is
@@ -191,7 +195,7 @@ New table `judgements` (created by `md.create_all`; no changes to existing colum
 | `reasons` | JSON list |
 | `dsr`, `n_trials`, `sr0` | floats / int |
 | `parent_passed`, `beats_parent_frac` | null when no parent |
-| `holdout_status`, `holdout_reason` | `n/a` for kills; the reason is a fixed code (`awaiting_exam`, `too_short`, `budget_spent`, `family_examined`, `exam_error`, `plugin_changed`, `passed`, `failed`), never a number |
+| `holdout_status`, `holdout_reason` | `n/a` for kills; the reason is a fixed code (`awaiting_exam`, `too_short`, `budget_spent`, `family_examined`, `superseded`, `exam_error`, `plugin_changed`, `passed`, `failed`), never a number |
 | `holdout_run_id` | FK runs, null until examined |
 | `created_at`, `updated_at` | |
 
