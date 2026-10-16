@@ -91,3 +91,27 @@ def test_sidebar_shows_the_holdout_budget(populated):
     at.run()
     assert any("holdout reads: 0/10" in c.value for c in at.sidebar.caption)
     assert any("earliest exam date: 2026-12-28" in c.value for c in at.sidebar.caption)
+
+
+def _launch_args(monkeypatch, *cli_args):
+    import subprocess
+
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    seen = []
+    monkeypatch.setattr(subprocess, "call", lambda args: seen.append(args) or 0)
+    r = CliRunner().invoke(app, ["dashboard", *cli_args])
+    assert r.exit_code == 0, r.output
+    return seen[0]
+
+
+def test_dashboard_listens_on_localhost_by_default(monkeypatch):
+    args = _launch_args(monkeypatch)
+    i = args.index("--server.address")
+    assert args[i + 1] == "localhost"
+
+
+def test_dashboard_address_can_be_opened_up_explicitly(monkeypatch):
+    args = _launch_args(monkeypatch, "--address", "0.0.0.0")
+    assert args[args.index("--server.address") + 1] == "0.0.0.0"

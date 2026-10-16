@@ -237,11 +237,15 @@ def exam(config: Optional[str] = CfgOpt):
 
 
 @app.command()
-def dashboard(port: int = 8501, config: Optional[str] = CfgOpt):
-    """Launch the Streamlit dashboard."""
+def dashboard(port: int = 8501,
+              address: str = typer.Option("localhost", help="bind address; 0.0.0.0 exposes the dashboard "
+                                                             "(and its paper-approval button) to the network"),
+              config: Optional[str] = CfgOpt):
+    """Launch the Streamlit dashboard (localhost only unless --address says otherwise)."""
     import subprocess
     import sys
-    args = [sys.executable, "-m", "streamlit", "run", "dashboard/app.py", "--server.port", str(port)]
+    args = [sys.executable, "-m", "streamlit", "run", "dashboard/app.py", "--server.port", str(port),
+            "--server.address", address]
     if config:
         args += ["--", "--config", config]
     raise typer.Exit(subprocess.call(args))
