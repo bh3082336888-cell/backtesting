@@ -35,13 +35,14 @@ class HoldoutToken:
             raise HoldoutViolation("HoldoutToken must be minted via issue_holdout_token()")
 
 
-def issue_holdout_token(lineage_id: str, reason: str, log_path: Path) -> HoldoutToken:
+def issue_holdout_token(lineage_id: str, reason: str, log_path: Path,
+                        judgement_id: int | None = None) -> HoldoutToken:
     tok = HoldoutToken(lineage_id, reason, secrets.token_hex(8), _MINT_KEY)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a") as f:
         f.write(json.dumps({
             "ts": datetime.now(timezone.utc).isoformat(),
-            "lineage_id": lineage_id, "reason": reason, "nonce": tok.nonce,
+            "lineage_id": lineage_id, "reason": reason, "nonce": tok.nonce, "judgement_id": judgement_id,
         }) + "\n")
     return tok
 

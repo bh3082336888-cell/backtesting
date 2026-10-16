@@ -16,6 +16,8 @@ def cfg(tmp_path):
     raw = yaml.safe_load(open("config/lab.yaml"))
     raw["runs_dir"] = str(tmp_path / "runs")
     raw["store"] = {"url": f"sqlite:///{tmp_path}/lab.db"}
+    raw["judge"] = {**raw["judge"], "holdout_log": str(tmp_path / "runs" / "holdout_log.jsonl"),
+                    "verdicts_dir": str(tmp_path / "runs" / "verdicts")}
     p = tmp_path / "lab.yaml"
     p.write_text(yaml.safe_dump(raw))
     return load_config(p)

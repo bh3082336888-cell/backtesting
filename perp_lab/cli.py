@@ -188,6 +188,18 @@ def link(parent: str, child: str, decision: str = typer.Option(..., help="promot
     typer.echo(f"{parent} → {child} [{decision}] {reason}")
 
 
+@app.command("holdout-init")
+def holdout_init(config: Optional[str] = CfgOpt):
+    """Create the empty holdout audit log (once). Exams refuse to run without it."""
+    from perp_lab.judge.budget import init_log
+    try:
+        p = init_log(load_config(config))
+    except FileExistsError as e:
+        typer.secho(str(e), fg="red")
+        raise typer.Exit(1)
+    typer.echo(f"created {p}")
+
+
 @app.command()
 def dashboard(port: int = 8501, config: Optional[str] = CfgOpt):
     """Launch the Streamlit dashboard."""

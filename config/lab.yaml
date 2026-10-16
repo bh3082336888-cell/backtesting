@@ -79,3 +79,16 @@ paper:
 
 store:
   url: sqlite:///runs/lab.db     # Postgres-ready: postgresql+psycopg://user:$PGPASSWORD@host/db
+
+# Phase 3 judge. The holdout log is the append-only record of every holdout read; create it
+# once with `lab holdout-init`. A missing or malformed log stops all exams.
+judge:
+  dsr_min: 0.95               # Deflated Sharpe gate (N = trials store-wide)
+  parent_beat_frac: 0.95      # child must beat a passing parent in this share of paired resamples
+  bootstrap_block_days: 10
+  holdout_max_reads: 10       # global cap on holdout reads
+  min_holdout_days: 180       # no exam until the holdout has this many days of complete data
+  holdout_min_trades: 10
+  holdout_floor_pct: 5        # holdout return must reach this percentile of the walk-forward record
+  holdout_log: runs/holdout_log.jsonl
+  verdicts_dir: runs/verdicts # public verdicts: the proposer's only input; never holdout numbers
