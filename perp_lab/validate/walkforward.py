@@ -15,24 +15,31 @@ Mechanics (and why):
   * Caveat: a position opened by the selected combo just before a test window
     carries into it (it is the same continuous run). No lookahead — its entry was
     decided on pre-test data — but it's not a cold start. Documented, accepted.
+  * Plugin code runs only in sandbox workers. The process pool runs trusted code:
+    each task is a one-symbol chunk of jobs in one `client.Batch`, whose decision
+    logs the trusted engine replays. Every run measures the same `PluginSource`.
 """
 
 from __future__ import annotations
 
 import itertools
 import logging
+import math
+import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from perp_lab.config import Config, load_config
 from perp_lab.data.store import load_bars
-from perp_lab.engine.backtest import EngineParams, build_arrays, run_backtest
+from perp_lab.engine.backtest import BacktestResult, EngineParams
 from perp_lab.engine.metrics import daily_returns, portfolio_returns, sharpe, summarize
-from perp_lab.strategy import load_strategy_class
+from perp_lab.plugins import PluginSource
+from perp_lab.sandbox import client
 
 log = logging.getLogger(__name__)
 
@@ -80,20 +87,8 @@ def _bars(symbol: str, tf: str) -> pd.DataFrame:
     return load_bars(_cfg(), symbol, tf)
 
 
-def run_one(args) -> dict:
-    """Continuous run of one (strategy, params, symbol). Returns compact results."""
-    name, params, symbol, tf, overrides, seed, entry_prob = args
-    cfg = _cfg()
-    bars = _bars(symbol, tf)
-    cls = load_strategy_class(name)
-    strat = cls(**params)
-    if seed is not None:
-        from perp_lab.strategy import RandomEntry
-        strat = RandomEntry(strat, entry_prob, seed)
-    feats = strat.prepare(bars)
-    ep = EngineParams.from_config(cfg, symbol, **(overrides or {}))
-    res = run_backtest(strat, bars, feats, symbol=symbol, tf=tf, ep=ep,
-                       arrays=build_arrays(bars, feats))
+def _compact(res: BacktestResult, symbol: str, params: dict, seed) -> dict:
+    """What a walk-forward keeps of one continuous run."""
     dr = daily_returns(res.equity, res.time)
     idx = pd.to_datetime(res.time, unit="ms", utc=True)
     expo = pd.Series(res.in_pos.astype(float), index=idx).resample("1D").mean()
@@ -103,13 +98,64 @@ def run_one(args) -> dict:
             "flat_bars": flat_daily, "trades": trades, "rejected": res.rejected}
 
 
-def run_many(cfg: Config, jobs: list[tuple], workers: int | None = None) -> list[dict]:
-    if workers == 1:
+def run_chunk(args) -> list[dict]:
+    """Pool task: one chunk of jobs, all on one symbol, run in one sandbox `Batch` and replayed by
+    the trusted engine. The Batch is opened and closed here, by the thread that runs the chunk (its
+    worker dies with that thread), and its worker is sent this one symbol's bars only."""
+    src, symbol, tf, jobs, stderr_dir = args
+    if any(j[1] != symbol or j[2] != tf for j in jobs):
+        raise ValueError(f"a chunk holds jobs for one symbol and timeframe only ({symbol} {tf})")
+    cfg = _cfg()
+    out = []
+    with client.Batch(cfg, src, symbol, tf, _bars(symbol, tf), stderr_dir=stderr_dir) as b:
+        for params, _, _, overrides, seed, entry_prob in jobs:
+            ep = EngineParams.from_config(cfg, symbol, **(overrides or {}))
+            res = b.backtest(params, ep, random=None if seed is None else (seed, entry_prob))
+            out.append(_compact(res, symbol, params, seed))
+    return out
+
+
+def _pieces(jobs: list[tuple], workers: int) -> list[tuple[str, str, list[int]]]:
+    """`chunks`, as indices into `jobs`."""
+    groups: dict[tuple[str, str], list[int]] = {}
+    for i, j in enumerate(jobs):
+        groups.setdefault((j[1], j[2]), []).append(i)
+    per = max(1, math.ceil(len(jobs) / max(2 * workers, len(groups))))
+    return [(s, tf, idx[k:k + per]) for (s, tf), idx in groups.items() for k in range(0, len(idx), per)]
+
+
+def chunks(jobs: list[tuple], workers: int) -> list[tuple[str, str, list]]:
+    """Jobs grouped by symbol in order, each group cut into pieces of
+    `per = ceil(len(jobs) / max(2 * workers, n_symbols))` jobs, enough to keep `workers` busy. A
+    chunk never mixes symbols, so a sandbox worker never sees a second one."""
+    return [(s, tf, [jobs[i] for i in idx]) for s, tf, idx in _pieces(jobs, workers)]
+
+
+def run_many(cfg: Config, src: PluginSource, jobs: list[tuple], workers: int | None = None,
+             stderr_dir: Path | None = None) -> list[dict]:
+    """Every job, a `(params, symbol, tf, overrides, seed, entry_prob)`, through the sandbox; the
+    results in job order. The pool runs trusted code only: each task is one chunk in one Batch."""
+    if not jobs:
+        return []
+    n = max(1, min(workers or os.cpu_count() or 1, client.max_workers(cfg)))
+    pieces = _pieces(jobs, n)
+    tasks = [(src, s, tf, [jobs[i] for i in idx], stderr_dir) for s, tf, idx in pieces]
+    if n == 1:
         _init_worker(str(cfg.path))
-        return [run_one(j) for j in jobs]
-    with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker,
-                             initargs=(str(cfg.path),)) as ex:
-        return list(ex.map(run_one, jobs, chunksize=1))
+        done = [run_chunk(t) for t in tasks]
+    else:
+        with ProcessPoolExecutor(max_workers=min(n, len(tasks)), initializer=_init_worker,
+                                 initargs=(str(cfg.path),)) as ex:
+            try:
+                done = list(ex.map(run_chunk, tasks, chunksize=1))
+            except BaseException:
+                ex.shutdown(cancel_futures=True)    # a failed chunk fails the run: don't wait out the rest
+                raise
+    out: list = [None] * len(jobs)
+    for (_, _, idx), results in zip(pieces, done):
+        for i, r in zip(idx, results):
+            out[i] = r
+    return out
 
 
 # ---------------------------------------------------------------- orchestration
@@ -141,18 +187,21 @@ class WFResult:
     grid_table: pd.DataFrame          # per combo: fixed-param metrics over the OOS span (diagnostic)
     selected: list[dict]
     oos_flat_bars: dict[str, float]
+    # The plugin bytes every run measured, and where its workers' output went; sensitivity and
+    # the random-entry benchmark run the same bytes and write there too.
+    src: PluginSource = field(repr=False)
+    stderr_dir: Path | None = field(repr=False)
     raw: dict = field(repr=False, default_factory=dict)
 
 
-def walkforward(cfg: Config, name: str, tf: str, symbols: list[str] | None = None,
-                workers: int | None = None) -> WFResult:
-    cls = load_strategy_class(name)
+def walkforward(cfg: Config, src: PluginSource, tf: str, symbols: list[str] | None = None,
+                workers: int | None = None, stderr_dir: Path | None = None) -> WFResult:
     symbols = symbols or cfg.symbols
     wf = cfg["walkforward"]
-    combos = grid_combos(cls.grid)
-    log.info("walkforward %s %s: %d combos x %d symbols", name, tf, len(combos), len(symbols))
-    jobs = [(name, c, s, tf, None, None, None) for c in combos for s in symbols]
-    results = run_many(cfg, jobs, workers)
+    combos = grid_combos(src.meta.grid)
+    log.info("walkforward %s %s: %d combos x %d symbols", src.name, tf, len(combos), len(symbols))
+    jobs = [(c, s, tf, None, None, None) for c in combos for s in symbols]
+    results = run_many(cfg, src, jobs, workers, stderr_dir)
     R: dict[tuple[str, str], dict] = {(combo_key(r["params"]), r["symbol"]): r for r in results}
     keys = [combo_key(c) for c in combos]
     cmap = dict(zip(keys, combos))
@@ -214,9 +263,9 @@ def walkforward(cfg: Config, name: str, tf: str, symbols: list[str] | None = Non
                      "times_selected": sum(1 for x in selected if x["combo"] == k)})
     grid_table = pd.DataFrame(rows)
 
-    return WFResult(name, tf, symbols, folds, oos_daily, oos_port, oos_trades, oos_expo,
+    return WFResult(src.name, tf, symbols, folds, oos_daily, oos_port, oos_trades, oos_expo,
                     oos_summary, by_sym, is_summary, grid_table, selected, flat_parts,
-                    raw={"R": R, "oos_span": (oa, ob)})
+                    src=src, stderr_dir=stderr_dir, raw={"R": R, "oos_span": (oa, ob)})
 
 
 def modal_params(wf: WFResult) -> dict:

@@ -18,8 +18,8 @@ lab link PARENT_RUN CHILD_RUN --decision kill --reason "..."   # hand-made linea
 lab paper RUN_ID                      # only runs approved for paper in the dashboard
 lab paper-refresh PAPER_RUN_ID        # recount regime changes → paper_eligible
 lab holdout-init                      # once: create the holdout read log (the judge refuses without it)
-lab judge donchian_atr_wide --tf 4h   # promote or kill against PARENT; promoted plugins queue for the exam
-lab exam                              # retry pending holdout exams (budget rules apply)
+lab judge donchian_atr_wide --tf 4h   # promote or kill against PARENT; a promotion waits for `lab exam`
+lab exam                              # the only command that runs holdout exams, and retries pending ones (budget rules apply)
 pytest
 ```
 
@@ -77,13 +77,26 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
   make ≥ 10 holdout trades, be positive, and be no worse than the walk-forward record's p5 for that length.
 - When a child is promoted, its parent's exam, if still pending in the same family, is blocked with reason
   `superseded`, so the family's one read goes to its best member, unless the audit log shows the parent
-  already holds that read (a crashed or interrupted exam), in which case it keeps it and retries.
+  already holds that read (a crashed or interrupted exam), in which case it keeps it and retries, or `lab exam`
+  is examining the parent at that moment, in which case its exam goes ahead.
 - If a plugin file is edited after it was judged, its pending exam waits with holdout status `pending` and
   reason `plugin_changed` (no new read is spent; one already spent by a crashed exam stays with it) until the
   judged version is restored; an edited plugin is a new version and is judged separately.
 - `lab exam` reports each failing exam with ` ERROR: ...`, continues with the rest, and exits 1 if any failed.
 - **Paper approval needs a passed exam**, for every strategy.
 - Public verdicts in `runs/verdicts/` carry the holdout outcome as status and code only, never numbers.
+
+## Plugin sandbox (Phase 3b-1)
+
+Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
+
+- Plugin code runs only in a confined worker process (`perp_lab/sandbox/`); `session.py` is the one module that executes it.
+- A worker reads only the Python installation (everything under `sys.base_prefix`, which for a system Python is all of `/usr`), the virtualenv and `perp_lab/`, plus the bars it is sent; not `data/`, `runs/`, `config/`, `strategies/` or anything else in `$HOME`. It writes no file and changes no file's metadata (mode, owner, times, extended attributes, inode flags), opens no socket and starts no process.
+- It reports decisions, not results: the trusted engine replays them, and any disagreement is a `mismatch`.
+- `lab judge` runs lookahead checks, walk-forward and the benchmark through workers; an error caused by the plugin is a recorded kill (`plugin_error`).
+- `lab exam` streams the holdout to each worker one bar at a time, symbols in lockstep, and is the only command that runs exams; one exam runs at a time on a machine.
+- Needs Linux, Landlock ABI 6 or later and `libseccomp.so.2`; without them plugin code does not run. No flag bypasses it.
+- Tests that need the real sandbox carry `@pytest.mark.sandbox`; run them alone with `pytest -m sandbox`.
 
 ## Rules the code enforces
 
@@ -97,7 +110,11 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 | Entry rejected if liquidation price sits inside the stop | engine step 4 |
 | OOS is the headline; IS is shown greyed and labelled | `validate/pipeline.py` report |
 | A strategy must beat random-entry (same exits, matched frequency) p95 OOS | `validate/benchmarks.py` |
-| Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days (plugin code is not sandboxed yet, so this assumes honest plugins) | `judge/budget.py`, `tests/test_budget.py` |
+| Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days | `judge/budget.py`, `tests/test_budget.py` |
+| Plugin code runs only in a confined worker: Landlock, seccomp and rlimits; it reads no data, store, log or verdict, writes no file or file metadata, opens no socket | `sandbox/confine.py`, `tests/test_confine.py` |
+| Scores come from the trusted engine replaying the plugin's decisions, never from numbers the plugin reports | `sandbox/replay.py`, `tests/test_replay.py` |
+| The exam streams the holdout one bar at a time, symbols in lockstep, so a plugin never holds a later bar | `sandbox/stream.py`, `tests/test_stream.py` |
+| Only `lab exam` runs exams; `lab judge` records `awaiting_exam` and returns | `judge/judge.py`, `tests/test_judge_exam.py` |
 | Paper approval needs a passed holdout exam | `store/db.py::approve_paper`, `tests/test_store.py` |
 | Harness lineage edges can't be overwritten by hand, nor a harness-judged run re-parented | `store/db.py::add_edge` |
 | Verdicts never carry holdout numbers | `judge/judge.py::write_verdict`, `tests/test_judge_exam.py` |

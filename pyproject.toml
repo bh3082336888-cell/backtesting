@@ -29,3 +29,6 @@ include = ["perp_lab*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "sandbox: needs the real Landlock + seccomp sandbox; skipped with the reason when confine.probe() reports one",
+]

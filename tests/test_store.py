@@ -191,9 +191,11 @@ def test_regime_count_is_min_across_pairs(cfg):
 
 def test_replay_divergence_on_identical_execution_is_zero(cfg, tmp_path):
     from perp_lab.engine.backtest import EngineParams, run_backtest
-    from perp_lab.strategy import load_strategy_class
+    from perp_lab.plugins import PluginSource
     from tests.conftest import make_bars
-    cls = load_strategy_class("donchian_atr")
+    from tests.sandbox_fixtures import load_class
+    src = PluginSource.read("donchian_atr")
+    cls = load_class("donchian_atr")
     bars = make_bars(n=1500, seed=5)
     bars["live"] = np.arange(len(bars)) >= 500
     d = tmp_path / "paper"
@@ -203,5 +205,5 @@ def test_replay_divergence_on_identical_execution_is_zero(cfg, tmp_path):
     res = run_backtest(s, bars, s.prepare(bars), symbol="BTCUSDT", tf="1h",
                        ep=EngineParams.from_config(cfg, "BTCUSDT"), start_i=500)
     pd.DataFrame(res.trades).assign(source="paper").to_parquet(d / "trades.parquet")
-    dv = replay_divergence(cfg, d, cls, {}, "1h")
+    dv = replay_divergence(cfg, d, src, {}, "1h")
     assert len(dv) and np.allclose(dv.divergence, 0)

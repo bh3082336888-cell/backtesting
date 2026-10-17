@@ -1,9 +1,12 @@
 """The judge: promote or kill a strategy plugin against its parent, with no human involved.
 
 Spec: docs/superpowers/specs/2026-10-16-judge-design.md. Flow: pre-checks -> idempotency ->
-lookahead (the child's, then the parent's) -> parent run -> child walk-forward -> gates -> decision -> judgement + lineage edge ->
-(a promotion supersedes its parent's pending exam) -> (optional holdout exam via `attempt`) ->
-public verdict.
+lookahead (the child's, then the parent's) -> parent run -> child walk-forward -> gates -> decision ->
+judgement + lineage edge -> (a promotion supersedes its parent's pending exam) -> public verdict.
+
+`judge` never runs an exam: a promotion waits as `pending` (`awaiting_exam`) for `lab exam`
+(`exam_pending` -> `attempt_exam`). The proposer runs `lab judge`, so it must not be able to time
+an exam (docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md, "Streamed exam").
 """
 
 from __future__ import annotations
@@ -18,10 +21,13 @@ import pandas as pd
 
 from perp_lab.engine.metrics import summarize
 from perp_lab.judge import budget, gates
-from perp_lab.judge.exam import run_exam, window_end
+from perp_lab.judge.exam import cost_hours, run_exam, window_end
+from perp_lab.plugins import PluginMetaError, PluginSource
+from perp_lab.sandbox import client
+from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.runs import new_run_id, repo_commit, write_run
 from perp_lab.store import db
-from perp_lab.strategy import list_plugins, load_strategy_class, plugin_hash, plugin_parent
+from perp_lab.strategy import list_plugins, plugin_hash
 from perp_lab.validate.causality import causality_failures, synthetic_bars
 from perp_lab.validate.pipeline import validate_strategy
 
@@ -70,14 +76,27 @@ def finish(cfg, jid: int) -> dict:
     return {**j, "verdict_path": str(write_verdict(cfg, j))}
 
 
-def resolve_family(cfg, name: str) -> str:
+def read_plugin(name: str) -> PluginSource:
+    """One read of a plugin's bytes; computed metadata is a refusal."""
+    try:
+        return PluginSource.read(name)
+    except PluginMetaError as e:
+        raise JudgeRefused(f"{name}: {e}") from e
+
+
+def plugin_parent(name: str, src: PluginSource | None = None) -> str | None:
+    """The PARENT a plugin declares, read from its source (`src` when already read)."""
+    return (src or read_plugin(name)).meta.parent
+
+
+def resolve_family(cfg, name: str, src: PluginSource | None = None) -> str:
     """The family of a plugin. Walk the PARENT chain from `name` to its root: the first plugin
     name on the way that already has a judgement gives its earliest family, so a judged plugin
     keeps its family (and its descendants with it) even after its PARENT line is removed or
     edited. With no judgement on the chain, the family is `family:<root>`."""
     path, cur = [name], name
     while (fam := db.family_of(cfg, cur)) is None:
-        p = plugin_parent(cur)
+        p = plugin_parent(cur, src if cur == name else None)
         if p is None:
             return f"family:{cur}"
         if p in path:
@@ -100,7 +119,7 @@ def _now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
 
-def dated_lookahead_failures(cfg, cls, until: pd.Timestamp, params: dict | None = None) -> list[str]:
+def dated_lookahead_failures(cfg, src, until: pd.Timestamp, params: dict | None = None) -> list[str]:
     """The causality check on synthetic hourly bars dated from DATED_LEAD_DAYS before the holdout
     start to `until`, cut every DATED_CUT_EVERY_DAYS from DATED_FIRST_CUT_DAYS before the holdout
     start and always at `until` itself, so lookahead keyed to any date before `until` is seen (the
@@ -118,15 +137,15 @@ def dated_lookahead_failures(cfg, cls, until: pd.Timestamp, params: dict | None 
     cuts.append(int((until - start) / _HOUR))
     bars = synthetic_bars(n=cuts[-1] + 24, seed=1, start=str(start.date()))
     return [f"holdout-dated: {f}"
-            for f in causality_failures(cls, bars, cuts=cuts, require_signals=False, params=params)]
+            for f in causality_failures(cfg, src, bars, cuts=cuts, require_signals=False, params=params)]
 
 
-def lookahead_failures(cfg, cls) -> list[str]:
+def lookahead_failures(cfg, src) -> list[str]:
     """The causality check at the synthetic bars' default dates, plus the dated check over the
     holdout up to DATED_AHEAD_DAYS past today. attempt_exam repeats the dated check over the
     actual exam window just before the read, so dates after the judged span are covered too."""
     until = max(_now(), cfg.holdout_start) + pd.Timedelta(days=DATED_AHEAD_DAYS)
-    return list(dict.fromkeys(causality_failures(cls) + dated_lookahead_failures(cfg, cls, until)))
+    return list(dict.fromkeys(causality_failures(cfg, src) + dated_lookahead_failures(cfg, src, until)))
 
 
 def supersede(cfg, parent: str, tf: str, family: str) -> None:
@@ -135,38 +154,51 @@ def supersede(cfg, parent: str, tf: str, family: str) -> None:
     Only within the child's own family (a re-pointed PARENT must not cancel another family's
     exam), and never a parent that already holds the family's read according to the audit log
     (an exam that crashed, was interrupted or later waited as plugin_changed): it retries on that
-    read. If the log can't be read, whether it holds a read is unknown, so it is left queued."""
+    read. If the log can't be read, whether it holds a read is unknown, so it is left queued.
+
+    Under the parent's exam lock, taken without waiting: while `lab exam` examines the parent, it
+    may be about to mint the family's read, so the parent is left alone (its exam goes ahead)."""
     pj = db.get_judgement(cfg, plugin_hash(parent), tf)
     if pj is None or pj["holdout_status"] != "pending" or pj["lineage_id"] != family:
         return
-    try:
-        if budget.holds_read(cfg, pj["id"], pj["lineage_id"]):
+    with budget.exam_lock(cfg, pj["id"]) as mine:
+        if not mine:
             return
-    except budget.BudgetLogError:
-        return
-    db.update_holdout(cfg, pj["id"], "blocked", "superseded")
+        pj = db.get_judgement_by_id(cfg, pj["id"])          # as it is now, under the lock
+        if pj["holdout_status"] != "pending":
+            return
+        try:
+            if budget.holds_read(cfg, pj["id"], pj["lineage_id"]):
+                return
+        except budget.BudgetLogError:
+            return
+        db.update_holdout(cfg, pj["id"], "blocked", "superseded")
     finish(cfg, pj["id"])
 
 
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
-          validate: Callable = validate_strategy, attempt: Callable | None = None) -> dict:
+          validate: Callable = validate_strategy) -> dict:
     jc = cfg["judge"]
-    parent = plugin_parent(name)
+    client.check(cfg)                    # no sandbox, no judging: SandboxUnavailable propagates
+    src = read_plugin(name)              # read once: this src and h are what is checked, run and recorded
+    h = src.hash
+    parent = src.meta.parent
+    psrc = None
     if parent is not None:
         if parent == name:
             raise JudgeRefused(f"{name} names itself as its PARENT")
         if parent not in list_plugins():
             raise JudgeRefused(f"PARENT '{parent}' is not a plugin in strategies/")
-    h = plugin_hash(name)
-    if parent is not None and plugin_hash(parent) == h:
-        raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
+        psrc = read_plugin(parent)
+        if psrc.hash == h:
+            raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
 
     existing = db.get_judgement(cfg, h, tf)
     if existing:   # (re)write its verdict under the judged strategy's name, even for a renamed copy
         return {**finish(cfg, existing["id"]), "existing": True}
 
-    family = resolve_family(cfg, name)
-    fails = lookahead_failures(cfg, load_strategy_class(name))
+    family = resolve_family(cfg, name, src)
+    fails = lookahead_failures(cfg, src)
     if fails:
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
@@ -174,25 +206,32 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
             "reasons": [f"lookahead: {f}" for f in fails], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
 
-    ph = plugin_hash(parent) if parent is not None else None   # before the check: the checked version
-    if parent is not None and lookahead_failures(cfg, load_strategy_class(parent)):
+    if psrc is not None and lookahead_failures(cfg, psrc):
         raise JudgeRefused(f"parent {parent} fails the lookahead check; fix or judge it first")
 
     universe = symbols or cfg.symbols
     parent_row = None
     if parent is not None:
-        parent_row = db.latest_wf_run(cfg, parent, tf, ph, universe, lineage_id=family)
+        parent_row = db.latest_wf_run(cfg, parent, tf, psrc.hash, universe, lineage_id=family)
         if parent_row is None:
-            prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family)
-            if prec["strategy_hash"] != ph:   # the parent run measured other code than was checked
-                raise RuntimeError(f"parent {parent} changed while it was being checked or run; "
-                                   "re-run lab judge")
+            try:
+                prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family, src=psrc)
+            except PluginError as e:
+                log.warning("parent %s failed in the sandbox: %s\n%s", parent, e.reason(),
+                            e.stderr.decode("utf-8", "replace"))
+                raise JudgeRefused(f"parent {parent} fails in the sandbox; fix or judge it first") from e
             parent_row = db.run_row(cfg, prec["run_id"])
 
-    rec, _ = validate(cfg, name, tf, symbols, workers=workers,
-                      parent_run_id=parent_row["run_id"] if parent_row else None, lineage_id=family)
-    if rec["strategy_hash"] != h:   # the run measured other code than the version being judged
-        raise RuntimeError(f"{name} changed while it was being judged; re-run lab judge")
+    try:
+        rec, _ = validate(cfg, name, tf, symbols, workers=workers,
+                          parent_run_id=parent_row["run_id"] if parent_row else None, lineage_id=family, src=src)
+    except PluginError as e:
+        log.warning("%s failed in the sandbox: %s\n%s", name, e.reason(), e.stderr.decode("utf-8", "replace"))
+        jid = db.record_judgement(cfg, {
+            "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
+            "parent_run_id": None, "lineage_id": family, "decision": "kill", "reasons": [e.reason()],
+            "holdout_status": "n/a", "holdout_reason": "n/a"})
+        return finish(cfg, jid)
     child = db.run_row(cfg, rec["run_id"])
     n, _ = db.trial_stats(cfg)          # N store-wide; the spread is the no-edge one (gates)
     cr = oos_portfolio(child["run_dir"])
@@ -224,16 +263,13 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if parent_row is not None:
         db.add_edge(cfg, parent_row["run_id"], child["run_id"], decision,
                     "; ".join(reasons) or "passed every gate", decided_by="harness")
-    if decision == "promote":
+    if decision == "promote" and parent is not None:
         try:
-            if parent is not None:
-                supersede(cfg, parent, tf, family)
-            if attempt is not None:
-                attempt(cfg, jid)
+            supersede(cfg, parent, tf, family)
         except Exception:
             finish(cfg, jid)   # the verdict file must exist even when this step fails
             raise
-    return finish(cfg, jid)
+    return finish(cfg, jid)    # a promotion stays pending (awaiting_exam): only `lab exam` examines
 
 
 HOLDOUT_BOOT = 10_000
@@ -286,37 +322,156 @@ def _record_holdout_run(cfg, j: dict, s: dict, res, ok: bool, reasons: list[str]
     return rid
 
 
-def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = window_end) -> dict:
-    """Try the holdout exam for a pending judgement, under the budget rules."""
-    j = db.get_judgement_by_id(cfg, jid)
-    if j is None or j["holdout_status"] != "pending":
-        return j
-    if plugin_hash(j["strategy"]) != j["strategy_hash"]:
+def exam_stderr_dir(cfg, jid: int) -> Path:
+    """Where an exam's workers leave their stderr, for humans."""
+    return cfg.runs_dir / "_exam_stderr" / f"judgement-{jid}"
+
+
+def failed_holdout_report(j: dict, s: dict, start: pd.Timestamp, end: pd.Timestamp, err: PluginError,
+                          stderr_dir: Path) -> str:
+    """The report.md of an exam the plugin failed, for the human (the verdict says only plugin_error)."""
+    params = json.dumps(s["sensitivity"]["base_params"], sort_keys=True, default=str)
+    return "\n".join([
+        f"# Holdout exam: {j['strategy']} @ {j['timeframe']}",
+        "",
+        f"Judgement {j['id']}, walk-forward run {j['child_run_id']}, family {j['lineage_id']}.",
+        "",
+        f"- Window: {start.date()} to {end.date()} (end exclusive), {(end - start).days} days",
+        f"- Frozen params (walk-forward modal): {params}",
+        f"- Symbols: {', '.join(s['universe'])}",
+        "",
+        "## FAILED: the plugin failed in the exam (plugin_error)",
+        "",
+        "The read is spent. The public verdict says only `failed` / `plugin_error`.",
+        "",
+        f"- Error: {err.reason()}",
+        f"- Kind: {err.kind}",
+        f"- Type: {err.type or '-'}",
+        f"- Message: {err.message or '-'}",
+        f"- Worker stderr: {stderr_dir}",
+    ]) + "\n"
+
+
+def _record_failed_holdout_run(cfg, j: dict, s: dict, end: pd.Timestamp, err: PluginError) -> str:
+    """The holdout run of an exam the plugin failed: no metrics, the error in its reasons and report."""
+    rid = new_run_id()
+    start = cfg.holdout_start
+    reasons = [err.reason()]
+    rec = {"run_id": rid, "strategy": j["strategy"], "strategy_hash": j["strategy_hash"],
+           "hypothesis": s.get("hypothesis"), "repo_commit": repo_commit(), "params": s["sensitivity"]["base_params"],
+           "universe": list(s["universe"]), "timeframes": [j["timeframe"]], "validation_mode": "holdout",
+           "date_start": str(start.date()), "date_end": str(end.date()),
+           "status": "failed", "fail_reasons": reasons, "metrics": {},
+           "lineage_id": j["lineage_id"], "parent_run_id": None,
+           "created_at": datetime.now(timezone.utc).isoformat(),
+           "notes": f"holdout exam of {j['child_run_id']} (judgement {j['id']}): plugin error"}
+    write_run(cfg, rec, {}, failed_holdout_report(j, s, start, end, err, exam_stderr_dir(cfg, j["id"])))
+    return rid
+
+
+def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = window_end,
+                 cost_fn: Callable = cost_hours) -> dict:
+    """Try the holdout exam for a pending judgement, under the budget rules. Run by `lab exam`
+    only. In order (the sandbox spec's "Streamed exam"):
+
+    1. read the plugin once; an edit since it was judged waits as plugin_changed;
+    2. a judgement already holding its read: failed / exam_error after exam_max_attempts, else the
+       window end stored at the mint, and on to 6 (the read is spent and the window fixed);
+    3. the window end (shorter than min_holdout_days: pending / too_short, before any worker
+       starts); 4. the dated lookahead check over it; 5. the cost probe (too_slow, or
+       plugin_error if the plugin fails it); 6. the sandbox check; 7. the judgement read again (no
+       longer pending, e.g. superseded meanwhile: stop, no read), then mint, storing the window end
+       (refused, failed / exam_error, once the read's attempts are used up); 8. the streamed exam.
+
+    SandboxUnavailable at any step before the mint is pending / exam_error, re-raised: nothing is
+    minted and no attempt used. A plugin error in the exam itself is failed / plugin_error (the read
+    is spent); its kind and message go only to the holdout run's report, never to the verdict.
+
+    One attempt per judgement at a time (`budget.exam_lock`, held throughout), and one exam at a
+    time on this machine (`budget.exams_lock`, likewise): while another `lab exam` examines this
+    judgement or any other (an exam can take hours), this returns it unchanged, marked
+    `in_progress`, and spends nothing.
+    """
+    with budget.exam_lock(cfg, jid) as mine, budget.exams_lock(cfg) as alone:
+        j = db.get_judgement_by_id(cfg, jid)     # read under the lock: an exam that just ended is final
+        if j is None or j["holdout_status"] != "pending":
+            return j
+        if not (mine and alone):
+            return {**j, "in_progress": True}
+        return _attempt(cfg, j, run, end_fn, cost_fn)
+
+
+def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -> dict:
+    """attempt_exam's steps, under the judgement's exam lock."""
+    jid = j["id"]
+    try:                                                     # 1. these bytes are checked and examined
+        src = PluginSource.read(j["strategy"])
+    except PluginMetaError:
+        src = None
+    if src is None or src.hash != j["strategy_hash"]:
         db.update_holdout(cfg, jid, "pending", "plugin_changed")   # never exam code that was not judged
         return finish(cfg, jid)
     child = db.run_row(cfg, j["child_run_id"])
     s = run_summary(child["run_dir"])
-    syms, tf = s["universe"], j["timeframe"]
-    end = end_fn(cfg, syms, tf)
+    syms, tf, params, fam = s["universe"], j["timeframe"], s["sensitivity"]["base_params"], j["lineage_id"]
+    jc = cfg["judge"]
+    try:                                    # the sandbox down at any step before the mint: no read, no attempt
+        if budget.holds_read(cfg, jid, fam):                 # 2. a retry on the same read
+            if budget.attempts(cfg, jid, fam) >= jc["exam_max_attempts"]:   # (the mint re-checks, locked)
+                db.update_holdout(cfg, jid, "failed", "exam_error")
+                return finish(cfg, jid)
+            end = budget.stored_window_end(cfg, jid, fam)
+            if end is None:                                  # minted before window ends were stored
+                end = end_fn(cfg, syms, tf)
+        else:
+            end = end_fn(cfg, syms, tf)                      # 3
+            if (end - cfg.holdout_start).days < jc["min_holdout_days"]:   # too short: no worker started
+                db.update_holdout(cfg, jid, "pending", "too_short")       # (the mint checks again, locked)
+                return finish(cfg, jid)
+            if dated_lookahead_failures(cfg, src, end, params=params):     # 4
+                db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
+                return finish(cfg, jid)
+            try:
+                hours = cost_fn(cfg, src, tf, syms, params, end)     # 5
+            except PluginError as err:                       # on research bars: no read is spent
+                log.warning("cost probe for judgement %s: the plugin failed: %s\n%s", jid, err.reason(),
+                            err.stderr.decode("utf-8", "replace"))
+                db.update_holdout(cfg, jid, "blocked", "plugin_error")
+                return finish(cfg, jid)
+            if hours > cfg["sandbox"]["exam_cpu_hours"]:
+                db.update_holdout(cfg, jid, "blocked", "too_slow")    # no read
+                return finish(cfg, jid)
+        client.check(cfg)                                    # 6. no sandbox, no mint
+    except SandboxUnavailable:
+        db.update_holdout(cfg, jid, "pending", "exam_error")
+        finish(cfg, jid)
+        raise
+    if db.get_judgement_by_id(cfg, jid)["holdout_status"] != "pending":   # e.g. superseded since step 1:
+        return finish(cfg, jid)                                          # no read
     days = max(0, (end - cfg.holdout_start).days)
-    if dated_lookahead_failures(cfg, load_strategy_class(j["strategy"]), end,
-                                params=s["sensitivity"]["base_params"]):
-        db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
-        return finish(cfg, jid)
-    chk, token = budget.mint(cfg, j["lineage_id"], jid, days)
+    chk, token = budget.mint(cfg, fam, jid, days, window_end=end)   # 7; failed / exam_error past the cap
     if token is None:
         db.update_holdout(cfg, jid, chk.status, chk.code)
         return finish(cfg, jid)
-    try:
-        res = run(cfg, j["strategy"], tf, syms, s["sensitivity"]["base_params"], token, end)
-        jc = cfg["judge"]
-        ok, reasons, detail = gates.holdout_consistent(
-            res.portfolio, len(res.trades), oos_portfolio(child["run_dir"]),
-            min_trades=jc["holdout_min_trades"], floor_pct=jc["holdout_floor_pct"],
-            block=jc["bootstrap_block_days"], n_boot=HOLDOUT_BOOT, seed=gates.seed_from(child["run_id"]))
-        hrid = _record_holdout_run(cfg, j, s, res, ok, reasons, detail)
-        db.update_holdout(cfg, jid, "passed" if ok else "failed", "passed" if ok else "failed", hrid)
-    except Exception:
+    if chk.code == "retry":                                  # the read was minted after step 2 looked:
+        stored = budget.stored_window_end(cfg, jid, fam)     # its window is the one fixed then
+        if stored is not None:
+            end = stored
+    try:                                                     # 8. in this process: the token never leaves it
+        try:
+            res = run(cfg, src, tf, syms, params, token, end, stderr_dir=exam_stderr_dir(cfg, jid))
+        except PluginError as err:                           # the plugin's failure: the read is spent
+            hrid = _record_failed_holdout_run(cfg, j, s, end, err)
+            log.warning("exam of judgement %s: the plugin failed; see holdout run %s", jid, hrid)
+            db.update_holdout(cfg, jid, "failed", "plugin_error", hrid)
+        else:
+            ok, reasons, detail = gates.holdout_consistent(
+                res.portfolio, len(res.trades), oos_portfolio(child["run_dir"]),
+                min_trades=jc["holdout_min_trades"], floor_pct=jc["holdout_floor_pct"],
+                block=jc["bootstrap_block_days"], n_boot=HOLDOUT_BOOT, seed=gates.seed_from(child["run_id"]))
+            hrid = _record_holdout_run(cfg, j, s, res, ok, reasons, detail)
+            db.update_holdout(cfg, jid, "passed" if ok else "failed", "passed" if ok else "failed", hrid)
+    except BaseException:                                       # a crash, or Ctrl-C: the read is spent
         db.update_holdout(cfg, jid, "pending", "exam_error")   # same judgement may retry on the same read
         finish(cfg, jid)                                        # the verdict file must still exist
         raise
@@ -324,7 +479,8 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
 
 
 def exam_pending(cfg, **kw) -> list[dict]:
-    """Retry every pending exam, oldest first; one crashing exam never blocks the rest."""
+    """Retry every pending exam, oldest first; one crashing exam never blocks the rest. While
+    another `lab exam` is examining, each comes back unchanged, marked `in_progress`."""
     out = []
     for j in db.pending_judgements(cfg):
         try:

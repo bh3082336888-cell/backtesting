@@ -14,15 +14,21 @@ Contract:
         close of bar t and filled at the open of bar t+1 by the engine.
 
 `ctx` exposes only the current bar (ctx["col"]) and the past (ctx.hist / ctx.prev).
+
+Plugin code is never loaded here. It runs only in the sandbox session
+(perp_lab/sandbox/session.py), inside the confined worker. The contract that
+holds there:
+    - PARENT, params, grid and timeframes are literals the parent reads from the
+      source without executing it.
+    - Features are numeric or bool columns.
+    - A plugin gets only the bars it is sent; it can't see later ones.
+    - Imports are limited to the read allowlist.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import math
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,43 +130,14 @@ def plugin_path(name: str) -> Path:
     return p
 
 
-def load_strategy_class(name: str) -> type[Strategy]:
-    path = plugin_path(name)
-    modname = f"lab_strategies.{name}"
-    spec = importlib.util.spec_from_file_location(modname, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[modname] = mod
-    spec.loader.exec_module(mod)
-    found = [v for v in vars(mod).values()
-             if inspect.isclass(v) and issubclass(v, Strategy) and v is not Strategy
-             and v.__module__ == modname]
-    if len(found) != 1:
-        raise ValueError(f"{path}: expected exactly one Strategy subclass, found {len(found)}")
-    cls = found[0]
-    cls.name = name
-    return cls
-
-
 def list_plugins() -> list[str]:
     return sorted(p.stem for p in STRATEGY_DIR.glob("*.py") if not p.stem.startswith("_"))
 
 
-def plugin_parent(name: str) -> str | None:
-    """The PARENT a plugin module declares (a module-level string), or None for a root."""
-    cls = load_strategy_class(name)
-    p = getattr(sys.modules[cls.__module__], "PARENT", None)
-    return str(p) if p else None
-
-
 def plugin_hash(name: str) -> str:
     """Git blob hash of the plugin file content (stable whether or not committed)."""
-    path = plugin_path(name)
-    try:
-        return subprocess.check_output(["git", "hash-object", str(path)], text=True).strip()
-    except (OSError, subprocess.CalledProcessError):
-        import hashlib
-        data = path.read_bytes()
-        return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    from perp_lab.plugins import blob_hash
+    return blob_hash(plugin_path(name).read_bytes())
 
 
 # ---------------------------------------------------------------- random-entry benchmark

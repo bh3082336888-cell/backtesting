@@ -313,7 +313,7 @@ def page_detail():
 def judgement_section(rid):
     j = db.judgement_for_run(CFG, rid)
     if j is None:
-        st.caption("Not judged. `lab judge` decides promote or kill and, if promoted, runs the holdout exam.")
+        st.caption("Not judged. `lab judge` decides promote or kill; `lab exam` runs the holdout exam of a promoted one.")
         return
     st.subheader("Judge")
     c = st.columns(4)
@@ -383,8 +383,8 @@ def paper_section(r, rid, status):
                    f"(both required). Refresh regime count: `lab paper-refresh {p.run_id}`")
         try:
             from perp_lab.paper.tracking import replay_divergence
-            from perp_lab.strategy import load_strategy_class
-            dv = replay_divergence(CFG, Path(p.run_dir), load_strategy_class(p.strategy), p.params or {}, p.timeframe)
+            from perp_lab.plugins import PluginSource
+            dv = replay_divergence(CFG, Path(p.run_dir), PluginSource.read(p.strategy), p.params or {}, p.timeframe)
         except Exception as e:  # shown, not swallowed
             st.warning(f"divergence unavailable: {e}")
             dv = pd.DataFrame()

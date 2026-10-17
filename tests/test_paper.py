@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 
 import numpy as np
@@ -7,15 +8,55 @@ import pytest
 
 from perp_lab.engine.backtest import EngineParams
 from perp_lab.paper.runner import PaperBook, PaperRunner
+from perp_lab.plugins import PluginSource
+from perp_lab.sandbox import client
+from perp_lab.sandbox.decisions import decide_last
+from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.strategy import EXIT, Signal
-from tests.conftest import Scripted, flat_bars
+from tests.conftest import Scripted, flat_bars, market_config
+from tests.judge_fixtures import plugins  # noqa: F401
 
 EP = EngineParams()
 
 
+def scripted_decide(schedule):
+    s = Scripted(schedule)
+    return lambda bars, pv: decide_last(s, "X", bars, pv)
+
+
+ALWAYS = '''"""Always long."""
+from perp_lab.strategy import Signal, Strategy
+
+
+class Always(Strategy):
+    def prepare(self, bars):
+        return bars[[]]
+
+    def on_bar(self, ctx):
+        return Signal("long", stop=90.0)
+'''
+
+FAILS_SECOND = '''"""Raises on its second bar."""
+from perp_lab.strategy import Signal, Strategy
+
+CALLS = []
+
+
+class Fails(Strategy):
+    def prepare(self, bars):
+        return bars[[]]
+
+    def on_bar(self, ctx):
+        CALLS.append(1)
+        if len(CALLS) == 2:
+            raise RuntimeError("boom")
+        return Signal("long", stop=90.0)
+'''
+
+
 def test_paper_fills_at_book_and_stops_on_bid():
     b = flat_bars(10)
-    book = PaperBook(Scripted({9: Signal("long", stop=95.0)}), "X", "1h", EP)
+    book = PaperBook(scripted_decide({9: Signal("long", stop=95.0)}), "X", "1h", EP)
     book.on_closed_bar(b)
     book.on_quote(99.9, 100.1, 1)
     assert book.pos["entry_price"] == 100.1          # bought the ask
@@ -31,13 +72,29 @@ def test_paper_trade_schema_matches_backtest():
     b = flat_bars(20)
     s = Scripted({5: Signal("long", stop=95.0), 8: EXIT})
     bt = run_backtest(s, b, s.prepare(b), symbol="X", tf="1h", ep=EP).trades[0]
-    book = PaperBook(Scripted({9: Signal("long", stop=95.0)}), "X", "1h", EP)
+    book = PaperBook(scripted_decide({9: Signal("long", stop=95.0)}), "X", "1h", EP)
     book.on_closed_bar(b.iloc[:10])
     book.on_quote(99.9, 100.1, 1)
     book.pending = EXIT
     book.on_quote(99.9, 100.1, 2)
     pt = book.trades[0]
     assert set(bt) <= set(pt) and set(pt) - set(bt) == {"source"}
+
+
+def test_paper_refuses_a_fill_that_makes_equity_not_finite():
+    # The exam's check, in paper: a target at an infinite price on the wrong side of a short (a hold
+    # moved it there) would close at it and leave equity at -inf.
+    book = PaperBook(scripted_decide({9: Signal("short", stop=110.0)}), "X", "1h", EP)
+    book.on_closed_bar(flat_bars(10))
+    book.on_quote(99.9, 100.1, 1)                    # short at the bid
+    assert book.pos is not None and book.pos["side"] == -1
+    book.decide = lambda bars, pv: Signal("hold", None, math.inf)
+    book.on_closed_bar(flat_bars(11))
+    w, pos = book.W, dict(book.pos)
+    with pytest.raises(PluginError) as e:
+        book.on_quote(99.9, 100.1, 2)                # ask < target: the target "fills"
+    assert e.value.kind == "mismatch" and "finite" in e.value.message
+    assert book.W == w and book.pos == pos and book.trades == []    # nothing booked
 
 
 class FakeEx:
@@ -182,10 +239,126 @@ def test_ccxt_ws_drain_keeps_aiohttp_queue_accounting_balanced():
 def test_paper_runner_loop_with_fake_exchange(tmp_path):
     from perp_lab.config import load_config
     cfg = load_config()
-    cls = type("Always", (Scripted,), {"__init__": lambda self, **kw: Scripted.__init__(
-        self, {i: Signal("long", stop=90.0) for i in range(2000)})})
-    r = PaperRunner(cfg, cls, {}, "1h", ["BTCUSDT"], tmp_path, exchange=FakeEx())
+    r = PaperRunner(cfg, PluginSource.from_text("always", ALWAYS), {}, "1h", ["BTCUSDT"], tmp_path,
+                    exchange=FakeEx())
     asyncio.run(r.run(max_bars=3))
     assert r.books["BTCUSDT"].pos is not None
     assert r.books["BTCUSDT"].pos["entry_price"] == 100.1   # filled at the live ask
     assert (tmp_path / "state.json").exists()
+
+
+OVERFLOWS = '''"""Shorts, then moves its target far above the price: finite, but a fill there overflows."""
+from perp_lab.strategy import HOLD, Signal, Strategy, enter
+
+
+class Overflows(Strategy):
+    def prepare(self, bars):
+        return bars[[]]
+
+    def entry(self, ctx):
+        return enter(-1, 1.1 * ctx["close"])
+
+    def manage(self, ctx):
+        return Signal("hold", None, 1.7e308)
+'''
+
+
+class SlowFakeEx(FakeEx):
+    """A candle every 20 ms, so quotes (every 1 ms) come between closes."""
+
+    async def watch_ohlcv(self, sym, tf):
+        await asyncio.sleep(0.02)
+        return await super().watch_ohlcv(sym, tf)
+
+
+def test_paper_stops_when_a_fill_makes_equity_not_finite(tmp_path):
+    from perp_lab.config import load_config
+    r = PaperRunner(load_config(), PluginSource.from_text("overflows", OVERFLOWS), {}, "1h", ["BTCUSDT"],
+                    tmp_path, exchange=SlowFakeEx())
+    with pytest.raises(PluginError) as e:
+        asyncio.run(r.run(max_bars=8))
+    assert e.value.kind == "mismatch"
+    assert r.books["BTCUSDT"].trades == [] and np.isfinite(r.books["BTCUSDT"].W)
+
+
+def test_paper_stops_when_its_worker_fails(tmp_path):
+    from perp_lab.config import load_config
+    r = PaperRunner(load_config(), PluginSource.from_text("fails", FAILS_SECOND), {}, "1h", ["BTCUSDT"],
+                    tmp_path, exchange=FakeEx())
+    with pytest.raises(PluginError):
+        asyncio.run(r.run(max_bars=5))
+    assert (tmp_path / "state.json").exists()
+
+
+def test_paper_closes_its_workers(tmp_path, monkeypatch):
+    from perp_lab.config import load_config
+    made = []
+    real = client.spawn
+
+    def spy(cfg, src):
+        w = real(cfg, src)
+        closed = []
+        w.close = lambda: closed.append(1)
+        made.append(closed)
+        return w
+    monkeypatch.setattr(client, "spawn", spy)
+    r = PaperRunner(load_config(), PluginSource.from_text("always", ALWAYS), {}, "1h", ["BTCUSDT"], tmp_path,
+                    exchange=FakeEx())
+    asyncio.run(r.run(max_bars=2))
+    assert made == [[1]]
+
+
+def test_cli_backtest_runs_through_the_sandbox(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    cfg = market_config(tmp_path)
+    spawned = []
+    real = client.spawn
+    monkeypatch.setattr(client, "spawn", lambda c, src: spawned.append(src.name) or real(c, src))
+    r = CliRunner().invoke(app, ["backtest", "donchian_atr", "--tf", "4h", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+    assert spawned == ["donchian_atr"] * len(cfg.symbols)
+
+
+def _no_sandbox(monkeypatch):
+    def unavailable(*a, **kw):
+        raise SandboxUnavailable("Landlock ABI 5 < 6")
+    monkeypatch.setattr(client, "spawn", unavailable)
+
+
+@pytest.mark.parametrize("command", [["backtest", "donchian_atr", "--tf", "4h"],
+                                     ["walkforward", "donchian_atr", "--tf", "4h", "--workers", "1"]])
+def test_cli_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins, command):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    cfg = market_config(tmp_path)
+    _no_sandbox(monkeypatch)
+    r = CliRunner().invoke(app, command + ["--config", str(cfg.path)])
+    assert (r.exit_code, type(r.exception)) == (1, SystemExit), r.exception    # no traceback
+    assert "sandbox unavailable: Landlock ABI 5 < 6" in r.output
+
+
+def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    from perp_lab.store import db
+    from tests.test_store import fake_run
+    cfg = market_config(tmp_path)
+    fake_run(cfg, "c1", strategy="donchian_atr", verdict="candidate")
+    jid = db.record_judgement(cfg, {
+        "strategy": "donchian_atr", "timeframe": "4h", "strategy_hash": "abc", "child_run_id": "c1",
+        "parent_run_id": None, "lineage_id": "c1", "decision": "promote", "reasons": [],
+        "holdout_status": "pending", "holdout_reason": "awaiting_exam"})
+    db.update_holdout(cfg, jid, "passed", "passed")
+    db.approve_paper(cfg, "c1", "me")
+
+    async def run(self, max_bars=None):          # as the runner's first spawn would
+        client.spawn(self.cfg, self.src)
+    monkeypatch.setattr(PaperRunner, "run", run)
+    _no_sandbox(monkeypatch)
+    r = CliRunner().invoke(app, ["paper", "c1", "--config", str(cfg.path)])
+    assert (r.exit_code, type(r.exception)) == (1, SystemExit), r.exception
+    assert "sandbox unavailable: Landlock ABI 5 < 6" in r.output

@@ -9,8 +9,9 @@ import pandas as pd
 import pytest
 
 from perp_lab.engine.metrics import sharpe
+from perp_lab.plugins import PluginSource
 from perp_lab.runs import new_run_id, write_run
-from perp_lab.strategy import load_strategy_class, plugin_hash
+from perp_lab.strategy import plugin_hash
 
 DAYS = pd.date_range("2022-07-01", periods=1461, freq="D", tz="UTC")
 
@@ -71,16 +72,18 @@ class StubValidate:
         self.outcomes, self.calls = outcomes, []
 
     def __call__(self, cfg, name, tf, symbols=None, seeds=None, workers=None, notes="",
-                 parent_run_id=None, lineage_id=None):
+                 parent_run_id=None, lineage_id=None, src=None):
         self.calls.append(name)
         verdict, oos = self.outcomes[name]
         rid = new_run_id()
-        rec = {"run_id": rid, "strategy": name, "strategy_hash": plugin_hash(name), "hypothesis": "h",
+        h = src.hash if src is not None else plugin_hash(name)
+        rec = {"run_id": rid, "strategy": name, "strategy_hash": h, "hypothesis": "h",
                "params": {}, "universe": symbols or cfg.symbols, "timeframes": [tf],
                "validation_mode": "walkforward", "status": verdict,
                "fail_reasons": [] if verdict == "candidate" else ["does not beat random-entry p95 OOS"],
                "metrics": {"sharpe": sharpe(oos), "trades": 100},
-               "sensitivity": {"base_params": dict(load_strategy_class(name).params), "narrow_island": False},
+               "sensitivity": {"base_params": dict((src or PluginSource.read(name)).meta.params),
+                               "narrow_island": False},
                "parent_run_id": parent_run_id, "lineage_id": lineage_id,
                "created_at": pd.Timestamp.now(tz="UTC").isoformat()}
         d = write_run(cfg, rec, {"oos_daily": pd.DataFrame({"PORTFOLIO": oos})})

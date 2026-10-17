@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from perp_lab.plugins import PluginSource
 from perp_lab.runs import new_run_id, repo_commit, verdict, write_run
-from perp_lab.strategy import load_strategy_class, plugin_hash
 from perp_lab.validate.benchmarks import buy_and_hold, random_entry, regime_split
 from perp_lab.validate.montecarlo import mc_drawdown
 from perp_lab.validate.sensitivity import sensitivity
@@ -72,12 +72,16 @@ def render_report(rec: dict, regime: pd.DataFrame, monthly: pd.DataFrame) -> str
 
 def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers=None,
                       notes: str = "", parent_run_id: str | None = None,
-                      lineage_id: str | None = None) -> tuple[dict, str]:
+                      lineage_id: str | None = None, src: PluginSource | None = None) -> tuple[dict, str]:
+    """Walk-forward, sensitivity and benchmarks of one plugin version, recorded as a run. The bytes
+    are read once (or given as `src`): every stage runs them, and the run records their hash."""
     from perp_lab.engine.metrics import monthly_table
 
-    h0 = plugin_hash(name)   # the version this run measures; checked again before recording
-    cls = load_strategy_class(name)
-    wf = walkforward(cfg, name, tf, symbols, workers)
+    src = PluginSource.read(name) if src is None else src
+    if src.name != name:
+        raise ValueError(f"source of {src.name} given to validate {name}")
+    rid = new_run_id()
+    wf = walkforward(cfg, src, tf, symbols, workers, cfg.runs_dir / rid / "sandbox_stderr")
     log.info("walkforward done; OOS Sharpe %.2f", wf.oos_summary["sharpe"])
     sens = sensitivity(cfg, wf, workers)
     rnd = random_entry(cfg, wf, seeds, workers)
@@ -88,11 +92,10 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     monthly = monthly_table(wf.oos_portfolio)
     status, fails = verdict(wf.oos_summary, rnd, sens)
 
-    rid = new_run_id()
     rec = {
-        "run_id": rid, "strategy": name, "strategy_hash": h0,
-        "hypothesis": cls.hypothesis(), "repo_commit": repo_commit(),
-        "params": {"grid": cls.grid, "defaults": cls.params},
+        "run_id": rid, "strategy": name, "strategy_hash": src.hash,
+        "hypothesis": src.meta.hypothesis, "repo_commit": repo_commit(),
+        "params": {"grid": src.meta.grid, "defaults": src.meta.params},
         "universe": wf.symbols, "timeframes": [tf],
         "date_start": str(wf.folds[0]["train_start"].date()), "date_end": str(ob.date()),
         "oos_start": str(oa.date()), "holdout_start": str(cfg.holdout_start.date()),
@@ -116,8 +119,6 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
         "random_sharpes": pd.DataFrame({"sharpe": rnd.get("sharpes", [])}),
     }
     report = render_report(rec, reg, monthly)
-    if plugin_hash(name) != h0:   # workers/sensitivity load the plugin separately: mixed versions
-        raise RuntimeError(f"{name} changed during its walk-forward; nothing recorded, re-run it")
     d = write_run(cfg, rec, frames, report)
     rec["run_dir"] = str(d)
     return rec, report

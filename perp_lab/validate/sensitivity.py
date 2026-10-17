@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 
 from perp_lab.engine.metrics import portfolio_returns, sharpe
-from perp_lab.strategy import load_strategy_class
 from perp_lab.validate.walkforward import WFResult, _window, combo_key, modal_params, run_many
 
 
@@ -33,13 +32,12 @@ def _variants(params: dict, steps: list[float]) -> list[tuple[str, float, dict]]
 
 
 def sensitivity(cfg, wf: WFResult, workers=None) -> dict:
-    cls = load_strategy_class(wf.strategy)
-    base = {**cls.params, **modal_params(wf)}
+    base = {**wf.src.meta.params, **modal_params(wf)}
     steps = cfg["validation"]["sensitivity_steps"]
     var = _variants(base, steps)
     all_params = [base] + [p for _, _, p in var]
-    jobs = [(wf.strategy, p, s, wf.tf, None, None, None) for p in all_params for s in wf.symbols]
-    res = run_many(cfg, jobs, workers)
+    jobs = [(p, s, wf.tf, None, None, None) for p in all_params for s in wf.symbols]
+    res = run_many(cfg, wf.src, jobs, workers, wf.stderr_dir)
     oa, ob = wf.raw["oos_span"]
     by = {}
     for r in res:

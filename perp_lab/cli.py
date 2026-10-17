@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -17,6 +18,18 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 log = logging.getLogger("lab")
 
 CfgOpt = typer.Option(None, "--config", "-c", help="path to lab.yaml")
+
+
+@contextmanager
+def _sandbox_required():
+    """Plugin code runs only in the sandbox: where this machine can't provide one, say why and exit
+    1, without a traceback."""
+    from perp_lab.sandbox.errors import SandboxUnavailable
+    try:
+        yield
+    except SandboxUnavailable as e:
+        typer.secho(f"sandbox unavailable: {e}", fg="red")
+        raise typer.Exit(1)
 
 
 def _syms(cfg, symbols: Optional[str]) -> list[str]:
@@ -57,10 +70,11 @@ def tail(symbols: Optional[str] = None, tfs: Optional[str] = None, config: Optio
 @app.command()
 def strategies():
     """List strategy plugins and their hypotheses."""
-    from perp_lab.strategy import list_plugins, load_strategy_class, plugin_hash
+    from perp_lab.plugins import PluginSource
+    from perp_lab.strategy import list_plugins
     for n in list_plugins():
-        c = load_strategy_class(n)
-        typer.echo(f"{n} [{plugin_hash(n)[:10]}] tfs={c.timeframes}\n  {c.hypothesis()}")
+        s = PluginSource.read(n)
+        typer.echo(f"{n} [{s.hash[:10]}] tfs={s.meta.timeframes}\n  {s.meta.hypothesis}")
 
 
 @app.command()
@@ -69,26 +83,27 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
              config: Optional[str] = CfgOpt):
     """Single fixed-param backtest over the research span. This is IN-SAMPLE by definition."""
     from perp_lab.data.store import load_bars
-    from perp_lab.engine.backtest import EngineParams, run_backtest
+    from perp_lab.engine.backtest import EngineParams
     from perp_lab.engine.metrics import daily_returns, portfolio_returns, summarize
+    from perp_lab.plugins import PluginSource
     from perp_lab.runs import new_run_id, repo_commit, write_run
-    from perp_lab.strategy import load_strategy_class, plugin_hash
+    from perp_lab.sandbox import client
 
     cfg = load_config(config)
-    cls = load_strategy_class(strategy)
+    src = PluginSource.read(strategy)
     p = json.loads(params)
     per, trades = {}, []
     for s in _syms(cfg, symbols):
         bars = load_bars(cfg, s, tf)
-        st = cls(**p)
-        r = run_backtest(st, bars, st.prepare(bars), symbol=s, tf=tf, ep=EngineParams.from_config(cfg, s))
+        with _sandbox_required(), client.Batch(cfg, src, s, tf, bars) as batch:
+            r = batch.backtest({**src.meta.params, **p}, EngineParams.from_config(cfg, s))
         per[s] = daily_returns(r.equity, r.time)
         trades += r.trades
     tr = pd.DataFrame(trades)
     m = summarize(portfolio_returns(per), tr)
     rid = new_run_id()
-    rec = {"run_id": rid, "strategy": strategy, "strategy_hash": plugin_hash(strategy),
-           "hypothesis": cls.hypothesis(), "repo_commit": repo_commit(), "params": {**cls.params, **p},
+    rec = {"run_id": rid, "strategy": strategy, "strategy_hash": src.hash,
+           "hypothesis": src.meta.hypothesis, "repo_commit": repo_commit(), "params": {**src.meta.params, **p},
            "universe": list(per), "timeframes": [tf], "validation_mode": "IS",
            "date_start": str(cfg.history_start.date()), "date_end": str(cfg.holdout_start.date()),
            "metrics": m, "parent_run_id": None, "created_at": datetime.now(timezone.utc).isoformat(),
@@ -109,8 +124,9 @@ def walkforward(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
     """Walk-forward + sensitivity + random-entry + MC + regime split. OOS headline only."""
     from perp_lab.validate.pipeline import validate_strategy
     cfg = load_config(config)
-    rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
-                                    parent_run_id=parent_run)
+    with _sandbox_required():
+        rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
+                                        parent_run_id=parent_run)
     o, i = rec["metrics"], rec["is_metrics"]
     typer.secho(f"{strategy} @ {tf}  →  {rec['status'].upper()}", bold=True,
                 fg="red" if rec["status"] == "noise" else "green")
@@ -131,7 +147,7 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
     from perp_lab.paper.runner import PaperRunner
     from perp_lab.runs import new_run_id, repo_commit
     from perp_lab.store.db import current_status, engine, record_run, runs
-    from perp_lab.strategy import load_strategy_class, plugin_hash
+    from perp_lab.plugins import PluginSource
     cfg = load_config(config)
     with engine(cfg).connect() as c:
         r = c.execute(sa.select(runs).where(runs.c.run_id == from_run)).mappings().first()
@@ -143,20 +159,21 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
         raise typer.Exit(2)
     params = (r["metrics"] or {}).get("modal_params") or json.loads(
         (cfg.runs_dir / from_run / "summary.json").read_text())["sensitivity"]["base_params"]
-    cls = load_strategy_class(r["strategy"])
+    src = PluginSource.read(r["strategy"])
     rid = new_run_id()
     out = cfg.runs_dir / rid
     syms = _syms(cfg, symbols) if symbols else r["universe"]
     started = datetime.now(timezone.utc)
-    record_run(cfg, {"run_id": rid, "strategy": r["strategy"], "strategy_hash": plugin_hash(r["strategy"]),
-                     "hypothesis": cls.hypothesis(), "params": params, "universe": syms,
+    record_run(cfg, {"run_id": rid, "strategy": r["strategy"], "strategy_hash": src.hash,
+                     "hypothesis": src.meta.hypothesis, "params": params, "universe": syms,
                      "timeframes": [r["timeframe"]], "validation_mode": "paper", "repo_commit": repo_commit(),
                      "parent_run_id": from_run, "lineage_id": r["lineage_id"], "created_at": started.isoformat(),
                      "paper_started_at": started.isoformat(), "metrics": {},
                      "artifacts": {"trades": str(out / "trades.parquet")}}, out)
     typer.echo(f"paper run {rid} → {out}")
-    pr = PaperRunner(cfg, cls, params, r["timeframe"], syms, out)
-    asyncio.run(pr.run(max_bars=max_bars))
+    pr = PaperRunner(cfg, src, params, r["timeframe"], syms, out)
+    with _sandbox_required():
+        asyncio.run(pr.run(max_bars=max_bars))
 
 
 @app.command("paper-refresh")
@@ -203,12 +220,14 @@ def holdout_init(config: Optional[str] = CfgOpt):
 @app.command()
 def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers: Optional[int] = None,
           config: Optional[str] = CfgOpt):
-    """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam."""
-    from perp_lab.judge.judge import JudgeRefused, attempt_exam
+    """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam,
+    which only `lab exam` runs."""
+    from perp_lab.judge.judge import JudgeRefused
     from perp_lab.judge.judge import judge as run_judge
     cfg = load_config(config)
     try:
-        j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers, attempt=attempt_exam)
+        with _sandbox_required():
+            j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers)
     except JudgeRefused as e:
         typer.secho(f"refused: {e}", fg="red")
         raise typer.Exit(2)
@@ -224,12 +243,16 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
 
 @app.command()
 def exam(config: Optional[str] = CfgOpt):
-    """Attempt the holdout exam for every pending promotion (budget rules apply)."""
+    """Attempt the holdout exam for every pending promotion (budget rules apply). The only command
+    that runs exams; the proposer never runs it."""
     from perp_lab.judge.judge import exam_pending
     done = exam_pending(load_config(config))
     if not done:
         typer.echo("no pending exams")
     for j in done:
+        if j.get("in_progress"):
+            typer.echo(f"{j['strategy']} @ {j['timeframe']}: in progress elsewhere (another `lab exam` is running)")
+            continue
         err = f" ERROR: {j['error']}" if "error" in j else ""
         typer.echo(f"{j['strategy']} @ {j['timeframe']}: {j['holdout_status']} ({j['holdout_reason']}){err}")
     if any("error" in j for j in done):

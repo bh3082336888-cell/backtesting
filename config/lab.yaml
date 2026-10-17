@@ -92,3 +92,15 @@ judge:
   holdout_floor_pct: 5        # holdout return must reach this percentile of the walk-forward record
   holdout_log: runs/holdout_log.jsonl
   verdicts_dir: runs/verdicts # public verdicts: the proposer's only input; never holdout numbers
+  exam_max_attempts: 3        # attempts per holdout read, then failed / exam_error
+
+# Plugin code runs only in confined worker processes (Landlock + seccomp); see
+# docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md.
+sandbox:
+  memory_mb: 3072        # per worker (RLIMIT_AS)
+  task_cpu_s: 900        # one batch run (one params x symbol)
+  wall_factor: 4         # its wall-clock limit = task_cpu_s x wall_factor
+  stream_step_s: 30      # one stream step, CPU and wall clock (a 5m step takes ~0.1 s)
+  exam_cpu_hours: 6      # per symbol; the cost probe blocks an exam estimated above it
+  max_output_mb: 64      # largest message a worker may send
+  min_landlock_abi: 6
