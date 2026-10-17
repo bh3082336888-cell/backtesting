@@ -229,11 +229,11 @@ def _steps(rows, which: int) -> tuple[list, list]:
     `rows` holds (entry_ms, exit_ms, levels-or-None, initial value). A level runs from its time to the
     next one's, the last to the exit. Times never go backwards: a paper level can be stamped before the
     entry fill, so each is clamped to the previous vertex."""
-    xs, ys = [], []
+    ms, ys = [], []        # x in epoch ms, converted to times in one call below; None marks a break
 
     def cut():
-        if xs and xs[-1] is not None:
-            xs.append(None)
+        if ms and ms[-1] is not None:
+            ms.append(None)
             ys.append(None)
 
     for entry, exit_, lv, init in rows:
@@ -241,19 +241,20 @@ def _steps(rows, which: int) -> tuple[list, list]:
             times, vals = [entry], [init]
         else:
             times, vals = lv[0], lv[which]
-        at, prev = [], entry
-        for tm in times:
-            prev = max(prev, tm)
-            at.append(prev)
-        at.append(max(prev, exit_))
+        at = np.maximum.accumulate(np.array([entry, *times], dtype="int64"))[1:]
+        at = np.append(at, max(at[-1], exit_)).tolist()
         for k, v in enumerate(vals):
             if pd.isna(v):
                 cut()
                 continue
-            xs += [_x(_utc(at[k])), _x(_utc(at[k + 1]))]
+            ms += [at[k], at[k + 1]]
             ys += [v, v]
         cut()
-    return xs, ys
+    keep = np.array([m is not None for m in ms], dtype=bool)
+    xs = np.empty(len(ms), dtype=object)
+    xs[~keep] = None
+    xs[keep] = list(_x(_utc(np.array([m for m in ms if m is not None], dtype="int64"))))
+    return xs.tolist(), ys
 
 
 def _draw_trades(fig: go.Figure, t: pd.DataFrame, candles: pd.DataFrame, p: dict) -> None:
