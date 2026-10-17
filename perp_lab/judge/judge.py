@@ -22,7 +22,7 @@ from perp_lab.judge.exam import run_exam, window_end
 from perp_lab.plugins import PluginMetaError, PluginSource
 from perp_lab.runs import new_run_id, repo_commit, write_run
 from perp_lab.store import db
-from perp_lab.strategy import list_plugins, load_strategy_class, plugin_hash
+from perp_lab.strategy import list_plugins, plugin_hash
 from perp_lab.validate.causality import causality_failures, synthetic_bars
 from perp_lab.validate.pipeline import validate_strategy
 
@@ -109,7 +109,7 @@ def _now() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
 
-def dated_lookahead_failures(cfg, cls, until: pd.Timestamp, params: dict | None = None) -> list[str]:
+def dated_lookahead_failures(cfg, src, until: pd.Timestamp, params: dict | None = None) -> list[str]:
     """The causality check on synthetic hourly bars dated from DATED_LEAD_DAYS before the holdout
     start to `until`, cut every DATED_CUT_EVERY_DAYS from DATED_FIRST_CUT_DAYS before the holdout
     start and always at `until` itself, so lookahead keyed to any date before `until` is seen (the
@@ -127,15 +127,15 @@ def dated_lookahead_failures(cfg, cls, until: pd.Timestamp, params: dict | None 
     cuts.append(int((until - start) / _HOUR))
     bars = synthetic_bars(n=cuts[-1] + 24, seed=1, start=str(start.date()))
     return [f"holdout-dated: {f}"
-            for f in causality_failures(cls, bars, cuts=cuts, require_signals=False, params=params)]
+            for f in causality_failures(cfg, src, bars, cuts=cuts, require_signals=False, params=params)]
 
 
-def lookahead_failures(cfg, cls) -> list[str]:
+def lookahead_failures(cfg, src) -> list[str]:
     """The causality check at the synthetic bars' default dates, plus the dated check over the
     holdout up to DATED_AHEAD_DAYS past today. attempt_exam repeats the dated check over the
     actual exam window just before the read, so dates after the judged span are covered too."""
     until = max(_now(), cfg.holdout_start) + pd.Timedelta(days=DATED_AHEAD_DAYS)
-    return list(dict.fromkeys(causality_failures(cls) + dated_lookahead_failures(cfg, cls, until)))
+    return list(dict.fromkeys(causality_failures(cfg, src) + dated_lookahead_failures(cfg, src, until)))
 
 
 def supersede(cfg, parent: str, tf: str, family: str) -> None:
@@ -175,7 +175,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         return {**finish(cfg, existing["id"]), "existing": True}
 
     family = resolve_family(cfg, name)
-    fails = lookahead_failures(cfg, load_strategy_class(name))
+    fails = lookahead_failures(cfg, PluginSource.read(name))
     if fails:
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
@@ -184,7 +184,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         return finish(cfg, jid)
 
     ph = plugin_hash(parent) if parent is not None else None   # before the check: the checked version
-    if parent is not None and lookahead_failures(cfg, load_strategy_class(parent)):
+    if parent is not None and lookahead_failures(cfg, PluginSource.read(parent)):
         raise JudgeRefused(f"parent {parent} fails the lookahead check; fix or judge it first")
 
     universe = symbols or cfg.symbols
@@ -308,7 +308,7 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     syms, tf = s["universe"], j["timeframe"]
     end = end_fn(cfg, syms, tf)
     days = max(0, (end - cfg.holdout_start).days)
-    if dated_lookahead_failures(cfg, load_strategy_class(j["strategy"]), end,
+    if dated_lookahead_failures(cfg, PluginSource.read(j["strategy"]), end,
                                 params=s["sensitivity"]["base_params"]):
         db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
         return finish(cfg, jid)

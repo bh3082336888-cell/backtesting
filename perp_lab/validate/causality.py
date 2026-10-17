@@ -11,10 +11,16 @@ about it.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pandas as pd
 
-from perp_lab.engine.backtest import EngineParams, run_backtest
+from perp_lab.engine.backtest import EngineParams
+from perp_lab.plugins import PluginSource
+from perp_lab.sandbox import client
+from perp_lab.sandbox.client import RunOutput
+from perp_lab.sandbox.errors import PluginError
 
 H = 3_600_000
 CUTS = [400, 1100, 1777, 2500]
@@ -48,23 +54,12 @@ def synthetic_bars(n=3000, seed=0, start="2023-01-01", funding_every=8, tf_ms=H)
     return df
 
 
-def assert_causal(strat_factory, bars, cuts: list[int] | None = None):
-    """Raises AssertionError on a lookahead; returns the full-series run (with its signals)."""
-    full = strat_factory()
-    f_full = full.prepare(bars)
-    assert f_full.index.equals(bars.index), "prepare() must return features on the bars index"
-    r_full = run_backtest(full, bars, f_full, symbol="X", tf="1h", ep=EngineParams(), record_signals=True)
-    for k in (CUTS if cuts is None else cuts):
-        cut = bars.iloc[:k]
-        s = strat_factory()
-        f_cut = s.prepare(cut)
-        pd.testing.assert_frame_equal(f_full.iloc[:k], f_cut, check_exact=False, rtol=1e-9, atol=1e-12,
-                                      obj=f"features at cut {k}")
-        r_cut = run_backtest(s, cut, f_cut, symbol="X", tf="1h", ep=EngineParams(), record_signals=True)
-        a = [x for x in r_full.signals if x[0] < k - 1]
-        b = [x for x in r_cut.signals if x[0] < k - 1]
-        assert a == b, f"signals diverge before cut {k}"
-    return r_full
+def compare(full: RunOutput, cut: RunOutput, k: int) -> None:
+    """Raises AssertionError when the run on bars[:k] differs from the full run before the cut."""
+    pd.testing.assert_frame_equal(full.features.iloc[:k], cut.features, check_exact=False, rtol=1e-9,
+                                  atol=1e-12, check_dtype=False, obj=f"features at cut {k}")
+    if not full.decisions.before(k - 1).same(cut.decisions.before(k - 1)):
+        raise AssertionError(f"signals diverge before cut {k}")
 
 
 EXTRAS_SEED = 7
@@ -94,27 +89,53 @@ def with_moving_columns(bars: pd.DataFrame, seed: int = EXTRAS_SEED) -> pd.DataF
     return out
 
 
-def causality_failures(cls, bars: pd.DataFrame | None = None, *, cuts: list[int] | None = None,
-                       require_signals: bool = True, params: dict | None = None) -> list[str]:
-    """assert_causal on the default params and every grid corner; one line per failing variant.
+def causality_failures(cfg, src: PluginSource, bars: pd.DataFrame | None = None, *,
+                       cuts: list[int] | None = None, require_signals: bool = True,
+                       params: dict | None = None) -> list[str]:
+    """The cut-vs-full comparison on the default params and every grid corner; one line per failing variant.
+
+    Every compared run happens in its own fresh sandbox worker that is sent only its own bars, so a
+    plugin cannot carry what it saw in a longer run into a shorter one. Runs go in waves of
+    increasing length (each cut, then the full series): no longer run starts before every shorter
+    one has finished. The comparison is done here, in the parent.
 
     Runs on a copy of the bars in which every column moves. A crash on synthetic data
     disqualifies a plugin as surely as a peek at the future, and so does never signalling
     with its default params: then nothing about its causality is verified. Callers checking
     extra date ranges pass require_signals=False: a plugin may honestly be quiet there."""
     bars = with_moving_columns(synthetic_bars(seed=1) if bars is None else bars)
-    variants = [{}] + [{k: v} for k, vals in cls.grid.items() for v in (vals[0], vals[-1])]
+    variants = [{}] + [{k: v} for k, vals in src.meta.grid.items() for v in (vals[0], vals[-1])]
     if params and params not in variants:   # e.g. the walk-forward's frozen exam params
         variants.append(dict(params))
+    labels = [", ".join(f"{k}={v}" for k, v in kw.items()) or "defaults" for kw in variants]
+    n = len(bars)
+    lengths = sorted({k for k in (CUTS if cuts is None else cuts) if k < n}) + [n]
+    runs: dict[tuple[int, int], RunOutput] = {}     # (variant, length) -> run
+    failed: dict[int, str] = {}
+    with ThreadPoolExecutor(client.max_workers(cfg)) as pool:
+        for length in lengths:
+            alive = [v for v in range(len(variants)) if v not in failed]
+            futures = {v: pool.submit(client.fresh_run, cfg, src, "X", "1h", bars.iloc[:length],
+                                      variants[v], EngineParams(), features=True) for v in alive}
+            for v, fut in futures.items():      # every run of this wave has finished before the next
+                try:                            # wave starts: result() waits for each in turn
+                    runs[v, length] = fut.result()
+                except PluginError as e:
+                    failed[v] = (f"{labels[v]}: {e.type}: {e.message}" if e.kind == "exception"
+                                 else f"{labels[v]}: plugin_error: {e.kind}")
     out = []
-    for kw in variants:
-        try:
-            r = assert_causal(lambda: cls(**kw), bars, cuts)
-        except Exception as e:
-            label = ", ".join(f"{k}={v}" for k, v in kw.items()) or "defaults"
-            msg = str(e).splitlines()[0] if str(e) else ""
-            out.append(f"{label}: {type(e).__name__}: {msg}" if msg else f"{label}: {type(e).__name__}")
+    for v, kw in enumerate(variants):
+        if v in failed:
+            out.append(failed[v])
             continue
-        if require_signals and not kw and not r.signals:
+        full = runs[v, n]
+        try:
+            for k in lengths[:-1]:
+                compare(full, runs[v, k], k)
+        except Exception as e:
+            msg = str(e).splitlines()[0] if str(e) else ""
+            out.append(f"{labels[v]}: {type(e).__name__}: {msg}" if msg else f"{labels[v]}: {type(e).__name__}")
+            continue
+        if require_signals and not kw and full.decisions.n_actions() == 0:
             out.append(NO_SIGNALS)
     return out

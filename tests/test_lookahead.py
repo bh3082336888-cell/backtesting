@@ -5,14 +5,15 @@ computed on the full series for rows < k, and the engine must emit identical
 signals for bars < k-1. Any use of future data breaks one of the two.
 """
 
+import pandas as pd
 import pytest
 
 from perp_lab.engine.backtest import EngineParams, run_backtest
-from perp_lab.indicators import atr
 from perp_lab.plugins import PluginSource
-from perp_lab.strategy import HOLD, RandomEntry, Strategy, enter, list_plugins, load_strategy_class
-from perp_lab.validate.causality import CUTS, assert_causal  # noqa: F401
+from perp_lab.strategy import RandomEntry, list_plugins, load_strategy_class
+from perp_lab.validate.causality import CUTS, causality_failures
 from tests.conftest import make_bars
+from tests.test_store import cfg  # noqa: F401
 
 PLUGINS = list_plugins()
 
@@ -28,14 +29,9 @@ def test_plugin_has_one_sentence_hypothesis(name):
 
 
 @pytest.mark.parametrize("name", PLUGINS)
-def test_plugin_no_lookahead(name):
-    cls = load_strategy_class(name)
-    bars = make_bars(seed=1)
-    assert_causal(lambda: cls(), bars)
-    # also every grid corner
-    for k, vals in cls.grid.items():
-        for v in (vals[0], vals[-1]):
-            assert_causal(lambda: cls(**{k: v}), bars)
+def test_plugin_no_lookahead(cfg, name):
+    # the default params and every grid corner, each compared run in its own worker
+    assert causality_failures(cfg, PluginSource.read(name), make_bars(seed=1)) == []
 
 
 @pytest.mark.parametrize("name", PLUGINS)
@@ -48,14 +44,30 @@ def test_plugin_trades_on_synthetic_data(name):
     assert len(r.trades) > 0
 
 
+def _assert_causal_in_process(strat_factory, bars):
+    """The old in-process check, kept for the RandomEntry wrapper (a trusted class, not a plugin)."""
+    full = strat_factory()
+    f_full = full.prepare(bars)
+    r_full = run_backtest(full, bars, f_full, symbol="X", tf="1h", ep=EngineParams(), record_signals=True)
+    for k in CUTS:
+        s = strat_factory()
+        f_cut = s.prepare(bars.iloc[:k])
+        pd.testing.assert_frame_equal(f_full.iloc[:k], f_cut, check_exact=False, rtol=1e-9, atol=1e-12)
+        r_cut = run_backtest(s, bars.iloc[:k], f_cut, symbol="X", tf="1h", ep=EngineParams(), record_signals=True)
+        assert [x for x in r_full.signals if x[0] < k - 1] == [x for x in r_cut.signals if x[0] < k - 1]
+
+
 def test_random_entry_wrapper_is_causal():
     cls = load_strategy_class("donchian_atr")
-    bars = make_bars(seed=2)
-    assert_causal(lambda: RandomEntry(cls(), 0.01, seed=3), bars)
+    _assert_causal_in_process(lambda: RandomEntry(cls(), 0.01, seed=3), make_bars(seed=2))
+
+
+CHEATER_TEXT = '''"""Peeks at the next close."""
+from perp_lab.indicators import atr
+from perp_lab.strategy import HOLD, Strategy, enter
 
 
 class Cheater(Strategy):
-    """Peeks at the next close."""
     params = {}
 
     def prepare(self, bars):
@@ -69,8 +81,10 @@ class Cheater(Strategy):
         if n != n:
             return HOLD
         return enter(1 if n > ctx["close"] else -1, *self.bracket(ctx, 1 if n > ctx["close"] else -1))
+'''
+CHEATER = PluginSource.from_text("cheater", CHEATER_TEXT)
 
 
-def test_lookahead_check_catches_a_cheater():
-    with pytest.raises(AssertionError):
-        assert_causal(lambda: Cheater(), make_bars(seed=4))
+def test_lookahead_check_catches_a_cheater(cfg):
+    fails = causality_failures(cfg, CHEATER, make_bars(seed=4))
+    assert len(fails) == 1 and fails[0].startswith("defaults: AssertionError")
