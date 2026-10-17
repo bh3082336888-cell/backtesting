@@ -9,8 +9,9 @@ window must be at least min_holdout_days, total reads stay under holdout_max_rea
 family gets one read. A missing or malformed log refuses; it never means "zero reads".
 
 Each mint logs the end of the window it unlocks. A read's window is fixed at its first mint: a
-retry examines the same window (`stored_window_end`), however much data has arrived since, and a
-read gets `judge.exam_max_attempts` attempts (`attempts` counts its entries; the judge enforces it).
+retry examines the same window (`stored_window_end`), however much data has arrived since. A read
+gets `judge.exam_max_attempts` attempts, one log entry each; past that, a retry is refused under the
+same lock as the mint (`failed: exam_error`), so two exams can't both take the last attempt.
 """
 
 from __future__ import annotations
@@ -32,8 +33,8 @@ class BudgetLogError(RuntimeError):
 
 @dataclass(frozen=True)
 class BudgetCheck:
-    status: str     # mint | pending | blocked
-    code: str       # ok | retry | too_short | budget_spent | family_examined
+    status: str     # mint | pending | blocked | failed
+    code: str       # ok | retry | too_short | budget_spent | family_examined | exam_error
 
 
 def log_path(cfg) -> Path:
@@ -74,8 +75,14 @@ def reads_used(cfg) -> int:
     return len({_read_key(e) for e in read_log(log_path(cfg))})
 
 
+def _of(entries: list[dict], judgement_id: int, lineage_id: str | None) -> list[dict]:
+    """A judgement's entries (under lineage_id, when given): its read's first attempt and retries."""
+    return [e for e in entries if e.get("judgement_id") == judgement_id
+            and (lineage_id is None or e["lineage_id"] == lineage_id)]
+
+
 def _holds(entries: list[dict], judgement_id: int, lineage_id: str) -> bool:
-    return any(e.get("judgement_id") == judgement_id and e["lineage_id"] == lineage_id for e in entries)
+    return bool(_of(entries, judgement_id, lineage_id))
 
 
 def holds_read(cfg, judgement_id: int, lineage_id: str) -> bool:
@@ -84,21 +91,16 @@ def holds_read(cfg, judgement_id: int, lineage_id: str) -> bool:
     return _holds(read_log(log_path(cfg)), judgement_id, lineage_id)
 
 
-def _entries_of(cfg, judgement_id: int, lineage_id: str | None) -> list[dict]:
-    return [e for e in read_log(log_path(cfg)) if e.get("judgement_id") == judgement_id
-            and (lineage_id is None or e["lineage_id"] == lineage_id)]
-
-
 def attempts(cfg, judgement_id: int, lineage_id: str | None = None) -> int:
     """How many times this judgement's read was minted (its first attempt and each retry); only
     its entries under `lineage_id`, when given. Raises BudgetLogError like holds_read."""
-    return len(_entries_of(cfg, judgement_id, lineage_id))
+    return len(_of(read_log(log_path(cfg)), judgement_id, lineage_id))
 
 
 def stored_window_end(cfg, judgement_id: int, lineage_id: str | None = None) -> pd.Timestamp | None:
     """The window end fixed when this judgement's read was minted: the first of its entries (under
     `lineage_id`, when given) that has one. None when none has (no read yet, or 3a entries only)."""
-    for e in _entries_of(cfg, judgement_id, lineage_id):
+    for e in _of(read_log(log_path(cfg)), judgement_id, lineage_id):
         if e.get("window_end") is not None:
             try:
                 end = pd.Timestamp(e["window_end"])
@@ -114,7 +116,10 @@ def check(cfg, entries: list[dict], lineage_id: str, judgement_id: int, window_d
     if not isinstance(judgement_id, int) or isinstance(judgement_id, bool):
         raise TypeError(f"judgement_id must be an int, got {judgement_id!r}")
     jc = cfg["judge"]
-    if _holds(entries, judgement_id, lineage_id):
+    held = _of(entries, judgement_id, lineage_id)
+    if held:                                    # a retry on the read it holds, within its attempts
+        if len(held) >= jc["exam_max_attempts"]:
+            return BudgetCheck("failed", "exam_error")
         return BudgetCheck("mint", "retry")
     if window_days < jc["min_holdout_days"]:
         return BudgetCheck("pending", "too_short")

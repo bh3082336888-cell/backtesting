@@ -220,3 +220,34 @@ def test_a_judgement_id_logged_in_another_family_is_not_this_reads(cfg):
     budget.mint(cfg, "fam", 1, 200, END)
     assert budget.attempts(cfg, 1) == 2 and budget.attempts(cfg, 1, "fam") == 1
     assert budget.stored_window_end(cfg, 1, "fam") == END
+
+
+def test_no_attempt_past_the_cap(cfg):
+    p = budget.init_log(cfg)
+    for _ in range(cfg["judge"]["exam_max_attempts"]):
+        assert budget.mint(cfg, "fam", 1, 200, END)[1] is not None
+    before = p.read_text()
+    assert budget.mint(cfg, "fam", 1, 200, END) == (BudgetCheck("failed", "exam_error"), None)
+    assert p.read_text() == before
+
+
+def test_two_exams_racing_for_the_last_attempt(cfg, monkeypatch):
+    budget.init_log(cfg)
+    cap = cfg["judge"]["exam_max_attempts"]
+    for _ in range(cap - 1):
+        budget.mint(cfg, "fam", 1, 200, END)
+    real = budget.issue_holdout_token
+
+    def slow(*a, **kw):                 # widen the window between counting the attempts and logging one
+        time.sleep(0.2)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(budget, "issue_holdout_token", slow)
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(budget.mint(cfg, "fam", 1, 200, END)[1] is not None))
+               for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(got) == [False, True] and budget.attempts(cfg, 1) == cap

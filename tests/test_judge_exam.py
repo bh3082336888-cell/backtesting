@@ -569,3 +569,53 @@ def test_end_to_end_exam_through_the_real_sandbox(tmp_path, plugins, fresh_wf_ca
     assert (h["date_start"], h["date_end"]) == ("2026-07-01", "2026-10-01")
     assert pd.read_parquet(Path(h["run_dir"]) / "holdout_daily.parquet").shape[0] == 92
     assert budget.stored_window_end(cfg, j["id"]) == pd.Timestamp("2026-10-01", tz="UTC")
+
+
+def test_the_attempt_cap_is_enforced_at_the_mint(cfg, plugins, monkeypatch):
+    # another `lab exam` used the last attempt after this one counted them: the mint, under the
+    # budget lock, refuses and the read fails
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    for _ in range(3):
+        crash(cfg, j["id"])
+    monkeypatch.setattr(budget, "attempts", lambda *a, **kw: 0)    # a stale count before the lock
+    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=no_cost)
+    assert (done["holdout_status"], done["holdout_reason"]) == ("failed", "exam_error")
+    assert len(budget.read_log(budget.log_path(cfg))) == 3
+
+
+@pytest.mark.parametrize("err", [PluginError("cpu_limit", "", "over 900 s of CPU"),
+                                 PluginError("exception", "ValueError", "close=123.45"),
+                                 PluginError("died", "", "worker exited with code -9")])
+def test_a_plugin_error_in_the_cost_probe_blocks_without_a_read(cfg, plugins, err):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+
+    def failing(*a, **kw):
+        raise err
+    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=failing)
+    assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "plugin_error")
+    assert budget.reads_used(cfg) == 0
+    text = Path(done["verdict_path"]).read_text()
+    assert err.message not in text and (not err.type or err.type not in text)
+    assert exams(cfg, boom) == []               # blocked: never probed again
+
+
+@pytest.mark.parametrize("step", ["dated check", "cost probe"])
+def test_a_sandbox_down_before_the_mint_mints_nothing(cfg, plugins, monkeypatch, step):
+    import perp_lab.judge.judge as jm
+    budget.init_log(cfg)
+    j = promoted(cfg)
+
+    def unavailable(*a, **kw):
+        raise SandboxUnavailable("cannot start a worker")
+    if step == "dated check":
+        monkeypatch.setattr(jm, "dated_lookahead_failures", unavailable)
+    with pytest.raises(SandboxUnavailable):
+        attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200),
+                     cost_fn=unavailable if step == "cost probe" else no_cost)
+    assert budget.reads_used(cfg) == 0
+    r = db.get_judgement_by_id(cfg, j["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error")
+    out = json.loads(verdict_path(cfg, r["strategy"], r["timeframe"], r["strategy_hash"]).read_text())
+    assert (out["holdout_status"], out["holdout_reason"]) == ("pending", "exam_error")

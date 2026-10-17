@@ -368,8 +368,13 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     1. read the plugin once; an edit since it was judged waits as plugin_changed;
     2. a judgement already holding its read: failed / exam_error after exam_max_attempts, else the
        window end stored at the mint, and on to 6 (the read is spent and the window fixed);
-    3. the window end; 4. the dated lookahead check over it; 5. the cost probe (too_slow);
-    6. the sandbox check (no mint without it); 7. mint, storing the window end; 8. the streamed exam.
+    3. the window end; 4. the dated lookahead check over it; 5. the cost probe (too_slow, or
+       plugin_error if the plugin fails it); 6. the sandbox check; 7. mint, storing the window end
+       (refused, failed / exam_error, once the read's attempts are used up); 8. the streamed exam.
+
+    SandboxUnavailable at any step before the mint is pending / exam_error, re-raised: nothing is
+    minted and no attempt used. A plugin error in the exam itself is failed / plugin_error (the read
+    is spent); its kind and message go only to the holdout run's report, never to the verdict.
     """
     j = db.get_judgement_by_id(cfg, jid)
     if j is None or j["holdout_status"] != "pending":
@@ -385,29 +390,36 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     s = run_summary(child["run_dir"])
     syms, tf, params, fam = s["universe"], j["timeframe"], s["sensitivity"]["base_params"], j["lineage_id"]
     jc = cfg["judge"]
-    if budget.holds_read(cfg, jid, fam):                     # 2. a retry on the same read
-        if budget.attempts(cfg, jid, fam) >= jc["exam_max_attempts"]:
-            db.update_holdout(cfg, jid, "failed", "exam_error")
-            return finish(cfg, jid)
-        end = budget.stored_window_end(cfg, jid, fam)
-        if end is None:                                      # minted before window ends were stored
-            end = end_fn(cfg, syms, tf)
-    else:
-        end = end_fn(cfg, syms, tf)                          # 3
-        if dated_lookahead_failures(cfg, src, end, params=params):     # 4
-            db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
-            return finish(cfg, jid)
-        if cost_fn(cfg, src, tf, syms, params, end) > cfg["sandbox"]["exam_cpu_hours"]:   # 5
-            db.update_holdout(cfg, jid, "blocked", "too_slow")    # no read
-            return finish(cfg, jid)
-    try:
-        client.check(cfg)                                    # 6. no sandbox, no mint (and no attempt used)
+    try:                                    # the sandbox down at any step before the mint: no read, no attempt
+        if budget.holds_read(cfg, jid, fam):                 # 2. a retry on the same read
+            if budget.attempts(cfg, jid, fam) >= jc["exam_max_attempts"]:   # (the mint re-checks, locked)
+                db.update_holdout(cfg, jid, "failed", "exam_error")
+                return finish(cfg, jid)
+            end = budget.stored_window_end(cfg, jid, fam)
+            if end is None:                                  # minted before window ends were stored
+                end = end_fn(cfg, syms, tf)
+        else:
+            end = end_fn(cfg, syms, tf)                      # 3
+            if dated_lookahead_failures(cfg, src, end, params=params):     # 4
+                db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
+                return finish(cfg, jid)
+            try:
+                hours = cost_fn(cfg, src, tf, syms, params, end)     # 5
+            except PluginError as err:                       # on research bars: no read is spent
+                log.warning("cost probe for judgement %s: the plugin failed: %s\n%s", jid, err.reason(),
+                            err.stderr.decode("utf-8", "replace"))
+                db.update_holdout(cfg, jid, "blocked", "plugin_error")
+                return finish(cfg, jid)
+            if hours > cfg["sandbox"]["exam_cpu_hours"]:
+                db.update_holdout(cfg, jid, "blocked", "too_slow")    # no read
+                return finish(cfg, jid)
+        client.check(cfg)                                    # 6. no sandbox, no mint
     except SandboxUnavailable:
         db.update_holdout(cfg, jid, "pending", "exam_error")
         finish(cfg, jid)
         raise
     days = max(0, (end - cfg.holdout_start).days)
-    chk, token = budget.mint(cfg, fam, jid, days, window_end=end)   # 7
+    chk, token = budget.mint(cfg, fam, jid, days, window_end=end)   # 7; failed / exam_error past the cap
     if token is None:
         db.update_holdout(cfg, jid, chk.status, chk.code)
         return finish(cfg, jid)
