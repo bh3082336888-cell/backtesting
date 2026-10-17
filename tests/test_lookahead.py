@@ -12,7 +12,7 @@ from perp_lab.engine.backtest import EngineParams, run_backtest
 from perp_lab.plugins import PluginSource
 from perp_lab.strategy import RandomEntry, list_plugins
 from tests.sandbox_fixtures import load_class
-from perp_lab.validate.causality import CUTS, causality_failures
+from perp_lab.validate.causality import CUTS, causality_failures, with_moving_columns
 from tests.conftest import make_bars
 from tests.test_store import cfg  # noqa: F401
 
@@ -39,7 +39,7 @@ def test_plugin_no_lookahead(cfg, name):
 def test_plugin_trades_on_synthetic_data(name):
     """A plugin that never trades can't fail the lookahead test — make sure ours do."""
     cls = load_class(name)
-    bars = make_bars(seed=1)
+    bars = with_moving_columns(make_bars(seed=1))
     s = cls()
     r = run_backtest(s, bars, s.prepare(bars), symbol="X", tf="1h", ep=EngineParams())
     assert len(r.trades) > 0
