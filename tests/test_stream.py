@@ -353,6 +353,63 @@ def test_a_worker_lost_twice_fails_the_exam(tmp_path, spy, monkeypatch):
     assert e.value.kind == "timeout" and spy.spawned == 4 and spy.alive == set()
 
 
+DICE = f'''"""Enters with a random stop on holdout bars: a fresh draw on every run."""
+import random
+
+from perp_lab.strategy import HOLD, Strategy, enter
+
+
+class Dice(Strategy):
+    params = {{}}
+
+    def prepare(self, bars):
+        return bars[[]]
+
+    def entry(self, ctx):
+        if ctx["open_time"] >= {HOLDOUT_MS}:
+            return enter(1, ctx["close"] * (0.8 - 0.1 * random.random()))
+        return HOLD
+'''
+
+
+def losing_btc_at(spy, monkeypatch, step):
+    """BTC's worker is lost once, before its step number `step` (the first is the last research bar)."""
+    lost, counted = [], Spy.step
+
+    def flaky(self, position, **kw):
+        if self.symbol == "BTCUSDT" and not lost and spy.steps.get("BTCUSDT") == step - 1:
+            lost.append(1)
+            raise WorkerLost("died", "worker exited with code -9")
+        return counted(self, position, **kw)
+    monkeypatch.setattr(Spy, "step", flaky)
+    return lost
+
+
+def test_a_rerun_must_repeat_the_lost_runs_decisions(tmp_path, spy, monkeypatch):
+    # The worker is lost after the plugin decided on holdout bars. The rerun would be a second draw
+    # for a plugin that decides at random there (or that saw its first results), so it must decide
+    # exactly as the lost run did, up to where each symbol stopped: otherwise a mismatch.
+    cfg = market_config(tmp_path)
+    lost = losing_btc_at(spy, monkeypatch, 6)
+    with pytest.raises(PluginError) as e:
+        run_exam(cfg, PluginSource.from_text("dice", DICE), "4h", cfg.symbols, {}, token(tmp_path), SHORT_END)
+    assert e.value.kind == "mismatch"
+    assert lost == [1] and spy.spawned == 4 and spy.alive == set()
+
+
+def test_an_honest_plugin_whose_worker_is_lost_once_passes_on_the_rerun(tmp_path, spy, monkeypatch):
+    cfg = market_config(tmp_path)
+    src = PluginSource.from_text("watcher", WATCHER)          # trades in the holdout, deterministically
+    ref = run_exam(cfg, src, "4h", cfg.symbols, {}, token(tmp_path), SHORT_END)
+    assert len(ref.trades) > 0
+    monkeypatch.setattr(Spy, "spawned", 0)
+    monkeypatch.setattr(Spy, "steps", {})
+    lost = losing_btc_at(spy, monkeypatch, 30)
+    res = run_exam(cfg, src, "4h", cfg.symbols, {}, token(tmp_path), SHORT_END)
+    assert lost == [1] and spy.spawned == 4 and spy.alive == set()
+    assert_same_exam(res, ref.daily, ref.portfolio, ref.trades)
+
+
 def test_symbols_go_in_batches_of_max_workers(tmp_path, spy, monkeypatch):
     cfg = market_config(tmp_path)
     src = real_source("donchian_atr")

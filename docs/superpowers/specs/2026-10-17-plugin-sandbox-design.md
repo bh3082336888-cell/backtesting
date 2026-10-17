@@ -330,6 +330,12 @@ tight compared to the batch limit because one step is one `prepare`. A plugin th
 spins fails the step, and after the one retry (which restarts the whole batch in fresh workers:
 restarting one symbol would put it behind the others and break lockstep) the exam fails with `plugin_error`.
 
+The retry is held to the lost run: it must repeat every decision that run made, symbol by symbol,
+up to the bar where each symbol stopped (the warm-up's decisions, then each step's signal). Any
+difference is a `mismatch`, and the exam fails. Otherwise a plugin that has seen holdout bars
+could get a second draw: one that decides at random there, or that kills its own worker once it
+dislikes how its exam is going.
+
 Cost: one `prepare` over the whole history per holdout bar. Measured on synthetic bars,
 `prepare` plus building the arrays takes about 6 ms at 40k bars (1h), 25 ms at 160k (15m) and
 60–75 ms at 470k (5m). For a 180-day window per symbol: 4h about 3 s, 1h about 30 s, 15m about
