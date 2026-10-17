@@ -239,7 +239,7 @@ def exam(config: Optional[str] = CfgOpt):
         typer.echo("no pending exams")
     for j in done:
         if j.get("in_progress"):
-            typer.echo(f"{j['strategy']} @ {j['timeframe']}: in progress elsewhere (another `lab exam` holds it)")
+            typer.echo(f"{j['strategy']} @ {j['timeframe']}: in progress elsewhere (another `lab exam` is running)")
             continue
         err = f" ERROR: {j['error']}" if "error" in j else ""
         typer.echo(f"{j['strategy']} @ {j['timeframe']}: {j['holdout_status']} ({j['holdout_reason']}){err}")

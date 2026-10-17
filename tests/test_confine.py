@@ -76,6 +76,10 @@ EXPECTED = {
     "pdeathsig_clear": "DENIED EPERM",            # seccomp: a worker must die with its parent
     "pdeathsig_clear_wide": "DENIED EPERM",       # seccomp: the option's low 32 bits are what count
     "read_pre_existing_thread": "REFUSED",        # confine() must be the only thread
+    "flock": "DENIED EPERM",                      # seccomp: a lock on a shared readable file is a channel
+    "fcntl_setlk": "DENIED EPERM",
+    "fcntl_ofd_setlk": "DENIED EPERM",
+    "fcntl_notify": "DENIED EPERM",               # seccomp: a directory watch, like inotify
 }
 
 
@@ -96,6 +100,10 @@ def test_each_escape_is_denied(probe, tmp_path):
         listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         listener.bind(("127.0.0.1", 0))
         target = listener.getsockname()[1]
+    elif probe in ("flock", "fcntl_setlk", "fcntl_ofd_setlk"):
+        target = Path(socket.__file__)            # on the allowlist: the open works, the lock doesn't
+    elif probe == "fcntl_notify":
+        target = Path(socket.__file__).parent
     elif probe == "mq_open":
         target = f"/perp_lab_confine_{os.getpid()}"
         assert not _queue_left(target)
@@ -148,6 +156,10 @@ def test_other_prctl_calls_still_work():
     assert run_probe("prctl_set_name")[-1] == "ALLOWED"
 
 
+def test_other_fcntl_calls_still_work():
+    assert run_probe("fcntl_other", Path(socket.__file__))[-1] == "ALLOWED"
+
+
 @pytest.mark.skipif(os.uname().machine != "x86_64", reason="x32 is an x86_64 ABI")
 def test_a_syscall_through_another_abi_kills_the_process():
     # Made from a second thread: the kernel kills the whole process anyway when the last thread
@@ -174,7 +186,8 @@ DENIED = """
     init_module finit_module delete_module kexec_load kexec_file_load
     chmod fchmod fchmodat chown fchown lchown fchownat utime utimes utimensat futimesat
     setxattr lsetxattr fsetxattr removexattr lremovexattr fremovexattr
-    getxattr lgetxattr fgetxattr listxattr llistxattr flistxattr""".split()
+    getxattr lgetxattr fgetxattr listxattr llistxattr flistxattr
+    flock""".split()
 # File-metadata calls newer than some libseccomp releases. Since 424, a new syscall has one number on
 # every architecture.
 NEWER = {"fchmodat2": 452, "setxattrat": 463, "getxattrat": 464, "listxattrat": 465, "removexattrat": 466,
@@ -188,7 +201,8 @@ SET_INODE = {"FS_IOC_SETFLAGS": 0x40086602, "FS_IOC32_SETFLAGS": 0x40046602, "FS
              "EXT4_IOC_SETVERSION": 0x40086604}
 OTHER_IOCTLS = {"TCGETS": 0x5401, "FIONREAD": 0x541B, "FIONBIO": 0x5421, "FS_IOC_GETFLAGS": 0x80086601,
                 "FS_IOC_FSGETXATTR": 0x801C581F}
-FCNTL_DENIED = {"F_SET_RW_HINT": 1036}
+FCNTL_DENIED = {"F_SET_RW_HINT": 1036, "F_SETLK": 6, "F_SETLKW": 7, "F_OFD_SETLK": 37, "F_OFD_SETLKW": 38,
+                "F_SETLEASE": 1024, "F_NOTIFY": 1026}
 FCNTL_ALLOWED = {"F_DUPFD": 0, "F_GETFD": 1, "F_SETFD": 2, "F_GETFL": 3, "F_SETFL": 4, "F_GETLK": 5,
                  "F_DUPFD_CLOEXEC": 1030, "F_GET_RW_HINT": 1035}
 CLONE_THREAD = 0x10000

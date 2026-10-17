@@ -147,14 +147,9 @@ def _locked(path: Path):
 
 
 @contextmanager
-def exam_lock(cfg, judgement_id: int):
-    """One `lab exam` at a time per judgement: a non-blocking exclusive lock on
-    `<holdout_log>.exam-<id>.lock`, held for the whole attempt. Yields whether this caller holds
-    it; False while another process or thread examines the judgement. A crashed exam's lock goes
-    with its process."""
-    if not isinstance(judgement_id, int) or isinstance(judgement_id, bool):
-        raise TypeError(f"judgement_id must be an int, got {judgement_id!r}")
-    p = Path(f"{log_path(cfg)}.exam-{judgement_id}.lock")
+def _try_locked(p: Path):
+    """A non-blocking exclusive lock on `p`: yields whether this caller holds it. A crashed
+    holder's lock goes with its process."""
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a") as f:
         try:
@@ -166,6 +161,27 @@ def exam_lock(cfg, judgement_id: int):
             yield True
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+
+
+@contextmanager
+def exam_lock(cfg, judgement_id: int):
+    """One `lab exam` at a time per judgement: a non-blocking exclusive lock on
+    `<holdout_log>.exam-<id>.lock`, held for the whole attempt. Yields whether this caller holds
+    it; False while another process or thread examines the judgement (or supersedes it)."""
+    if not isinstance(judgement_id, int) or isinstance(judgement_id, bool):
+        raise TypeError(f"judgement_id must be an int, got {judgement_id!r}")
+    with _try_locked(Path(f"{log_path(cfg)}.exam-{judgement_id}.lock")) as mine:
+        yield mine
+
+
+@contextmanager
+def exams_lock(cfg):
+    """One exam at a time on this machine, whatever its judgement: a non-blocking exclusive lock on
+    `<holdout_log>.exams.lock`, held for the whole attempt. Exams of different families that ran at
+    once would not be in lockstep with each other (the spec's R6). Yields whether this caller holds
+    it."""
+    with _try_locked(Path(f"{log_path(cfg)}.exams.lock")) as mine:
+        yield mine
 
 
 def mint(cfg, lineage_id: str, judgement_id: int, window_days: int,

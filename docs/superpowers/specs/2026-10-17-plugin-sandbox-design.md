@@ -56,8 +56,10 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
   allowlist stays *readable* to a plugin: Landlock has no right for it and seccomp can't filter by
   path. Changing metadata is denied (step 5 below), and file contents stay unreadable.
 - **R6 Isolation across processes.** The wave and lockstep isolation holds within one lookahead
-  check or one exam. It does not hold across lookahead checks or exams that run at the same
-  time in separate processes.
+  check or one exam. It does not hold across lookahead checks that run at the same time in
+  separate processes, or between such a check and an exam (through CPU timing). Two exams never
+  run at once on one machine: `attempt_exam` holds a machine-wide lock throughout. File locks,
+  leases and directory notifications, a live channel Landlock doesn't restrict, are denied.
 
 ## Threat model
 
@@ -172,6 +174,10 @@ library imported. Until step 7 ends, only trusted code has run in it.
      so without these rules a worker could leave bytes in the mode bits, timestamps or extended
      attributes of any file this user owns, or the flags of any it can open, for a later worker
      to read (tested);
+   - file locks, leases and notifications: `flock`, and `fcntl` with `F_SETLK`, `F_SETLKW`,
+     `F_OFD_SETLK`, `F_OFD_SETLKW`, `F_SETLEASE` or `F_NOTIFY` (other commands, such as `F_GETFL`
+     or `F_SETFD`, keep working). A read-only descriptor on an allowlisted file is enough to
+     lock it, so two workers could signal each other through it while both run (tested);
    - calls aimed at another process: `ptrace`, `process_vm_readv`, `process_vm_writev`,
      `process_madvise`, `kcmp`, `pidfd_open`, `pidfd_getfd`, `migrate_pages`, `move_pages`.
      `prlimit64` and the `sched_*` calls that take a pid are allowed only on the calling
@@ -313,6 +319,11 @@ warm-ups finish before streaming starts. During warm-ups research bars are not o
 symbols; no holdout bar is affected. When the memory cap allows fewer workers than symbols
 (7 × 3 GiB on this machine, for 8 symbols), symbols go in batches, one batch after another, each
 in lockstep.
+
+**One exam at a time.** `attempt_exam` holds a machine-wide lock (`<holdout_log>.exams.lock`,
+taken without waiting) besides its judgement's own, for the whole attempt. While another exam
+runs, any judgement is reported `in_progress`, unchanged and with nothing spent, so exams of
+different families, which would not be in lockstep with each other, never overlap.
 
 Each stream step has its own limit, `sandbox.stream_step_s` of CPU and of wall-clock time,
 tight compared to the batch limit because one step is one `prepare`. A plugin that sleeps or

@@ -680,6 +680,28 @@ def test_an_exam_in_progress_is_left_alone(cfg, plugins):
     assert out["a"]["holdout_status"] == "passed" and budget.attempts(cfg, j["id"]) == 1
 
 
+def test_one_exam_at_a_time_on_this_machine(cfg, plugins):
+    # Two families' exams must not overlap: their workers could pass holdout bars to each other
+    # outside lockstep (R6). One that would start while another runs waits, with nothing spent.
+    budget.init_log(cfg)
+    add_plugin(plugins, "rootb", WIDE_TEXT.replace('PARENT = "donchian_atr"\n', "") + "# rootb\n")
+    a, b = promoted(cfg), promoted(cfg, "rootb")
+    assert a["lineage_id"] != b["lineage_id"]
+    inner, held = [], stub_run(0.003)
+
+    def run(cfg_, src, tf, symbols, params, token, end, stderr_dir=None):
+        inner.append(attempt_exam(cfg, b["id"], run=boom, end_fn=boom, cost_fn=boom))
+        return held(cfg_, src, tf, symbols, params, token, end, stderr_dir=stderr_dir)
+    done = attempt_exam(cfg, a["id"], run=run, end_fn=end_after(200), cost_fn=no_cost)
+    assert done["holdout_status"] == "passed"
+    [other] = inner
+    assert other["in_progress"] is True and (other["holdout_status"], other["holdout_reason"]) == \
+        ("pending", "awaiting_exam")
+    assert budget.reads_used(cfg) == 1 and not budget.holds_read(cfg, b["id"], b["lineage_id"])
+    done = attempt_exam(cfg, b["id"], run=held, end_fn=end_after(200), cost_fn=no_cost)   # later, its turn
+    assert done["holdout_status"] == "passed" and budget.reads_used(cfg) == 2
+
+
 def test_a_retry_minted_after_a_stale_count_runs_on_the_stored_end(cfg, plugins, monkeypatch):
     # the reviewer's probe: the read was minted on day 200 after this exam counted none, so its
     # mint is a retry, and the exam must run on the stored end, not on its own later one

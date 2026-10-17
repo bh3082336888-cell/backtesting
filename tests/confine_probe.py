@@ -136,6 +136,43 @@ def pdeathsig_clear_wide(target, pre):
                      ctypes.c_long(0), ctypes.c_long(0)))
 
 
+def flock(target, pre):
+    import fcntl
+    with open(target, "rb") as f:                      # readable: the denial is seccomp's
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def fcntl_setlk(target, pre):
+    import fcntl
+    with open(target, "rb") as f:
+        fcntl.lockf(f, fcntl.LOCK_SH | fcntl.LOCK_NB)  # F_SETLK, a read lock
+
+
+def fcntl_ofd_setlk(target, pre):
+    import fcntl
+    import struct
+    with open(target, "rb") as f:                      # struct flock: F_RDLCK, SEEK_SET, whole file
+        fcntl.fcntl(f, 37, struct.pack("hhqqi4x", fcntl.F_RDLCK, 0, 0, 0, 0))   # F_OFD_SETLK
+
+
+def fcntl_notify(target, pre):
+    import fcntl
+    fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.fcntl(fd, fcntl.F_NOTIFY, fcntl.DN_MODIFY)
+    finally:
+        os.close(fd)
+
+
+def fcntl_other(target, pre):
+    import fcntl
+    with open(target, "rb") as f:                      # the calls Python and its libraries make
+        flags = fcntl.fcntl(f, fcntl.F_GETFL)
+        fcntl.fcntl(f, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        fcntl.fcntl(f, fcntl.F_SETFD, fcntl.FD_CLOEXEC)
+        os.close(fcntl.fcntl(f, fcntl.F_DUPFD_CLOEXEC, 0))
+
+
 def prctl_set_name(target, pre):
     _ok(libc.prctl(15, b"probe", 0, 0, 0))             # PR_SET_NAME: other prctl calls stay allowed
 
@@ -248,7 +285,8 @@ PROBES = {f.__name__.rstrip("_"): f for f in (
     read_repo_file, write_tmp, tcp_connect, udp_send, unix_connect, fork, subprocess_, shmget,
     prlimit_parent, kill_parent, sched_getaffinity_parent, read_pre_existing_thread, read_allowlisted,
     import_numpy_pandas_pyarrow, setpriority_pgrp, ioprio_get_user, getpriority_self, mq_open,
-    x32_syscall, clone3, inotify_init1, pdeathsig_clear, pdeathsig_clear_wide, prctl_set_name)}
+    x32_syscall, clone3, inotify_init1, pdeathsig_clear, pdeathsig_clear_wide, prctl_set_name, flock,
+    fcntl_setlk, fcntl_ofd_setlk, fcntl_notify, fcntl_other)}
 
 
 def main(argv):

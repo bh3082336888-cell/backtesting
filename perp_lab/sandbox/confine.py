@@ -2,8 +2,9 @@
 
 1. exactly one thread; 2. hard rlimits; 3. no_new_privs; 4. Landlock (read-only allowlist, no TCP,
 abstract UNIX sockets and signals scoped); 5. seccomp (sockets, exec, fork, System V IPC, calls
-aimed at another process, clearing the parent-death signal, changing a file's metadata, and
-kernel-facing calls return an error; so does every call newer than libseccomp, with ENOSYS).
+aimed at another process, clearing the parent-death signal, changing a file's metadata, file
+locks, leases and notifications, and kernel-facing calls return an error; so does every call newer
+than libseccomp, with ENOSYS).
 
 Landlock and seccomp confine the calling thread and the threads it starts later; a thread that
 already exists stays unconfined, and plugin code could reach it through ctypes. So `confine()`
@@ -96,8 +97,15 @@ SYSCALL_BOUND = 1024                          # every number from libseccomp's h
 _SET_INODE_IOCTLS = {"FS_IOC_SETFLAGS": 0x40086602, "FS_IOC32_SETFLAGS": 0x40046602,
                      "FS_IOC_FSSETXATTR": 0x401C5820, "FS_IOC_SETVERSION": 0x40087602,
                      "FS_IOC32_SETVERSION": 0x40047602, "EXT4_IOC_SETVERSION": 0x40086604}
-# fcntl commands denied: the inode's write-life hint (owner only, read back by anyone with an fd).
-_FCNTL_EPERM = {"F_SET_RW_HINT": 1036}
+# Locks, leases and directory notifications on a file another process can open are a live channel
+# Landlock doesn't restrict (a read-only fd is enough): a worker holding holdout bars could signal
+# them to a worker of another exam or check. So flock(), and these fcntl commands, return EPERM.
+_LOCKS = ["flock"]
+# fcntl commands denied: locks (POSIX and open-file-description), leases, directory notifications,
+# and the inode's write-life hint (owner only, read back by anyone with an fd). F_GETFL, F_SETFL,
+# F_SETFD, F_DUPFD_CLOEXEC and the other commands stay.
+_FCNTL_EPERM = {"F_SETLK": 6, "F_SETLKW": 7, "F_OFD_SETLK": 37, "F_OFD_SETLKW": 38, "F_SETLEASE": 1024,
+                "F_NOTIFY": 1026, "F_SET_RW_HINT": 1036}
 _PID_ARG0 = """
     prlimit64 sched_setaffinity sched_getaffinity sched_setscheduler sched_getscheduler
     sched_setparam sched_getparam sched_rr_get_interval sched_setattr sched_getattr""".split()
@@ -108,7 +116,7 @@ _WHICH_WHO = {"getpriority": 0, "setpriority": 0, "ioprio_get": 1, "ioprio_set":
 # (action, syscall name, conditions (arg, op, datum_a, datum_b) that must all hold); several rules
 # for one syscall deny if any of them matches.
 _RULES = (
-    [(_EPERM, name, ()) for name in _ALWAYS_EPERM + _METADATA + _NEWER_METADATA]
+    [(_EPERM, name, ()) for name in _ALWAYS_EPERM + _METADATA + _NEWER_METADATA + _LOCKS]
     + [(_EPERM, "clone", ((0, _SCMP_CMP_MASKED_EQ, _CLONE_THREAD, 0),)),  # a thread is fine, a process isn't
        (_ENOSYS, "clone3", ())]                                          # so libc falls back to clone
     # The worker sets its parent-death signal before confining itself; plugin code may not clear

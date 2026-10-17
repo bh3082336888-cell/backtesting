@@ -387,15 +387,16 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     minted and no attempt used. A plugin error in the exam itself is failed / plugin_error (the read
     is spent); its kind and message go only to the holdout run's report, never to the verdict.
 
-    One attempt per judgement at a time (`budget.exam_lock`, held throughout): while another
-    `lab exam` examines it (an exam can take hours), this returns it unchanged, marked
+    One attempt per judgement at a time (`budget.exam_lock`, held throughout), and one exam at a
+    time on this machine (`budget.exams_lock`, likewise): while another `lab exam` examines this
+    judgement or any other (an exam can take hours), this returns it unchanged, marked
     `in_progress`, and spends nothing.
     """
-    with budget.exam_lock(cfg, jid) as mine:
+    with budget.exam_lock(cfg, jid) as mine, budget.exams_lock(cfg) as alone:
         j = db.get_judgement_by_id(cfg, jid)     # read under the lock: an exam that just ended is final
         if j is None or j["holdout_status"] != "pending":
             return j
-        if not mine:
+        if not (mine and alone):
             return {**j, "in_progress": True}
         return _attempt(cfg, j, run, end_fn, cost_fn)
 
@@ -478,8 +479,8 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -
 
 
 def exam_pending(cfg, **kw) -> list[dict]:
-    """Retry every pending exam, oldest first; one crashing exam never blocks the rest. One that
-    another `lab exam` is examining comes back unchanged, marked `in_progress`."""
+    """Retry every pending exam, oldest first; one crashing exam never blocks the rest. While
+    another `lab exam` is examining, each comes back unchanged, marked `in_progress`."""
     out = []
     for j in db.pending_judgements(cfg):
         try:

@@ -94,7 +94,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 - A worker reads only the Python installation and `perp_lab/`, plus the bars it is sent. It writes no file and changes no file's metadata (mode, owner, times, extended attributes, inode flags), opens no socket and starts no process.
 - It reports decisions, not results: the trusted engine replays them, and any disagreement is a `mismatch`.
 - `lab judge` runs lookahead checks, walk-forward and the benchmark through workers; an error caused by the plugin is a recorded kill (`plugin_error`).
-- `lab exam` streams the holdout to each worker one bar at a time, symbols in lockstep, and is the only command that runs exams.
+- `lab exam` streams the holdout to each worker one bar at a time, symbols in lockstep, and is the only command that runs exams; one exam runs at a time on a machine.
 - Needs Linux, Landlock ABI 6 or later and `libseccomp.so.2`; without them plugin code does not run. No flag bypasses it.
 - Tests that need the real sandbox carry `@pytest.mark.sandbox`; run them alone with `pytest -m sandbox`.
 
