@@ -1,11 +1,14 @@
 """Fill timing, fees, slippage, funding, stops/targets."""
 
+import math
+
 import numpy as np
+import pandas as pd
 import pytest
 
 from perp_lab.engine.backtest import EngineParams, run_backtest
 from perp_lab.strategy import EXIT, Signal
-from tests.conftest import Scripted, flat_bars
+from tests.conftest import Scripted, flat_bars, market_config
 
 EP = EngineParams(taker=0.0005, maker=0.0002, slippage=0.0002, equity0=10_000, leverage=3,
                   risk=0.01, mmr=0.004)
@@ -128,3 +131,81 @@ def test_end_of_window_flattens():
     b = flat_bars(20)
     r = run(b, {5: Signal("long", stop=90.0)})
     assert r.trades[-1]["exit_reason"] == "eow"
+
+
+def levels(t):
+    return t["level_time"], t["level_stop"], t["level_target"]
+
+
+def test_level_path_records_each_change_from_the_next_open():
+    b = flat_bars(30)
+    T = b.open_time
+    sched = {5: Signal("long", stop=90.0),
+             8: Signal("hold", stop=95.0),                   # ratchets up: in force from the open of 9
+             10: Signal("hold", stop=93.0),                  # lower: ignored, so not a change
+             12: Signal("hold", target=110.0),               # a target: in force from the open of 13
+             14: Signal("hold", stop=95.0, target=110.0),    # the levels already in force
+             16: EXIT}
+    t = run(b, sched).trades[0]
+    assert t["exit_reason"] == "signal" and t["exit_time"] == T.iloc[17]
+    lt, ls, lg = levels(t)
+    assert lt == [T.iloc[6], T.iloc[9], T.iloc[13]] and all(type(x) is int for x in lt)
+    assert lt[0] == t["entry_time"]
+    assert ls == [90.0, 95.0, 95.0]
+    np.testing.assert_array_equal(lg, [math.nan, math.nan, 110.0])
+
+
+@pytest.mark.parametrize("target", [110.0, None])
+def test_level_path_of_a_trade_whose_levels_never_move_is_its_entry(target):
+    b = flat_bars(30)
+    t = run(b, {5: Signal("long", stop=90.0, target=target), 9: Signal("hold", stop=90.0), 16: EXIT}).trades[0]
+    lt, ls, lg = levels(t)
+    assert (lt, ls) == ([t["entry_time"]], [t["stop_init"]])
+    np.testing.assert_array_equal(lg, [t["target"]])
+    assert len(lg) == 1
+
+
+def test_level_path_of_a_short_mirrors_the_ratchet():
+    b = flat_bars(30)
+    T = b.open_time
+    sched = {5: Signal("short", stop=110.0),
+             8: Signal("hold", stop=105.0),                  # lower: ratchets for a short
+             10: Signal("hold", stop=107.0),                 # higher: ignored
+             12: Signal("hold", stop=103.0, target=90.0),
+             14: Signal("hold", target=math.nan),            # the target withdrawn
+             16: EXIT}
+    t = run(b, sched).trades[0]
+    assert t["side"] == -1 and t["exit_reason"] == "signal"
+    lt, ls, lg = levels(t)
+    assert lt == [T.iloc[6], T.iloc[9], T.iloc[13], T.iloc[15]]
+    assert ls == [110.0, 105.0, 103.0, 103.0]
+    np.testing.assert_array_equal(lg, [math.nan, math.nan, 90.0, math.nan])
+
+
+def test_level_path_survives_a_run_file_round_trip(tmp_path):
+    from perp_lab.runs import write_run
+    cfg = market_config(tmp_path)
+    b = flat_bars(40)
+    r = run(b, {5: Signal("long", stop=90.0), 8: Signal("hold", stop=95.0), 10: Signal("hold", target=110.0),
+                12: EXIT, 20: Signal("short", stop=110.0, target=90.0), 30: EXIT})
+    assert len(r.trades) == 2
+    d = write_run(cfg, {"run_id": "r1", "strategy": "scripted"}, {"oos_trades": pd.DataFrame(r.trades)})
+    back = pd.read_parquet(d / "oos_trades.parquet")
+    assert len(back) == 2 and [len(t["level_time"]) for t in r.trades] == [3, 1]
+    for want, (_, got) in zip(r.trades, back.iterrows()):
+        for k in ("level_time", "level_stop", "level_target"):
+            assert isinstance(got[k], np.ndarray)
+            np.testing.assert_array_equal(got[k], want[k])
+
+
+def test_level_records_of_the_same_trade_compare_equal_whichever_nan_withdrew_the_target():
+    # The sandbox replay checks its trades against the reference run's with ==, and its NaN is not the
+    # strategy's NaN object; a list compares NaN by identity.
+    bars = flat_bars(30)
+
+    def trades(nan):
+        return run(bars, {5: Signal("long", stop=90.0, target=110.0), 8: Signal("hold", target=nan), 16: EXIT}).trades
+
+    a, b, c = (trades(nan) for nan in (math.nan, float("nan"), np.float64("nan")))
+    assert len(a[0]["level_target"]) == 2
+    assert a == b == c
