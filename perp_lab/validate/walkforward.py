@@ -87,6 +87,9 @@ def _bars(symbol: str, tf: str) -> pd.DataFrame:
     return load_bars(_cfg(), symbol, tf)
 
 
+LEVEL_COLS = ("level_time", "level_stop", "level_target")
+
+
 def _compact(res: BacktestResult, symbol: str, params: dict, seed) -> dict:
     """What a walk-forward keeps of one continuous run."""
     dr = daily_returns(res.equity, res.time)
@@ -94,6 +97,8 @@ def _compact(res: BacktestResult, symbol: str, params: dict, seed) -> dict:
     expo = pd.Series(res.in_pos.astype(float), index=idx).resample("1D").mean()
     flat_daily = pd.Series((~res.in_pos).astype(float), index=idx).resample("1D").sum()
     trades = pd.DataFrame(res.trades)
+    if seed is not None:    # random-entry jobs feed a benchmark that reads signal_time only
+        trades = trades.drop(columns=[c for c in LEVEL_COLS if c in trades.columns])
     return {"symbol": symbol, "params": params, "seed": seed, "daily": dr, "exposure": expo,
             "flat_bars": flat_daily, "trades": trades, "rejected": res.rejected}
 

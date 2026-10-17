@@ -85,6 +85,9 @@ def test_chunks_never_mix_symbols_and_spread_work():
     assert sum(len(js) for _, _, js in cs) == len(jobs)
 
 
+LEVELS = ("level_time", "level_stop", "level_target")
+
+
 @pytest.mark.parametrize("workers", [1, 2])
 def test_run_many_matches_a_direct_backtest(tmp_path, workers):
     cfg = market_config(tmp_path)
@@ -102,7 +105,13 @@ def test_run_many_matches_a_direct_backtest(tmp_path, workers):
         ref = run_backtest(strat, bars, strat.prepare(bars), symbol=s, tf=tf, ep=EngineParams.from_config(cfg, s))
         assert len(ref.trades) > 0
         pd.testing.assert_series_equal(r["daily"], daily_returns(ref.equity, ref.time))
-        pd.testing.assert_frame_equal(r["trades"], pd.DataFrame(ref.trades))
+        want = pd.DataFrame(ref.trades)
+        if seed is None:        # a grid job keeps the stop/target path, a random-entry job drops it
+            assert set(LEVELS) <= set(r["trades"].columns)
+        else:
+            assert not set(LEVELS) & set(r["trades"].columns)
+            want = want.drop(columns=list(LEVELS))
+        pd.testing.assert_frame_equal(r["trades"], want)
 
 
 def test_plugin_output_lands_in_the_run_directory(tmp_path, plugins):
