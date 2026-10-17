@@ -252,9 +252,11 @@ def trades_chart_section(r, rid, folds=None):
     shade = (" Shaded: every other test fold (hover a fold label for its train window and params); "
              "every trade here is out-of-sample." if mode == "walkforward"
              else " Shaded: warmup bars from before the run started.")
+    lines = ("stop (red) and target (blue), as they moved" if tc.has_levels(here)
+             else "initial stop (red) and initial target (blue)")
     st.caption(f"{len(here)} trade{'' if len(here) == 1 else 's'} in range · candles from {src}.{coarse} "
                "▲ long / ▼ short entry at the fill · ○ close of the signal bar · ✕ exit, coloured by reason · "
-               f"dotted: initial stop (red) and initial target (blue).{shade}")
+               f"dotted: {lines}.{shade}")
     if len(here):
         with st.expander(f"Trades in range ({len(here)})"):
             cols = [x for x in ["side", "signal_time", "entry_time", "entry_price", "exit_time", "exit_price",

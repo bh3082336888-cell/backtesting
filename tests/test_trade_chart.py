@@ -225,6 +225,95 @@ def test_received_funding_reads_as_received():
     assert "funding 0.00" in h
 
 
+# ---------------------------------------------------------------- level path
+
+def _lv(t0, offs, stops, targets):
+    """Level columns for a trade whose entry is at t0 (epoch ms): one level per offset, in bars."""
+    return dict(level_time=[t0 + o * H4 for o in offs], level_stop=stops, level_target=targets)
+
+
+def _xy(tr):
+    return [(pd.Timestamp(x), y) for x, y in zip(tr.x, tr.y)]
+
+
+def _at(i):
+    return pd.Timestamp("2024-01-01") + pd.Timedelta(milliseconds=i * H4)
+
+
+def test_trailing_stop_is_drawn_as_a_step_line():
+    c = candles(n=200)
+    base = trade(sig=10, bars=6, stop=95.0)       # entry bar 11, exit bar 17
+    t = pd.DataFrame([{**base, **_lv(base["entry_time"], [0, 2, 4], [95.0, 97.0, 99.0], [np.nan] * 3)}])
+    fig = tc.trade_figure(c, t, "4h")
+    (stop,) = _traces(fig, "stop")
+    assert _xy(stop)[:-1] == [(_at(11), 95.0), (_at(13), 95.0), (_at(13), 97.0), (_at(15), 97.0),
+                              (_at(15), 99.0), (_at(17), 99.0)]
+    assert stop.x[-1] is None and stop.y[-1] is None
+    assert not _traces(fig, "target") and not _traces(fig, "initial stop")
+    assert stop.line.dash == "dot" and stop.line.color == tc.PALETTE["neg"] and stop.hoverinfo == "skip"
+
+
+def test_a_target_that_goes_nan_breaks_the_line_and_resumes():
+    c = candles(n=200)
+    base = trade(sig=10, bars=6, stop=95.0)
+    t = pd.DataFrame([{**base, **_lv(base["entry_time"], [0, 2, 4], [95.0] * 3, [120.0, np.nan, 130.0])}])
+    (tgt,) = _traces(tc.trade_figure(c, t, "4h"), "target")
+    assert tgt.x[-1] is None and tgt.line.color == tc.PALETTE["s1"]
+    assert [(pd.Timestamp(x), y) if x is not None else None for x, y in zip(tgt.x, tgt.y)] == [
+        (_at(11), 120.0), (_at(13), 120.0), None, (_at(15), 130.0), (_at(17), 130.0), None]
+
+
+def test_levels_read_back_from_parquet_are_arrays(tmp_path):
+    base = trade(sig=10, bars=6, stop=95.0)
+    t = pd.DataFrame([{**base, **_lv(base["entry_time"], [0, 3], [95.0, 98.0], [np.nan, 120.0])},
+                      {**trade(sig=40, bars=4, stop=90.0), **_lv(_ms("2024-01-01") + 41 * H4, [0], [90.0], [np.nan])}])
+    t.to_parquet(tmp_path / "t.parquet")
+    back = pd.read_parquet(tmp_path / "t.parquet")
+    assert isinstance(back.level_stop.iloc[0], np.ndarray) and tc.has_levels(back)
+    fig = tc.trade_figure(candles(n=200), back, "4h")
+    (stop,) = _traces(fig, "stop")
+    assert [y for y in stop.y if y is not None] == [95.0, 95.0, 98.0, 98.0, 90.0, 90.0]
+    (tgt,) = _traces(fig, "target")
+    assert [y for y in tgt.y if y is not None] == [120.0, 120.0]
+
+
+def test_old_trades_keep_the_initial_lines():
+    t = pd.DataFrame([trade(sig=10, stop=95.0, target=120.0)])
+    assert not tc.has_levels(t)
+    fig = tc.trade_figure(candles(n=200), t, "4h")
+    (stop,) = _traces(fig, "initial stop")
+    (tgt,) = _traces(fig, "initial target")
+    assert [y for y in stop.y if y is not None] == [95.0, 95.0] and [y for y in tgt.y if y is not None] == [120.0] * 2
+    assert not _traces(fig, "stop") and not _traces(fig, "target")
+    # a row whose levels are None or empty (a frame mixing old and new) is drawn the same way
+    for empty in (None, []):
+        m = pd.DataFrame([{**trade(sig=10, stop=95.0), "level_time": empty, "level_stop": empty,
+                           "level_target": empty}])
+        assert not tc.has_levels(m)
+        assert _traces(tc.trade_figure(candles(n=200), m, "4h"), "initial stop")
+
+
+def test_hover_gives_the_levels_at_exit():
+    base = trade(sig=10, bars=6, stop=95.0)
+    t = pd.DataFrame([{**base, **_lv(base["entry_time"], [0, 2], [95.0, 99.5], [np.nan, 130.0])},
+                      {**base, **_lv(base["entry_time"], [0], [95.0], [np.nan])}])
+    h = tc.hover_text(t)
+    assert "stop at exit 99.5 · target at exit 130" in h[0]
+    assert "stop at exit 95 · target at exit —" in h[1]
+    assert "initial stop 95" in h[0]
+    assert "at exit" not in tc.hover_text(pd.DataFrame([trade()]))[0]
+
+
+def test_a_level_stamped_before_the_entry_never_steps_backwards():
+    base = trade(sig=10, bars=6, stop=95.0)       # entry bar 11, exit bar 17
+    lv = _lv(base["entry_time"], [0, -2, 4], [95.0, 97.0, 99.0], [np.nan] * 3)
+    t = pd.DataFrame([{**base, **lv}])
+    (stop,) = _traces(tc.trade_figure(candles(n=200), t, "4h"), "stop")
+    xs = [pd.Timestamp(x) for x in stop.x if x is not None]
+    assert xs == sorted(xs) and xs[0] == _at(11)
+    assert [y for y in stop.y if y is not None] == [95.0, 95.0, 97.0, 97.0, 99.0, 99.0]
+
+
 # ---------------------------------------------------------------- dashboard
 
 @pytest.fixture
@@ -307,3 +396,16 @@ def test_in_sample_runs_say_they_are_not_charted(wf_run):
     at = _detail("beta @ 4h")
     assert not at.exception, [e.message for e in at.exception]
     assert any("Trade charts cover walk-forward and paper runs" in c.value for c in at.caption)
+
+
+def test_detail_page_says_the_levels_moved_when_trades_have_them(wf_run):
+    t = pd.DataFrame([{**trade(sig=s, start="2024-01-01"), **_lv(_ms("2024-01-01") + (s + 1) * H4, [0, 2],
+                                                                  [95.0, 97.0], [np.nan, np.nan])}
+                      for s in (300, 420, 640)])
+    t.to_parquet(wf_run.runs_dir / "wf1" / "oos_trades.parquet")
+    write_candles(wf_run.data_dir, "BTCUSDT", "4h", candles("2024-01-01", n=6 * 130))
+    at = _detail()
+    assert not at.exception, [e.message for e in at.exception]
+    assert any("stop (red) and target (blue), as they moved" in c.value for c in at.caption)
+    spec = _trade_chart(at)
+    assert {"stop"} <= {d.get("name") for d in spec["data"]}
