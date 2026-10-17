@@ -136,6 +136,9 @@ def _handle(session, sess, header: dict, sections: dict) -> tuple[dict, dict]:
         result = sess.run(header["params"], header["ep"], header["k"], header["start_i"], header["random"],
                           header["features"])
         return session.run_reply(result, header["features"])
+    if op == "prepare":
+        sess.prepare(header["params"])
+        return {"ok": True}, {}
     if op == "stream_open":
         return session.stream_open_reply(sess.stream_open(header["params"], header["ep"], header["warmup_k"]))
     if op == "step":

@@ -6,6 +6,9 @@ uses the walk-forward worker pool, and the holdout bars are loaded here. The plu
 holdout bar at a time, and the trusted engine runs on the plugin's decisions; symbols go in batches
 of at most `client.max_workers`, each batch in lockstep. Indicators warm up on research data (each
 run starts at history_start); only returns and trades inside [holdout_start, end) are kept.
+
+`cost_hours` estimates an exam's CPU time per symbol before any read is spent, from research data
+only, so a plugin too slow to stream is blocked without one.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client, stream
 
 DEFAULT_FUNDING_H = 8.0
+COST_PROBES = 3                         # timed `prepare` calls; the estimate uses their median
 
 
 @dataclass
@@ -58,6 +62,22 @@ def window_end(cfg, symbols: list[str], tf: str) -> pd.Timestamp:
         ih = fund.interval_hours if pd.notna(fund.interval_hours) else DEFAULT_FUNDING_H
         ends.append(min(last_open + TF_MS[tf], int(fund.funding_time) + int(ih * 3_600_000)))
     return pd.Timestamp(min(ends), unit="ms", tz="UTC").floor("D")
+
+
+def cost_hours(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict, end: pd.Timestamp) -> float:
+    """Estimated CPU hours of one symbol's streamed exam on [holdout_start, end): the median CPU time
+    of COST_PROBES `prepare` calls on the first symbol's full research bars, in a worker of its own,
+    times the window's bar count. Each stream step runs one `prepare` over everything held, so this
+    is a slight underestimate. The bar count comes from the window's length: no holdout data is read."""
+    sym = symbols[0]
+    bars = load_bars(cfg, sym, tf)                         # research bars only: no token
+    n = max(0, (end - cfg.holdout_start) // pd.Timedelta(milliseconds=TF_MS[tf]))
+
+    def probe() -> list[float]:
+        with client.spawn(cfg, src) as w:
+            w.bars(sym, tf, bars)
+            return [w.prepare(params) for _ in range(COST_PROBES)]
+    return float(np.median(client._retry_once(probe))) * n / 3600
 
 
 def run_exam(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict, token, end: pd.Timestamp,

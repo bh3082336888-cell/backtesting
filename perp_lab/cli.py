@@ -204,13 +204,14 @@ def holdout_init(config: Optional[str] = CfgOpt):
 @app.command()
 def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers: Optional[int] = None,
           config: Optional[str] = CfgOpt):
-    """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam."""
-    from perp_lab.judge.judge import JudgeRefused, attempt_exam
+    """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam,
+    which only `lab exam` runs."""
+    from perp_lab.judge.judge import JudgeRefused
     from perp_lab.judge.judge import judge as run_judge
     from perp_lab.sandbox.errors import SandboxUnavailable
     cfg = load_config(config)
     try:
-        j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers, attempt=attempt_exam)
+        j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers)
     except SandboxUnavailable as e:
         typer.secho(f"sandbox unavailable: {e}", fg="red")
         raise typer.Exit(1)
@@ -229,7 +230,8 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
 
 @app.command()
 def exam(config: Optional[str] = CfgOpt):
-    """Attempt the holdout exam for every pending promotion (budget rules apply)."""
+    """Attempt the holdout exam for every pending promotion (budget rules apply). The only command
+    that runs exams; the proposer never runs it."""
     from perp_lab.judge.judge import exam_pending
     done = exam_pending(load_config(config))
     if not done:

@@ -92,6 +92,7 @@ judge:
   holdout_floor_pct: 5        # holdout return must reach this percentile of the walk-forward record
   holdout_log: runs/holdout_log.jsonl
   verdicts_dir: runs/verdicts # public verdicts: the proposer's only input; never holdout numbers
+  exam_max_attempts: 3        # attempts per holdout read, then failed / exam_error
 
 # Plugin code runs only in confined worker processes (Landlock + seccomp); see
 # docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md.

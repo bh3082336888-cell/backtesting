@@ -147,6 +147,38 @@ def test_in_process_twin_gives_the_same_output(cfg):
     assert b"hello from the plugin" in real_err and b"hello from the plugin" in twin_err
 
 
+SPIN = """
+t = time.process_time()
+while time.process_time() - t < self.p["spin"]:
+    pass
+return bars[[]]
+"""
+
+
+def check_prepare(cfg, make):
+    """`prepare` on the held bars: the CPU it took, measured outside the plugin; plugin errors as usual."""
+    with make(cfg, plugin("spinner", SPIN, params='{"spin": 0.0}')) as w:
+        with pytest.raises(RuntimeError, match="send the bars"):
+            w.prepare({})
+        w.bars("X", "1h", make_bars())
+        assert 0.4 <= w.prepare({"spin": 0.5}) < 5
+        e = plugin_error(w.prepare, {"nope": 1})
+        assert (e.kind, e.type) == ("exception", "ValueError") and "unknown params" in e.message
+    with make(cfg, plugin("no_frame", "return None")) as w:      # the engine's arrays are built too
+        w.bars("X", "1h", make_bars())
+        e = plugin_error(w.prepare, {})
+        assert (e.kind, e.type) == ("exception", "AttributeError")
+
+
+def test_the_twin_times_prepare(cfg):
+    check_prepare(cfg, InProcessWorker)
+
+
+@pytest.mark.sandbox
+def test_a_worker_times_prepare_from_outside(cfg):
+    check_prepare(cfg, client.spawn)
+
+
 @pytest.mark.sandbox
 def test_a_plugin_exception_comes_back_with_its_type(cfg):
     e = plugin_error(batch_run, cfg, plugin("broken", 'return bars[["no such column"]]'))

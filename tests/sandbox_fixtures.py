@@ -89,6 +89,13 @@ class InProcessWorker:
         reply = json.loads(json.dumps(reply, allow_nan=True))
         return client.run_output(reply, sections, self._index if k is None else self._index[:k], features)
 
+    def prepare(self, params):
+        if self._index is None:
+            raise RuntimeError("send the bars before a prepare")
+        req = json.loads(json.dumps(client.prepare_request(params), allow_nan=True))
+        self._call(self._s.prepare, req["params"])
+        return self.last_cpu_s
+
     def stream_open(self, params, ep, warmup_k):
         if self._index is None:
             raise RuntimeError("send the bars before a stream")

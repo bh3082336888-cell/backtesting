@@ -36,13 +36,16 @@ class HoldoutToken:
 
 
 def issue_holdout_token(lineage_id: str, reason: str, log_path: Path,
-                        judgement_id: int | None = None) -> HoldoutToken:
+                        judgement_id: int | None = None, window_end: str | None = None) -> HoldoutToken:
+    """Mint a token, logging the read first. `window_end` (ISO) is the end of the window this read
+    examines, fixed at its first mint."""
     tok = HoldoutToken(lineage_id, reason, secrets.token_hex(8), _MINT_KEY)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a") as f:
         f.write(json.dumps({
             "ts": datetime.now(timezone.utc).isoformat(),
             "lineage_id": lineage_id, "reason": reason, "nonce": tok.nonce, "judgement_id": judgement_id,
+            "window_end": window_end,
         }) + "\n")
     return tok
 

@@ -4,7 +4,8 @@
 inherit the confinement. One `Session` per worker: it holds the plugin class (`load`), one
 symbol's bars (`bars`) and runs the plugin over them (`run`). A stream (`stream_open`, then
 `step`) keeps one strategy instance and decides on the last bar held, after adding the bar the
-step brings. Its results are plain values the worker encodes for the parent; an exception becomes
+step brings. `prepare` only computes the features (for the exam's cost probe, which the parent
+times). Its results are plain values the worker encodes for the parent; an exception becomes
 `error_reply`.
 """
 
@@ -19,7 +20,7 @@ import pandas as pd
 import pyarrow  # noqa: F401  (imported now, so its threads start under confinement)
 
 import perp_lab.indicators  # noqa: F401  (plugins import it)
-from perp_lab.engine.backtest import EngineParams, run_backtest
+from perp_lab.engine.backtest import EngineParams, build_arrays, run_backtest
 from perp_lab.sandbox.decisions import Decisions, Recorder, decide_last
 from perp_lab.sandbox.errors import PluginError, ProtocolError, ascii_text
 from perp_lab.sandbox.protocol import decisions_sections, position_view, signal_json
@@ -101,6 +102,13 @@ class Session:
         fp = (len(res.trades), float(res.equity[-1]) if len(res.equity) else float(eng.equity0))
         names, arrays = _features(feats, bars.index) if features else ([], [])
         return Decisions.from_log(rec.log), fp, names, arrays
+
+    def prepare(self, params: dict) -> None:
+        """`prepare` on every bar held, and the engine's arrays from it, as one stream step does
+        before its decision; nothing is returned (the parent measures the CPU it takes)."""
+        if self.cls is None or self._bars is None:
+            raise ProtocolError("prepare before load and bars")
+        build_arrays(self._bars, self.cls(**params).prepare(self._bars))
 
     def stream_open(self, params: dict, ep: dict, warmup_k: int) -> Decisions:
         """A new strategy instance, kept for the steps that follow; the decisions of a batch run of

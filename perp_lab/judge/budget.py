@@ -7,6 +7,10 @@ result was never published) only for the same lineage_id; a judgement_id logged 
 lineage is not a retry and meets every rule below. Otherwise the exam
 window must be at least min_holdout_days, total reads stay under holdout_max_reads, and each
 family gets one read. A missing or malformed log refuses; it never means "zero reads".
+
+Each mint logs the end of the window it unlocks. A read's window is fixed at its first mint: a
+retry examines the same window (`stored_window_end`), however much data has arrived since, and a
+read gets `judge.exam_max_attempts` attempts (`attempts` counts its entries; the judge enforces it).
 """
 
 from __future__ import annotations
@@ -16,6 +20,8 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+import pandas as pd
 
 from perp_lab.holdout import HoldoutToken, issue_holdout_token
 
@@ -78,6 +84,32 @@ def holds_read(cfg, judgement_id: int, lineage_id: str) -> bool:
     return _holds(read_log(log_path(cfg)), judgement_id, lineage_id)
 
 
+def _entries_of(cfg, judgement_id: int, lineage_id: str | None) -> list[dict]:
+    return [e for e in read_log(log_path(cfg)) if e.get("judgement_id") == judgement_id
+            and (lineage_id is None or e["lineage_id"] == lineage_id)]
+
+
+def attempts(cfg, judgement_id: int, lineage_id: str | None = None) -> int:
+    """How many times this judgement's read was minted (its first attempt and each retry); only
+    its entries under `lineage_id`, when given. Raises BudgetLogError like holds_read."""
+    return len(_entries_of(cfg, judgement_id, lineage_id))
+
+
+def stored_window_end(cfg, judgement_id: int, lineage_id: str | None = None) -> pd.Timestamp | None:
+    """The window end fixed when this judgement's read was minted: the first of its entries (under
+    `lineage_id`, when given) that has one. None when none has (no read yet, or 3a entries only)."""
+    for e in _entries_of(cfg, judgement_id, lineage_id):
+        if e.get("window_end") is not None:
+            try:
+                end = pd.Timestamp(e["window_end"])
+            except (TypeError, ValueError) as ex:
+                raise BudgetLogError(f"holdout log {log_path(cfg)}: bad window_end {e['window_end']!r}") from ex
+            if end.tz is None:
+                raise BudgetLogError(f"holdout log {log_path(cfg)}: window_end {e['window_end']!r} has no timezone")
+            return end.tz_convert("UTC")
+    return None
+
+
 def check(cfg, entries: list[dict], lineage_id: str, judgement_id: int, window_days: int) -> BudgetCheck:
     if not isinstance(judgement_id, int) or isinstance(judgement_id, bool):
         raise TypeError(f"judgement_id must be an int, got {judgement_id!r}")
@@ -104,12 +136,16 @@ def _locked(path: Path):
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
-def mint(cfg, lineage_id: str, judgement_id: int, window_days: int) -> tuple[BudgetCheck, HoldoutToken | None]:
-    """Check the budget and, if allowed, unlock the holdout. The read is logged before any data is read."""
+def mint(cfg, lineage_id: str, judgement_id: int, window_days: int,
+         window_end: pd.Timestamp) -> tuple[BudgetCheck, HoldoutToken | None]:
+    """Check the budget and, if allowed, unlock the holdout. The read is logged, with the end of the
+    window it examines, before any data is read."""
+    if not isinstance(window_end, pd.Timestamp) or window_end.tz is None:
+        raise TypeError(f"window_end must be a tz-aware pd.Timestamp, got {window_end!r}")
     p = log_path(cfg)
     with _locked(p):
         chk = check(cfg, read_log(p), lineage_id, judgement_id, window_days)
         if chk.status != "mint":
             return chk, None
         return chk, issue_holdout_token(lineage_id, f"judge exam, judgement {judgement_id}", p,
-                                        judgement_id=judgement_id)
+                                        judgement_id=judgement_id, window_end=window_end.isoformat())

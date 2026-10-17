@@ -12,6 +12,8 @@ from perp_lab.cli import app
 from perp_lab.judge import budget
 from perp_lab.judge.exam import ExamResult
 from perp_lab.judge.judge import VERDICT_KEYS, attempt_exam, exam_pending, judge, verdict_path
+from perp_lab.sandbox import client
+from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.store import db
 from perp_lab.validate import walkforward as wfm
 from tests.conftest import market_config
@@ -28,7 +30,7 @@ def stub_run(mu, n_trades=30, seed=11, fail=False):
                            "pnl": 1.0, "r_multiple": 0.5, "bars_held": 3, "exit_reason": "stop",
                            "fees": 0.1, "funding": 0.0})
 
-    def run(cfg, src, tf, symbols, params, token, end):
+    def run(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
         if fail:
             raise RuntimeError("exam crashed")
         return ExamResult(HOLDOUT_DAYS[0], end, dict(params), {"BTCUSDT": port}, port, trades)
@@ -39,9 +41,26 @@ def end_after(days):
     return lambda cfg, symbols, tf: cfg.holdout_start + pd.Timedelta(days=days)
 
 
+def no_cost(cfg, src, tf, symbols, params, end):
+    """Stand-in for the cost probe: an exam that costs nothing."""
+    return 0.0
+
+
+def boom(*a, **kw):
+    raise AssertionError("must not run")
+
+
 def judged(cfg, name, outcomes, run, days=200):
-    return judge(cfg, name, "4h", validate=StubValidate(outcomes),
-                 attempt=partial(attempt_exam, run=run, end_fn=end_after(days)))
+    """`lab judge`, then (as `lab exam` would) the exam of a new promotion."""
+    j = judge(cfg, name, "4h", validate=StubValidate(outcomes))
+    if j["decision"] != "promote" or j.get("existing"):
+        return j
+    return attempt_exam(cfg, j["id"], run=run, end_fn=end_after(days), cost_fn=no_cost)
+
+
+def exams(cfg, run, days=200):
+    """`lab exam`, with a stand-in exam and window end."""
+    return exam_pending(cfg, run=run, end_fn=end_after(days), cost_fn=no_cost)
 
 
 ROOT_STRONG = {"donchian_atr": ("candidate", STRONG)}
@@ -104,7 +123,7 @@ def test_exam_crash_keeps_pending_and_retry_uses_no_new_read(cfg, plugins):
         judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(0.003, fail=True))
     j = db.pending_judgements(cfg)[0]
     assert j["holdout_reason"] == "exam_error" and budget.reads_used(cfg) == 1
-    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    [done] = exams(cfg, stub_run(0.003))
     assert done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
 
 
@@ -114,11 +133,11 @@ def test_an_edited_plugin_waits_and_spends_no_read(cfg, plugins):
     f = plugins / "donchian_atr.py"
     original = f.read_text()
     f.write_text(original + "\n# edited\n")
-    [j] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    [j] = exams(cfg, stub_run(0.003))
     assert (j["holdout_status"], j["holdout_reason"]) == ("pending", "plugin_changed")
     assert budget.reads_used(cfg) == 0
     f.write_text(original)
-    [j] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    [j] = exams(cfg, stub_run(0.003))
     assert j["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
 
 
@@ -149,11 +168,11 @@ def test_one_crashing_exam_does_not_block_the_others(cfg, plugins):
         judged(cfg, name, outcomes, stub_run(0.003), days=100)
     good = stub_run(0.003)
 
-    def run(cfg, src, tf, symbols, params, token, end):
+    def run(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
         if src.name == "donchian_atr":
             raise RuntimeError("exam crashed")
-        return good(cfg, src, tf, symbols, params, token, end)
-    a, b = exam_pending(cfg, run=run, end_fn=end_after(200))
+        return good(cfg, src, tf, symbols, params, token, end, stderr_dir=stderr_dir)
+    a, b = exams(cfg, run)
     assert a["strategy"] == "donchian_atr" and "error" in a
     assert (a["holdout_status"], a["holdout_reason"]) == ("pending", "exam_error")
     assert b["strategy"] == "other_root" and b["holdout_status"] == "passed" and "error" not in b
@@ -161,9 +180,6 @@ def test_one_crashing_exam_does_not_block_the_others(cfg, plugins):
 
 def test_a_judgement_that_already_has_a_result_is_never_re_examined(cfg, plugins):
     budget.init_log(cfg)
-
-    def boom(*a, **k):
-        raise AssertionError("must not run")
     outcomes = {"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)}
     done = judged(cfg, "donchian_atr", outcomes, stub_run(0.003))
     blocked = judged(cfg, "donchian_atr_wide", outcomes, stub_run(0.003))
@@ -187,7 +203,7 @@ def test_a_promoted_child_supersedes_its_pending_parent(cfg, plugins):
     assert (r["holdout_status"], r["holdout_reason"]) == ("blocked", "superseded")
     out = json.loads(Path(root["verdict_path"]).read_text())
     assert (out["holdout_status"], out["holdout_reason"]) == ("blocked", "superseded")
-    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    [done] = exams(cfg, stub_run(0.003))
     assert done["id"] == child["id"] and done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
 
 
@@ -242,8 +258,9 @@ def fresh_wf_caches():
 def test_end_to_end_real_exam_on_a_synthetic_market(tmp_path, plugins, fresh_wf_caches):
     cfg = market_config(tmp_path, judge={"min_holdout_days": 30})
     budget.init_log(cfg)
-    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG), attempt=attempt_exam)
-    assert j["holdout_status"] in {"passed", "failed"}          # a real exam ran on 92 days
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG))
+    j = attempt_exam(cfg, j["id"])
+    assert j["holdout_reason"] in {"passed", "failed"}          # a real exam ran on 92 days
     h = db.run_row(cfg, j["holdout_run_id"])
     assert (h["date_start"], h["date_end"]) == ("2026-07-01", "2026-10-01")
     assert pd.read_parquet(Path(h["run_dir"]) / "holdout_daily.parquet").shape[0] == 92
@@ -253,11 +270,13 @@ def test_end_to_end_real_walk_forward_on_a_synthetic_market(tmp_path, plugins, f
     cfg = market_config(tmp_path, judge={"min_holdout_days": 30},
                         validation={"random_seeds": 5, "mc_iterations": 200})
     budget.init_log(cfg)
-    j = judge(cfg, "donchian_atr", "4h", workers=1, attempt=attempt_exam)
+    j = judge(cfg, "donchian_atr", "4h", workers=1)
+    if j["decision"] == "promote":
+        j = attempt_exam(cfg, j["id"])
     child = db.run_row(cfg, j["child_run_id"])
     assert child["validation_mode"] == "walkforward" and len(db.read_table(cfg, db.run_folds)) == 6
     assert j["decision"] in {"promote", "kill"} and j["n_trials"] == 1
-    assert j["holdout_status"] == "n/a" if j["decision"] == "kill" else j["holdout_status"] in {"passed", "failed"}
+    assert j["holdout_status"] == "n/a" if j["decision"] == "kill" else j["holdout_reason"] in {"passed", "failed"}
     assert set(json.loads(Path(j["verdict_path"]).read_text())) == VERDICT_KEYS
 
 
@@ -272,7 +291,7 @@ def test_a_parent_whose_exam_crashed_is_not_superseded(cfg, plugins):
     assert child["decision"] == "promote"
     r = db.get_judgement_by_id(cfg, root["id"])
     assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error")
-    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))
+    [done] = exams(cfg, stub_run(0.003))
     assert done["id"] == root["id"] and done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
 
 
@@ -328,7 +347,7 @@ def test_a_parent_holding_a_read_is_never_superseded_even_after_an_interrupt(cfg
     assert child["decision"] == "promote"
     r = db.get_judgement_by_id(cfg, root["id"])
     assert r["holdout_status"] == "pending"
-    done = {j["id"]: j for j in exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(200))}
+    done = {j["id"]: j for j in exams(cfg, stub_run(0.003))}
     assert done[root["id"]]["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
 
 
@@ -351,7 +370,7 @@ def test_lookahead_after_the_judged_span_blocks_the_exam_before_any_read(cfg, pl
     add_plugin(plugins, "latepeek", date_peek("2027-02-01", parent=False))
     j = judged(cfg, "latepeek", {"latepeek": ("candidate", STRONG)}, stub_run(0.003), days=100)
     assert j["decision"] == "promote" and j["holdout_reason"] == "too_short"
-    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(250))
+    [done] = exams(cfg, stub_run(0.003), 250)
     assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "lookahead")
     assert budget.reads_used(cfg) == 0
 
@@ -363,7 +382,7 @@ def test_lookahead_in_the_last_days_of_the_exam_window_blocks_the_exam(cfg, plug
     budget.init_log(cfg)
     add_plugin(plugins, "tailpeek", date_peek("2026-12-20", parent=False))
     judged(cfg, "tailpeek", {"tailpeek": ("candidate", STRONG)}, stub_run(0.003), days=100)
-    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(180))   # window ends 2026-12-28
+    [done] = exams(cfg, stub_run(0.003), 180)   # window ends 2026-12-28
     assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "lookahead")
     assert budget.reads_used(cfg) == 0
 
@@ -375,5 +394,178 @@ def test_an_honest_seasonal_plugin_is_not_blocked_at_exam_time(cfg, plugins, mon
     budget.init_log(cfg)
     add_plugin(plugins, "seasonal", SEASONAL)
     judged(cfg, "seasonal", {"seasonal": ("candidate", STRONG)}, stub_run(0.003), days=100)
-    [done] = exam_pending(cfg, run=stub_run(0.003), end_fn=end_after(100))   # window May-Oct only
+    [done] = exams(cfg, stub_run(0.003), 100)   # window May-Oct only
     assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "too_short")
+
+
+# ---------------------------------------------------------------- only `lab exam` runs exams (3b-1)
+
+DAY_200 = pd.Timestamp("2026-07-01", tz="UTC") + pd.Timedelta(days=200)
+
+
+def promoted(cfg, name="donchian_atr"):
+    """`lab judge` of a plugin that promotes: a pending judgement awaiting its exam."""
+    j = judge(cfg, name, "4h", validate=StubValidate({name: ("candidate", STRONG)}))
+    assert j["decision"] == "promote" and (j["holdout_status"], j["holdout_reason"]) == ("pending", "awaiting_exam")
+    return j
+
+
+def crash(cfg, jid, days=200):
+    """One attempt that mints its read and then crashes."""
+    with pytest.raises(RuntimeError, match="exam crashed"):
+        attempt_exam(cfg, jid, run=stub_run(0.003, fail=True), end_fn=end_after(days), cost_fn=no_cost)
+
+
+def test_lab_judge_never_runs_an_exam(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    budget.init_log(cfg)
+    monkeypatch.setattr(jm, "attempt_exam", boom)
+    monkeypatch.setattr(jm, "exam_pending", boom)
+    monkeypatch.setattr(jm, "judge", partial(jm.judge, validate=StubValidate(ROOT_STRONG)))
+    r = CliRunner().invoke(app, ["judge", "donchian_atr", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+    assert "holdout: pending (awaiting_exam)" in r.output
+    [j] = db.pending_judgements(cfg)
+    assert (j["decision"], j["holdout_status"], j["holdout_reason"]) == ("promote", "pending", "awaiting_exam")
+    assert budget.reads_used(cfg) == 0
+
+
+def test_a_retry_uses_the_window_stored_at_the_mint(cfg, plugins):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    crash(cfg, j["id"], days=200)
+    ends, run = [], stub_run(0.003)
+
+    def spy(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
+        ends.append(end)
+        return run(cfg, src, tf, symbols, params, token, end, stderr_dir=stderr_dir)
+    done = attempt_exam(cfg, j["id"], run=spy, end_fn=end_after(260), cost_fn=no_cost)   # more data since
+    assert ends == [DAY_200] and done["holdout_status"] == "passed"
+    assert db.run_row(cfg, done["holdout_run_id"])["date_end"] == str(DAY_200.date())
+    entries = budget.read_log(budget.log_path(cfg))
+    assert [e["window_end"] for e in entries] == [DAY_200.isoformat()] * 2 and budget.reads_used(cfg) == 1
+
+
+def test_a_retry_skips_the_cost_probe_and_the_dated_check(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    crash(cfg, j["id"])
+    monkeypatch.setattr(jm, "dated_lookahead_failures", boom)
+    done = attempt_exam(cfg, j["id"], run=stub_run(0.003), end_fn=boom, cost_fn=boom)
+    assert done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_a_read_fails_after_its_last_attempt(cfg, plugins):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    assert cfg["judge"]["exam_max_attempts"] == 3
+    for _ in range(3):
+        crash(cfg, j["id"])
+    r = db.get_judgement_by_id(cfg, j["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error")
+    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=no_cost)
+    assert (done["holdout_status"], done["holdout_reason"]) == ("failed", "exam_error")
+    assert done["holdout_run_id"] is None and budget.attempts(cfg, j["id"]) == 3 and budget.reads_used(cfg) == 1
+    out = json.loads(Path(done["verdict_path"]).read_text())
+    assert (out["holdout_status"], out["holdout_reason"]) == ("failed", "exam_error")
+    assert exams(cfg, boom) == []
+
+
+def test_a_slow_plugin_is_blocked_before_any_read(cfg, plugins):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    probed = []
+
+    def slow(cfg, src, tf, symbols, params, end):
+        probed.append((src.name, tf, params, end))
+        return 7.0                              # CPU hours per symbol; exam_cpu_hours is 6
+    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=slow)
+    assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "too_slow")
+    assert budget.reads_used(cfg) == 0
+    assert probed == [("donchian_atr", "4h", {"n": 40, "atr_n": 14, "atr_mult": 3.0}, DAY_200)]
+
+
+def test_a_plugin_error_fails_the_exam_without_its_message_in_the_verdict(cfg, plugins):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    dirs = []
+
+    def raises(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
+        dirs.append(stderr_dir)
+        raise PluginError("exception", "ValueError", "close=123.45")
+    done = attempt_exam(cfg, j["id"], run=raises, end_fn=end_after(200), cost_fn=no_cost)
+    assert (done["holdout_status"], done["holdout_reason"]) == ("failed", "plugin_error")
+    assert budget.reads_used(cfg) == 1
+    text = Path(done["verdict_path"]).read_text()
+    assert "ValueError" not in text and "123.45" not in text and done["holdout_run_id"] not in text
+    h = db.run_row(cfg, done["holdout_run_id"])
+    assert h["validation_mode"] == "holdout" and h["verdict"] == "failed" and h["lineage_id"] == j["lineage_id"]
+    assert h["fail_reasons"] == ["plugin_error: exception: ValueError: close=123.45"]
+    stderr_dir = cfg.runs_dir / "_exam_stderr" / f"judgement-{j['id']}"
+    assert dirs == [stderr_dir]
+    report = (Path(h["run_dir"]) / "report.md").read_text()
+    assert "ValueError" in report and "123.45" in report and str(stderr_dir) in report
+    assert "2026-07-01" in report and str(DAY_200.date()) in report and '"atr_mult": 3.0' in report
+    assert exams(cfg, boom) == []               # the read is spent: never examined again
+
+
+def test_no_mint_when_the_sandbox_is_unavailable(cfg, plugins, monkeypatch):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+
+    def unavailable(cfg):
+        raise SandboxUnavailable("Landlock ABI 3 < 6")
+    monkeypatch.setattr(client, "check", unavailable)
+    with pytest.raises(SandboxUnavailable):
+        attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=no_cost)
+    assert budget.reads_used(cfg) == 0
+    r = db.get_judgement_by_id(cfg, j["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error")
+    out = json.loads(verdict_path(cfg, r["strategy"], r["timeframe"], r["strategy_hash"]).read_text())
+    assert (out["holdout_status"], out["holdout_reason"]) == ("pending", "exam_error")
+    # on a retry, no attempt is used
+    monkeypatch.setattr(client, "check", lambda cfg: 8)
+    crash(cfg, j["id"])
+    monkeypatch.setattr(client, "check", unavailable)
+    with pytest.raises(SandboxUnavailable):
+        attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=no_cost)
+    assert budget.attempts(cfg, j["id"]) == 1
+
+
+def test_the_exam_runs_on_the_bytes_whose_hash_was_checked(cfg, plugins, monkeypatch):
+    # the plugin file is read once: an edit after that read can't put unjudged bytes in the exam
+    import perp_lab.strategy as strategy_mod
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    judged_bytes = (plugins / "donchian_atr.py").read_bytes()
+    reads, real = [], strategy_mod.plugin_path
+
+    class EditedAfterTheFirstRead:
+        def read_bytes(self):
+            reads.append(1)
+            return judged_bytes if len(reads) == 1 else judged_bytes + b"\n# edited\n"
+    monkeypatch.setattr(strategy_mod, "plugin_path",
+                        lambda name: EditedAfterTheFirstRead() if name == "donchian_atr" else real(name))
+    sent = []
+
+    def run(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
+        sent.append(src.text)
+        return stub_run(0.003)(cfg, src, tf, symbols, params, token, end)
+    done = attempt_exam(cfg, j["id"], run=run, end_fn=end_after(200), cost_fn=no_cost)
+    assert sent == [judged_bytes] and len(reads) == 1 and done["holdout_status"] == "passed"
+
+
+@pytest.mark.sandbox
+def test_end_to_end_exam_through_the_real_sandbox(tmp_path, plugins, fresh_wf_caches):
+    cfg = market_config(tmp_path, judge={"min_holdout_days": 30})
+    budget.init_log(cfg)
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG))
+    assert (j["holdout_status"], j["holdout_reason"]) == ("pending", "awaiting_exam") and budget.reads_used(cfg) == 0
+    [done] = exam_pending(cfg)
+    assert done["id"] == j["id"] and "error" not in done
+    assert done["holdout_reason"] in {"passed", "failed"}       # a real exam ran on 92 days
+    h = db.run_row(cfg, done["holdout_run_id"])
+    assert (h["date_start"], h["date_end"]) == ("2026-07-01", "2026-10-01")
+    assert pd.read_parquet(Path(h["run_dir"]) / "holdout_daily.parquet").shape[0] == 92
+    assert budget.stored_window_end(cfg, j["id"]) == pd.Timestamp("2026-10-01", tz="UTC")

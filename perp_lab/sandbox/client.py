@@ -372,6 +372,16 @@ class Worker:
         return self._parsed("run", lambda: run_output(reply, secs, self._index if k is None else self._index[:k],
                                                       features))
 
+    def prepare(self, params: dict) -> float:
+        """The plugin's `prepare` (and the engine's arrays) on the held bars, with these params: the
+        CPU seconds the worker spent on it, measured from outside (/proc). For the exam's cost probe."""
+        if self._index is None:
+            raise RuntimeError("send the bars before a prepare")
+        _, secs = self._request(prepare_request(params))
+        if secs:
+            raise self._fail(ProtocolError("a prepare reply must have no sections"))
+        return self.last_cpu_s
+
     def stream_open(self, params: dict, ep: EngineParams, warmup_k: int) -> Decisions:
         """Start a stream on the held bars: the worker keeps a new strategy instance and returns its
         decisions from a batch run over the first warmup_k bars (none when warmup_k is 0)."""
@@ -417,6 +427,10 @@ def run_request(params: dict, ep: EngineParams, *, k=None, start_i=0, random=Non
             "k": None if k is None else int(k), "start_i": int(start_i),
             "random": None if random is None else {"seed": int(random[0]), "prob": float(random[1])},
             "features": bool(features)}
+
+
+def prepare_request(params: dict) -> dict:
+    return {"op": "prepare", "params": dict(params)}
 
 
 def stream_open_request(params: dict, ep: EngineParams, warmup_k: int) -> dict:
