@@ -154,16 +154,25 @@ def supersede(cfg, parent: str, tf: str, family: str) -> None:
     Only within the child's own family (a re-pointed PARENT must not cancel another family's
     exam), and never a parent that already holds the family's read according to the audit log
     (an exam that crashed, was interrupted or later waited as plugin_changed): it retries on that
-    read. If the log can't be read, whether it holds a read is unknown, so it is left queued."""
+    read. If the log can't be read, whether it holds a read is unknown, so it is left queued.
+
+    Under the parent's exam lock, taken without waiting: while `lab exam` examines the parent, it
+    may be about to mint the family's read, so the parent is left alone (its exam goes ahead)."""
     pj = db.get_judgement(cfg, plugin_hash(parent), tf)
     if pj is None or pj["holdout_status"] != "pending" or pj["lineage_id"] != family:
         return
-    try:
-        if budget.holds_read(cfg, pj["id"], pj["lineage_id"]):
+    with budget.exam_lock(cfg, pj["id"]) as mine:
+        if not mine:
             return
-    except budget.BudgetLogError:
-        return
-    db.update_holdout(cfg, pj["id"], "blocked", "superseded")
+        pj = db.get_judgement_by_id(cfg, pj["id"])          # as it is now, under the lock
+        if pj["holdout_status"] != "pending":
+            return
+        try:
+            if budget.holds_read(cfg, pj["id"], pj["lineage_id"]):
+                return
+        except budget.BudgetLogError:
+            return
+        db.update_holdout(cfg, pj["id"], "blocked", "superseded")
     finish(cfg, pj["id"])
 
 
@@ -370,7 +379,8 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
        window end stored at the mint, and on to 6 (the read is spent and the window fixed);
     3. the window end (shorter than min_holdout_days: pending / too_short, before any worker
        starts); 4. the dated lookahead check over it; 5. the cost probe (too_slow, or
-       plugin_error if the plugin fails it); 6. the sandbox check; 7. mint, storing the window end
+       plugin_error if the plugin fails it); 6. the sandbox check; 7. the judgement read again (no
+       longer pending, e.g. superseded meanwhile: stop, no read), then mint, storing the window end
        (refused, failed / exam_error, once the read's attempts are used up); 8. the streamed exam.
 
     SandboxUnavailable at any step before the mint is pending / exam_error, re-raised: nothing is
@@ -435,6 +445,8 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -
         db.update_holdout(cfg, jid, "pending", "exam_error")
         finish(cfg, jid)
         raise
+    if db.get_judgement_by_id(cfg, jid)["holdout_status"] != "pending":   # e.g. superseded since step 1:
+        return finish(cfg, jid)                                          # no read
     days = max(0, (end - cfg.holdout_start).days)
     chk, token = budget.mint(cfg, fam, jid, days, window_end=end)   # 7; failed / exam_error past the cap
     if token is None:

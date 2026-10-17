@@ -350,7 +350,10 @@ as in 3a); after that the judgement is `failed` with `exam_error`.
    `too_slow` and no read is spent.
 6. **Sandbox check:** spawn a worker and wait for `ready`. If that fails, nothing is minted (or,
    on a retry, no attempt is used) and the judgement stays `pending` with `exam_error`.
-7. Mint, as in 3a, storing the window end; on a retry, the existing read.
+7. Mint, as in 3a, storing the window end; on a retry, the existing read. Just before it the
+   judgement is read again: one no longer `pending` (superseded meanwhile) stops there, with no
+   read. A promotion supersedes its parent only under the parent's exam lock, taken without
+   waiting; while `lab exam` holds it, the parent is left alone and its exam goes ahead.
 8. The streamed exam, in the judge's process (the token never leaves it).
 
 ## Paper

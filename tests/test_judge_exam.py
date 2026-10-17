@@ -208,6 +208,33 @@ def test_a_promoted_child_supersedes_its_pending_parent(cfg, plugins):
     assert done["id"] == child["id"] and done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
 
 
+def test_supersede_leaves_a_parent_that_is_being_examined(cfg, plugins):
+    # Its exam lock is held: that exam may be about to mint the family's read, and superseding the
+    # parent under it would spend the read on a judgement whose verdict then flips.
+    budget.init_log(cfg)
+    root = judged(cfg, "donchian_atr", FAMILY, stub_run(0.003), days=100)
+    with budget.exam_lock(cfg, root["id"]) as mine:
+        assert mine
+        child = judged(cfg, "donchian_atr_wide", FAMILY, stub_run(0.003), days=100)
+    assert child["decision"] == "promote"
+    r = db.get_judgement_by_id(cfg, root["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "too_short")
+
+
+def test_a_judgement_superseded_before_the_mint_is_not_minted(cfg, plugins):
+    # Between step 1 and the mint (the dated check and the cost probe take minutes) the judgement
+    # stops being pending: the attempt stops there and spends no read.
+    budget.init_log(cfg)
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG))
+
+    def superseded_meanwhile(cfg, src, tf, symbols, params, end):
+        db.update_holdout(cfg, j["id"], "blocked", "superseded")
+        return 0.0
+    r = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=superseded_meanwhile)
+    assert (r["holdout_status"], r["holdout_reason"]) == ("blocked", "superseded")
+    assert budget.reads_used(cfg) == 0
+
+
 def test_a_killed_child_leaves_its_pending_parent_queued(cfg, plugins):
     budget.init_log(cfg)
     outcomes = {**FAMILY, "donchian_atr_wide": ("candidate", STRONG - 0.001)}

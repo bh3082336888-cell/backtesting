@@ -77,7 +77,8 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
   make ≥ 10 holdout trades, be positive, and be no worse than the walk-forward record's p5 for that length.
 - When a child is promoted, its parent's exam, if still pending in the same family, is blocked with reason
   `superseded`, so the family's one read goes to its best member, unless the audit log shows the parent
-  already holds that read (a crashed or interrupted exam), in which case it keeps it and retries.
+  already holds that read (a crashed or interrupted exam), in which case it keeps it and retries, or `lab exam`
+  is examining the parent at that moment, in which case its exam goes ahead.
 - If a plugin file is edited after it was judged, its pending exam waits with holdout status `pending` and
   reason `plugin_changed` (no new read is spent; one already spent by a crashed exam stays with it) until the
   judged version is restored; an edited plugin is a new version and is judged separately.
