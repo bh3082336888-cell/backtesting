@@ -471,7 +471,7 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -
                 block=jc["bootstrap_block_days"], n_boot=HOLDOUT_BOOT, seed=gates.seed_from(child["run_id"]))
             hrid = _record_holdout_run(cfg, j, s, res, ok, reasons, detail)
             db.update_holdout(cfg, jid, "passed" if ok else "failed", "passed" if ok else "failed", hrid)
-    except Exception:
+    except BaseException:                                       # a crash, or Ctrl-C: the read is spent
         db.update_holdout(cfg, jid, "pending", "exam_error")   # same judgement may retry on the same read
         finish(cfg, jid)                                        # the verdict file must still exist
         raise

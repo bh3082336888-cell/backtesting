@@ -128,6 +128,26 @@ def test_exam_crash_keeps_pending_and_retry_uses_no_new_read(cfg, plugins):
     assert done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
 
 
+class Interrupted(BaseException):
+    """Stands in for Ctrl-C: not an Exception."""
+
+
+def test_an_interrupted_exam_after_the_mint_is_left_as_exam_error(cfg, plugins):
+    # Ctrl-C after the read was minted: the judgement must not keep its stale awaiting_exam reason
+    # (its verdict would say no exam had been tried, though its read is spent).
+    budget.init_log(cfg)
+    j = promoted(cfg)
+
+    def interrupted(*a, **kw):
+        raise Interrupted
+    with pytest.raises(Interrupted):
+        attempt_exam(cfg, j["id"], run=interrupted, end_fn=end_after(200), cost_fn=no_cost)
+    r = db.get_judgement_by_id(cfg, j["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error") and budget.reads_used(cfg) == 1
+    out = json.loads(verdict_path(cfg, r["strategy"], r["timeframe"], r["strategy_hash"]).read_text())
+    assert (out["holdout_status"], out["holdout_reason"]) == ("pending", "exam_error")
+
+
 def test_an_edited_plugin_waits_and_spends_no_read(cfg, plugins):
     budget.init_log(cfg)
     judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(0.003), days=100)
@@ -356,20 +376,13 @@ def test_a_failed_supersede_still_writes_the_childs_verdict(cfg, plugins, monkey
     assert verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"]).exists()
 
 
-class Interrupted(BaseException):
-    """Stands in for Ctrl-C / a killed process: not an Exception, so no handler records exam_error."""
-
-
-def test_a_parent_holding_a_read_is_never_superseded_even_after_an_interrupt(cfg, plugins):
-    # the audit log, not the reason code, says whether the parent holds the family's read
+def test_a_parent_holding_a_read_is_never_superseded_even_after_a_kill(cfg, plugins):
+    # the audit log, not the reason code, says whether the parent holds the family's read: an exam
+    # killed (SIGKILL) just after its mint records nothing, so its reason is still awaiting_exam
     budget.init_log(cfg)
-
-    def interrupted(*a, **kw):
-        raise Interrupted
-
-    with pytest.raises(Interrupted):
-        judged(cfg, "donchian_atr", FAMILY, interrupted)
-    root = db.pending_judgements(cfg)[0]
+    root = judge(cfg, "donchian_atr", "4h", validate=StubValidate(FAMILY))
+    budget.mint(cfg, root["lineage_id"], root["id"], 200, DAY_200)
+    root = db.get_judgement_by_id(cfg, root["id"])
     assert root["holdout_reason"] == "awaiting_exam" and budget.reads_used(cfg) == 1
     child = judged(cfg, "donchian_atr_wide", FAMILY, stub_run(0.003))
     assert child["decision"] == "promote"
