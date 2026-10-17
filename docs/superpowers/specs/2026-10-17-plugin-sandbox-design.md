@@ -51,6 +51,12 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
 - **R3 Waste.** A plugin can burn CPU and memory up to its limits, or crash. Both end in a
   recorded kill.
 - **R4 Kernel bugs.** Confinement rests on Landlock and seccomp. A kernel exploit escapes it.
+- **R5 File metadata.** `stat()` metadata (size, modification time) of files outside the
+  allowlist stays visible to a plugin. Landlock has no right for it and seccomp can't filter by
+  path. File contents stay unreadable.
+- **R6 Isolation across processes.** The wave and lockstep isolation holds within one lookahead
+  check or one exam. It does not hold across lookahead checks or exams that run at the same
+  time in separate processes.
 
 ## Threat model
 
@@ -130,7 +136,10 @@ library imported. Until step 7 ends, only trusted code has run in it.
 2. Lowers hard rlimits: `RLIMIT_AS` = `sandbox.memory_mb`, `RLIMIT_FSIZE` 0, `RLIMIT_CORE` 0,
    `RLIMIT_NOFILE` small (e.g. 64), and `RLIMIT_CPU` at the session's total budget as a backstop
    to the parent's own accounting.
-3. `prctl(PR_SET_NO_NEW_PRIVS, 1)`.
+3. `prctl(PR_SET_NO_NEW_PRIVS, 1)`. Before this step, in the worker's startup, it also sets
+   its parent-death signal to SIGKILL and exits at once if its parent is already gone. EOF on
+   the pipe reaches only an idle worker; the signal reaches a busy one, which may hold holdout
+   bars, when the judge crashes or is interrupted.
 4. Landlock: a ruleset that handles every filesystem right the running ABI knows, TCP bind and
    connect, and scopes abstract UNIX sockets and signals. The only rules grant read-file and
    read-dir beneath the interpreter's prefixes (`sys.base_prefix` and `sys.prefix`),
@@ -148,16 +157,24 @@ library imported. Until step 7 ends, only trusted code has run in it.
    - System V IPC: `shmget`, `shmat`, `shmctl`, `shmdt`, `msgget`, `msgsnd`, `msgrcv`, `msgctl`,
      `semget`, `semop`, `semtimedop`, `semctl`. Landlock doesn't cover these; without this
      rule, one worker can leave bars in a shared-memory segment for another (tested);
+   - POSIX message queues: `mq_open`, `mq_unlink`, `mq_timedsend`, `mq_timedreceive`,
+     `mq_notify`, `mq_getsetattr`. Like System V IPC, Landlock doesn't cover them;
+   - file watches: `inotify_init`, `inotify_init1`, `fanotify_init`. Landlock has no right for
+     them;
    - calls aimed at another process: `ptrace`, `process_vm_readv`, `process_vm_writev`,
      `process_madvise`, `kcmp`, `pidfd_open`, `pidfd_getfd`, `migrate_pages`, `move_pages`.
-     `prlimit64`, `getpriority`, `setpriority`, `ioprio_get`, `ioprio_set` and the `sched_*`
-     calls that take a pid are allowed only on the calling process (pid or who = 0); without
-     this rule a worker can lower the judge's limits through `getppid()` (tested);
+     `prlimit64` and the `sched_*` calls that take a pid are allowed only on the calling
+     process (pid 0). `getpriority`, `setpriority`, `ioprio_get` and `ioprio_set` are allowed
+     only with `which` set to process and `who` 0, because the user-wide forms reach every
+     process of this user. Without these rules a worker can lower the judge's limits through
+     `getppid()` (tested);
+   - `prctl(PR_SET_PDEATHSIG)`: the worker sets its parent-death signal before it confines
+     itself, and plugin code may not clear or change it;
    - `mount`, `umount2`, `pivot_root`, `chroot`, `unshare`, `setns`; `bpf`, `perf_event_open`,
      `userfaultfd`, the `io_uring_*` calls; `keyctl`, `add_key`, `request_key`; module loading
      and `kexec` calls.
 
-   Syscalls through a non-native ABI (i386, x32) kill the process. Sockets are denied outright
+   A syscall through a non-native ABI (i386, x32) kills the process (`SCMP_ACT_KILL_PROCESS`). Sockets are denied outright
    because Landlock's network rules cover TCP only: UDP and existing UNIX sockets such as the
    Docker socket are outside them.
 6. Imports numpy, pandas, pyarrow, `perp_lab.strategy`, `perp_lab.indicators` and
@@ -275,14 +292,15 @@ nothing to peek at.
 
 Symbols' workers that run at the same time advance in **lockstep**: every one decides bar t
 before any is sent bar t+1, so none can pass another a later bar through CPU timing. All
-warm-ups finish before streaming starts. When the memory cap allows fewer workers than symbols
+warm-ups finish before streaming starts. During warm-ups research bars are not ordered across
+symbols; no holdout bar is affected. When the memory cap allows fewer workers than symbols
 (7 × 3 GiB on this machine, for 8 symbols), symbols go in batches, one batch after another, each
 in lockstep.
 
 Each stream step has its own limit, `sandbox.stream_step_s` of CPU and of wall-clock time,
 tight compared to the batch limit because one step is one `prepare`. A plugin that sleeps or
-spins fails the step, and after the one retry (which restarts that symbol's stream in a fresh
-worker) the exam fails with `plugin_error`.
+spins fails the step, and after the one retry (which restarts the whole batch in fresh workers:
+restarting one symbol would put it behind the others and break lockstep) the exam fails with `plugin_error`.
 
 Cost: one `prepare` over the whole history per holdout bar. Measured on synthetic bars,
 `prepare` plus building the arrays takes about 6 ms at 40k bars (1h), 25 ms at 160k (15m) and
@@ -391,6 +409,9 @@ Where it is recorded:
 - **Exam:** `holdout_status` `failed`, reason `plugin_error`. The read is spent. Neither the kind
   nor the message reaches the verdict; the human sees both in the holdout run's report.
 - **Paper:** the run stops with an error.
+
+A plugin-error kill is final for that version: the judgement is keyed by the plugin's hash, so
+judging it again returns the same kill. Re-judging needs an edited plugin.
 
 A worker's stderr is kept, capped, in the run directory for humans. It never reaches a verdict.
 

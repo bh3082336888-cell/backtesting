@@ -4,7 +4,7 @@ import pytest
 
 from perp_lab.judge.judge import JudgeRefused, judge
 from perp_lab.plugins import PluginMetaError, PluginSource, blob_hash
-from perp_lab.strategy import load_strategy_class
+from tests.sandbox_fixtures import load_class
 from tests.conftest import REAL_PLUGINS, REPO
 from tests.judge_fixtures import StubValidate, add_plugin, plugins, series  # noqa: F401
 from tests.test_store import cfg  # noqa: F401
@@ -13,7 +13,7 @@ from tests.test_store import cfg  # noqa: F401
 @pytest.mark.parametrize("name", REAL_PLUGINS)
 def test_metadata_from_the_source_equals_the_loaded_class(name, monkeypatch):
     monkeypatch.setattr("perp_lab.strategy.STRATEGY_DIR", REPO / "strategies")
-    src, cls = PluginSource.read(name), load_strategy_class(name)
+    src, cls = PluginSource.read(name), load_class(name)
     assert (src.meta.params, src.meta.grid, src.meta.timeframes) == (cls.params, cls.grid, cls.timeframes)
     assert src.meta.hypothesis == cls.hypothesis() and len(src.meta.hypothesis) > 20
 

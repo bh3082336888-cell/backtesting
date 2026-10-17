@@ -30,11 +30,13 @@ _CAPTURE = threading.RLock()
 
 
 def load_class(name):
-    """Load a real plugin in-process, from the repo's strategies/ (Task 12 re-points this)."""
+    """A real plugin from the repo's strategies/, loaded by the sandbox session (the only executor)."""
+    from perp_lab.plugins import PluginSource
+    from perp_lab.sandbox import session
     old = _strategy.STRATEGY_DIR
     _strategy.STRATEGY_DIR = REPO / "strategies"
     try:
-        return _strategy.load_strategy_class(name)
+        return session.load_plugin(name, PluginSource.read(name).text)
     finally:
         _strategy.STRATEGY_DIR = old
 

@@ -14,11 +14,19 @@ Contract:
         close of bar t and filled at the open of bar t+1 by the engine.
 
 `ctx` exposes only the current bar (ctx["col"]) and the past (ctx.hist / ctx.prev).
+
+Plugin code is never loaded here. It runs only in the sandbox session
+(perp_lab/sandbox/session.py), inside the confined worker. The contract that
+holds there:
+    - NAME, PARAMS, GRID and TIMEFRAMES are literals the parent reads from the
+      source without executing it.
+    - Features are numeric or bool columns.
+    - A plugin gets only the bars it is sent; it can't see later ones.
+    - Imports are limited to the read allowlist.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import math
 import sys
@@ -121,23 +129,6 @@ def plugin_path(name: str) -> Path:
     if not p.exists():
         raise FileNotFoundError(f"strategy plugin not found: {p}")
     return p
-
-
-def load_strategy_class(name: str) -> type[Strategy]:
-    path = plugin_path(name)
-    modname = f"lab_strategies.{name}"
-    spec = importlib.util.spec_from_file_location(modname, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[modname] = mod
-    spec.loader.exec_module(mod)
-    found = [v for v in vars(mod).values()
-             if inspect.isclass(v) and issubclass(v, Strategy) and v is not Strategy
-             and v.__module__ == modname]
-    if len(found) != 1:
-        raise ValueError(f"{path}: expected exactly one Strategy subclass, found {len(found)}")
-    cls = found[0]
-    cls.name = name
-    return cls
 
 
 def list_plugins() -> list[str]:

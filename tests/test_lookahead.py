@@ -10,7 +10,8 @@ import pytest
 
 from perp_lab.engine.backtest import EngineParams, run_backtest
 from perp_lab.plugins import PluginSource
-from perp_lab.strategy import RandomEntry, list_plugins, load_strategy_class
+from perp_lab.strategy import RandomEntry, list_plugins
+from tests.sandbox_fixtures import load_class
 from perp_lab.validate.causality import CUTS, causality_failures
 from tests.conftest import make_bars
 from tests.test_store import cfg  # noqa: F401
@@ -37,7 +38,7 @@ def test_plugin_no_lookahead(cfg, name):
 @pytest.mark.parametrize("name", PLUGINS)
 def test_plugin_trades_on_synthetic_data(name):
     """A plugin that never trades can't fail the lookahead test — make sure ours do."""
-    cls = load_strategy_class(name)
+    cls = load_class(name)
     bars = make_bars(seed=1)
     s = cls()
     r = run_backtest(s, bars, s.prepare(bars), symbol="X", tf="1h", ep=EngineParams())
@@ -58,7 +59,7 @@ def _assert_causal_in_process(strat_factory, bars):
 
 
 def test_random_entry_wrapper_is_causal():
-    cls = load_strategy_class("donchian_atr")
+    cls = load_class("donchian_atr")
     _assert_causal_in_process(lambda: RandomEntry(cls(), 0.01, seed=3), make_bars(seed=2))
 
 

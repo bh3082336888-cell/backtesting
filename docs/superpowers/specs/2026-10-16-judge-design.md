@@ -15,6 +15,7 @@ The harness is the judge: nothing a strategy or a proposer does can influence sc
 Safety-critical rules (holdout access, budget, gates) are enforced in code, not prompts.
 Until plugins run in a sandbox (a Phase 3b requirement, at the end), that guarantee holds for
 honest plugin code only: a plugin runs in the judge's process.
+Resolved by the 3b-1 sandbox: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 
 ## Decisions
 
@@ -118,6 +119,7 @@ the dashboard shows judgements and the holdout budget.
    queued. A failure while superseding still writes the child's
    verdict before the error propagates.
 10. **If promoted**, attempt the exam (see Holdout exam). Outcome sets `holdout_status`.
+    Changed in 3b-1: `lab judge` no longer attempts the exam; only `lab exam` does.
     Just before the budget is asked for a read, the dated lookahead check is re-run over
     `[60 days before holdout_start, exam window end]`, also trying the exam's frozen params as a
     variant; a failure blocks the exam with reason `lookahead` and no read is spent.
@@ -195,6 +197,8 @@ Too few trades is a fail ("not enough evidence"); the read is spent either way.
   zero reads.
 - **Concurrency:** count-and-mint happens under an exclusive file lock
   (`<holdout_log>.lock`), so two judges can't both take the last read.
+- **Stored window (3b-1):** the mint writes the window end into the read's log entry, every
+  retry uses it, and a read gets at most `judge.exam_max_attempts` (3) attempts.
 
 ## Holdout exam (`exam.py`)
 
@@ -330,3 +334,4 @@ Each test is written first and seen failing.
 - Until that sandbox exists, the "nothing a strategy does can influence scoring" guarantee
   holds only for honest plugins: a plugin running in the judge's process could read `data/`
   directly or forge an unlogged token via `_MINT_KEY`.
+Resolved by the 3b-1 sandbox: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
