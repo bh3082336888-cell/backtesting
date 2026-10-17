@@ -2,7 +2,9 @@
 
 Status: research note, written by us without an outside brief. Section 5 is the spec that the
 next task implements, as written. Implementing the plugin spends no trial. Running its
-walk-forward does: N goes from 6 to 7 store-wide, so that run is the user's call.
+walk-forward does: N goes from 6 to 7 store-wide, so that run is the user's call. Section 6 gives
+the one command for it, `lab judge flow_shock_fade --tf 1h`; without `--tf 1h` the judge runs at
+4h and spends the trial on the wrong timeframe.
 
 How this was done:
 - No internet of any kind. Everything below comes from the repo, from memory (each citation is
@@ -10,14 +12,14 @@ How this was done:
   with the research config. Every read ended at the holdout start (2026-07-01).
 - No candidate's forward returns, P&L or hit rate were measured. The looks at the data were
   limited to bar ranges, unconditional move sizes, how often conditions occur, feature
-  distributions, funding regimes and data gaps. Section 7 lists each one, with the reason it is
+  distributions, funding regimes and data gaps. Section 8 lists each one, with the reason it is
   not a backtest.
 
 **Outcome.** Implement `flow_shock_fade` at **1h**. It fades an hour of extreme one-sided taker
 flow that moved price. Its exits are chosen so that random entries earn nothing from them, so
-only the entry can beat the random benchmark. We think it is more likely to be killed than
-promoted. Section 4 says why we chose it anyway, and section 6 says which results should end
-this line of research.
+only the entry can beat the random benchmark, through its timing or through its long bias
+(section 4). We think it is more likely to be killed than promoted. Section 4 says why we chose
+it anyway, and section 7 says which results should end this line of research.
 
 ## 1. What the six baselines teach
 
@@ -89,10 +91,18 @@ Costs come from the engine's fill rules:
 - A target exit costs 2 bp (maker, no slippage).
 - A round trip is therefore **14 bp** when it exits on a stop or on time, and **9 bp** when it
   exits on a target.
-- Funding: the median settled rate was 0.6–1.0 bp per 8 h on six symbols, 0.47 bp on SOL and
-  −0.45 bp on BNB. A long paid 0.8–2.2 bp a day on those six and was paid about 1.5 bp a day on
-  SOL and BNB (look 2). Over a hold of a day or less that is a few bp at most, which is small next
-  to taker costs. Over multi-day holds it adds up: the Donchian runs paid 7–9% of their gross.
+- Funding (looks 2 and 2b). Rates are per settlement.
+  - BTC, ETH, XRP, DOGE, AVAX and LINK settled every 8 h throughout and almost never at exactly
+    zero; their median settled rate was 0.6–1.0 bp per 8 h.
+  - SOL's median was 0.47 bp per settlement. Its interval was 8 h, 4 h or 2 h at different times,
+    so that is not a per-8 h figure.
+  - BNB's median settled rate was 0: 2,693 of its 4,926 settlements (55%) were exactly zero. Its
+    nonzero settlements had a median of −0.45 bp.
+  - The carry per day is mean-based, not median-based: the sum of every settled rate over the
+    span, divided by the days in it. On that measure a long paid 0.8–2.2 bp a day on the six and
+    was paid about 1.5 bp a day on SOL and BNB.
+  - Over a hold of a day or less that is a few bp at most, which is small next to taker costs.
+    Over multi-day holds it adds up: the Donchian runs paid 7–9% of their gross.
 
 The median over the 8 symbols of each symbol's own median, in bp, over every bar from 2022-01 to
 2026-07 (look 1). |move h| is the median absolute log move from bar t's close to bar t+h's close,
@@ -157,7 +167,8 @@ time of week (C), or funding as a regime filter rather than a trigger (D).
 - **Why the entry carries it.** The exits are an ATR stop and a fixed time exit. They have no
   target, no trail, and nothing that depends on the trigger bar. A random entry with those exits
   is a coin flip held for a fixed time, worth about zero minus costs. To beat the random p95, the
-  trigger bars themselves must be followed by reversion.
+  trigger bars themselves must be followed by reversion, or the plugin's long bias must ride the
+  market's drift. Section 4 says how to tell the two apart.
 - **Expected frequency.** At the default thresholds (net flow ≥ 0.5 of a median bar's volume, and
   a move of ≥ 1 ATR in the flow's direction), a trigger fires about 105 times per symbol per year
   (70–178). At the strict grid value (net flow ≥ 1.0), about 22 times per symbol per year (11–34).
@@ -290,7 +301,7 @@ time of week (C), or funding as a regime filter rather than a trigger (D).
 |---|---|---|---|---|---|
 | judge can verify it on synthetic bars at the defaults | yes (13 trades) | yes | yes | yes | yes |
 | ≥ 30 OOS trades, ≥ 20 per training window, ≥ 10 in a 6-month holdout | yes (600–3,000; at least 46 per 6 months) | yes | yes, if every weekend is traded | yes | yes |
-| beats random p95 with the same exits | only if the reversion is real; the exits are neutral, so the test is fair | must beat a benchmark already lifted by trend capture | fair test | fair test, but trend direction already measured at about random | fair test; its sign is the opposite of A's |
+| beats random p95 with the same exits | if the reversion is real, or if its long bias (64–68% of trades) rides the span's drift; the gross P&L per side tells which (below) | must beat a benchmark already lifted by trend capture | fair test | fair test, but trend direction already measured at about random | fair test; its sign is the opposite of A's |
 | no narrow parameter island | two thresholds on one continuous statistic; thousands of trades at the loose corner | moderate | few parameters | few parameters | moderate |
 | Deflated Sharpe ≥ 0.95 (about 1.52 annualised) | needs a gross reversion of at least ~28–31 bp per trade at the defaults and ~44–50 bp at `flow_x = 1.0`; floors, not estimates (below) | ceiling is the Donchian 0.5–0.8 | ceiling around 1, from breadth | ceiling around 1, correlated books | unknown |
 | holdout exam | needs exchange-file candles for the window (section 5, harness notes) | — | CME 24/7 risk | — | same data caveat as A |
@@ -336,9 +347,18 @@ Why A:
 - **Its triggers are spread out.** 31% of the default triggers share their hour with three or
   more other symbols (22% at `flow_x = 1.0`), against 47% for plain volume shocks (looks 3 and 5).
   Weekends (C) and trends (D) are close to one bet across all books.
-- **Its test is clean.** Its exits earn nothing on random entries, so a pass could only come from
-  the entry. B must beat a benchmark the lab has already seen lifted by the trailing exit, and D
-  repeats a direction signal the Donchian runs already measured at about random.
+- **Its test is fair, but a pass has two possible sources.** Its exits earn nothing on random
+  entries, so a pass over random p95 has to come from the entry: from its timing, or from its
+  direction. `RandomEntry` draws each side 50/50, but this plugin is long on 64–68% of its trades
+  (look 6), because the down tail of net flow is fatter. Over 2022-07 to 2026-07, when buy and
+  hold had a Sharpe of 0.59, a long bias collects upward drift that the random entries don't, so
+  direction alone lifts the plugin against the random distribution, with no reversion at all. We
+  haven't measured by how much: that would be a backtest. So a pass is not by itself evidence of
+  reversion. **Before reading a pass as reversion, check the gross OOS P&L per side: the long
+  trades and the short trades must each be positive gross** (section 7, criterion 6). Even so,
+  its test is cleaner than the others': B must beat a benchmark the lab has already seen lifted
+  by the trailing exit, and D repeats a direction signal the Donchian runs already measured at
+  about random.
 - **It leans toward the hours where the trend baselines lost.** Within each symbol, the median
   trigger bar's ATR is 0.98–1.19 times that symbol's median ATR at the defaults, and 1.05–1.36
   times at `flow_x = 1.0` (look 8). Pooled over the symbols, the defaults' lean is all in the
@@ -552,15 +572,44 @@ the 2022 H1 training half-year has 36 triggers even at `flow_x = 1.0` (look 5). 
      `lab backfill` after the window's last month has closed does that, and complete funding needs
      that run anyway. Otherwise the exam can come up short of 10 trades and spend the family's
      one read for nothing.
+   - Check it rather than assume it, before any `lab exam` while this plugin is pending (the
+     command examines every pending promotion at once): each symbol's
+     `data/<SYMBOL>/1h/_manifest.json` must show `"complete": true` with a data.binance.vision
+     source (`"monthly"`, or `"daily"` for a closed month) for every month from 2026-07 to the end
+     of the exam window, and none may show `"ccxt"`. Section 7, criterion 6, gives the details.
 
-## 6. What would kill it
+## 6. How to run it
+
+Run it once, with exactly this command:
+
+```
+lab judge flow_shock_fade --tf 1h
+```
+
+- **Always pass `--tf 1h`.** `lab judge` defaults to `--tf 4h` (`perp_lab/cli.py`), and nothing
+  checks the timeframe against the plugin's declared `timeframes`. `lab judge flow_shock_fade`
+  without the flag walks the plugin forward at 4h. That spends a trial on a run this research
+  never proposed, raises N for every later plugin, and still leaves the 1h run to do.
+- **Don't run `lab walkforward` first.** The judge runs its own walk-forward. A prior
+  `lab walkforward flow_shock_fade --tf 1h` adds no trial, because N counts distinct (plugin
+  version, timeframe) pairs, but the judge doesn't reuse it, so it only doubles the compute.
+- **Don't edit the file between runs.** A plugin version is the git blob hash of the file's
+  bytes, so any edit, even to a comment, makes a new version, and walking that forward is a new
+  trial. The judge doesn't re-judge a version it has already judged at a timeframe, so there is no
+  free retry either.
+- The judge needs the sandbox and refuses to run without one.
+- A promotion only queues the holdout exam. Run `lab exam` only after the checks in section 7,
+  criterion 6.
+
+## 7. What would kill it
 
 Each of these ends this line of research. None of them is a reason to write a tweaked child.
 
 1. **The walk-forward verdict is `noise`.**
    - OOS Sharpe ≤ 0, or no better than random-entry p95. The exits earn about zero on random
-     entries by construction, so failing this gate means the trigger carries no timing
-     information at 1h.
+     entries by construction, so failing this gate means the trigger has no timing edge large
+     enough to show net of costs. That covers two different results, and the gross P&L tells
+     which (criteria 2 and 3): no reversion at all, or a reversion smaller than 1h costs.
    - A narrow island. The edge depends on the exact threshold, so it isn't a mechanism.
    - Fewer than 30 OOS trades. We expect 600–3,000, and look 2 found no missing taker data, so
      this would point to a broken data path rather than a result. Find the cause before anything
@@ -580,18 +629,39 @@ Each of these ends this line of research. None of them is a reason to write a tw
    the OOS result is exactly what the deflation charges for. Record it and stop.
 5. **The in-sample Sharpe exceeds the OOS Sharpe by more than about 1** (the `funding_fade`
    pattern). The training-window selection is fitting noise.
-6. **Before the exam: concentration.** The judge promotes on its own, but `lab exam` is a
-   separate command. Before running it, check the per-symbol and per-fold OOS results. If one
-   symbol or one 2-month fold supplies more than half of the OOS net P&L, treat the effect as not
-   established, and don't spend the family's read on it.
+6. **Before the exam: concentration, sides and data.** The judge promotes on its own, but
+   `lab exam` is a separate command, and it examines every pending promotion at once. So while
+   this plugin is pending, these checks come before any `lab exam`, whichever plugin it is run
+   for. There is no command to withdraw a pending promotion: if a check fails, not spending the
+   family's read means not running `lab exam` at all until it is resolved.
+   - Concentration. Check the per-symbol and per-fold OOS results. If one symbol or one 2-month
+     fold supplies more than half of the OOS net P&L, treat the effect as not established, and
+     don't spend the family's read on it.
+   - Sides. The verdict file's `walkforward.run_id` names the judge's walk-forward run, and
+     `walkforward.report` points into its directory (`runs/<run_id>/` by default), which also
+     holds `oos_trades.parquet`. Sum `pnl_gross` by `side` over it. If either side's gross is
+     ≤ 0, the pass is not the symmetric reversion this plugin claims (when only the longs made
+     money, it is drift; section 4). Don't spend the family's read on it.
+   - Data. For every symbol, the 1h klines manifest under the config's `data_dir` (for example
+     `data/BTCUSDT/1h/_manifest.json`) must show `"complete": true` and `"source": "monthly"` for
+     every month from 2026-07 to the month in which the exam window ends. (`"source": "daily"`
+     with `"complete": true` is also fine: a closed month rebuilt from data.binance.vision's daily
+     files, which carry the same taker columns. A later backfill skips a complete month, so it
+     never turns into `"monthly"`.) The window runs to the last 00:00 UTC for which every symbol
+     has candles and funding, so any month `lab tail` has stitched is inside it. `lab tail` marks
+     such a month `"complete": false, "source": "ccxt"`, and its candles have NaN taker columns,
+     on which this plugin can't fire. A `lab backfill` after the month has closed replaces them,
+     but one narrowed with `--tfs` or `--datasets` so that it skips 1h klines leaves them in
+     place.
 7. **The holdout exam fails.** The family ends; by rule it gets one read.
 
-Two results to note, which kill nothing by themselves but rule out any child:
-- The long side makes money while the short side loses. That is drift (about two thirds of the
-  trades are long), not the symmetric mechanism.
-- All the profit comes from the 2022 crash months.
+Two results that rule out any child:
+- The long side's gross P&L is positive while the short side's is not. That is drift (about two
+  thirds of the trades are long), not the symmetric mechanism, and it also stops the exam
+  (criterion 6).
+- All the profit comes from the 2022 crash months. This one kills nothing by itself.
 
-## 7. Data looks
+## 8. Data looks
 
 How the looks were done:
 - Every look ran from the worktree as
