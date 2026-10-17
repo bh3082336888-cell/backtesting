@@ -34,6 +34,7 @@ import site
 import sys
 
 MIN_ABI = 6                                   # scoped signals and abstract UNIX sockets arrive in ABI 6
+MIN_GLIBC = (2, 39)                           # makes fstat with the fstat syscall, which the seal leaves
 NOFILE = 64
 
 _ARCHES = ("x86_64", "aarch64")
@@ -49,6 +50,7 @@ _NET_BIND_TCP, _NET_CONNECT_TCP = 1 << 0, 1 << 1
 _SCOPE_ABSTRACT_UNIX_SOCKET, _SCOPE_SIGNAL = 1 << 0, 1 << 1
 _PR_SET_NO_NEW_PRIVS = 38
 _PR_SET_PDEATHSIG = 1
+_PR_GET_SECCOMP, _SECCOMP_MODE_FILTER = 21, 2
 
 
 class _RulesetAttr(ctypes.Structure):
@@ -243,7 +245,23 @@ def probe(min_abi: int = MIN_ABI) -> str | None:
         return "libseccomp.so.2 not found"
     except AttributeError as e:
         return f"libseccomp.so.2 is too old: {e}"
+    glibc = _glibc()
+    if glibc is None:
+        return "glibc 2.39 or later needed, and this C library is not glibc"
+    if glibc < MIN_GLIBC:
+        return f"glibc {glibc[0]}.{glibc[1]} < {MIN_GLIBC[0]}.{MIN_GLIBC[1]}"
     return None
+
+
+def _glibc() -> tuple[int, int] | None:
+    """glibc's version, or None if the C library isn't glibc. Older glibc makes fstat with
+    newfstatat, which the seal denies, so a sealed worker couldn't fstat its own pipes."""
+    try:
+        name, version = os.confstr("CS_GNU_LIBC_VERSION").split()
+        major, minor = (int(x) for x in version.split(".")[:2])
+    except (AttributeError, OSError, ValueError):     # None (not defined), or an unknown name
+        return None
+    return (major, minor) if name == "glibc" else None
 
 
 def allowlist() -> list[str]:
@@ -300,8 +318,13 @@ def seal() -> None:
     none that queries, evicts or prefetches page cache (EPERM). Call it once everything the
     process will need is loaded.
 
-    Raises RuntimeError if it fails; the process must then not run plugin code.
+    Raises RuntimeError if it fails, or if `confine()` hasn't run (stage 2 alone would leave all
+    that stage 1 denies allowed); the process must then not run plugin code.
     """
+    mode = _libc().prctl(ctypes.c_int(_PR_GET_SECCOMP), ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0),
+                         ctypes.c_ulong(0))
+    if mode != _SECCOMP_MODE_FILTER:
+        raise RuntimeError(f"seal() needs confine() first (seccomp mode {mode})")
     try:
         lib = _seccomp()
     except (OSError, AttributeError) as e:

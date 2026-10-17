@@ -408,6 +408,99 @@ def test_the_seal_denies_reading_or_steering_the_page_cache():
         assert _run_bpf(seal, arch, madvise, (0x7F0000000000, 4096, advice)) == ALLOW, name
 
 
+# Every other syscall this libseccomp names on x86_64; none of them resolves a pathname. (On aarch64
+# a name missing from every list below fails the classification test until someone classifies it.)
+PATH_FREE = """
+    _sysctl accept accept4 adjtimex afs_syscall alarm arch_prctl brk capget capset clock_adjtime clock_getres
+    clock_gettime clock_nanosleep clock_settime clone clone3 close close_range copy_file_range
+    create_module dup dup2 dup3 epoll_create epoll_create1 epoll_ctl epoll_ctl_old epoll_pwait epoll_pwait2
+    epoll_wait epoll_wait_old eventfd eventfd2 exit exit_group fadvise64 fallocate fchdir fcntl fdatasync fsmount
+    fstat fstatfs fsync ftruncate futex futex_requeue futex_wait futex_waitv futex_wake get_kernel_syms
+    get_mempolicy get_robust_list get_thread_area getcpu getcwd getdents getdents64 getegid geteuid getgid
+    getgroups getitimer getpeername getpgid getpgrp getpid getpmsg getppid getpriority getrandom getresgid
+    getresuid getrlimit getrusage getsid getsockname getsockopt gettid gettimeofday getuid inotify_rm_watch
+    io_cancel io_destroy io_getevents io_pgetevents io_setup io_submit ioctl ioperm iopl ioprio_get ioprio_set
+    kill landlock_add_rule landlock_create_ruleset landlock_restrict_self listen lookup_dcookie lseek madvise
+    map_shadow_stack mbind membarrier memfd_create memfd_secret mlock mlock2 mlockall mmap modify_ldt mprotect
+    mremap msync munlock munlockall munmap nanosleep nfsservctl pause personality pidfd_send_signal pipe pipe2
+    pkey_alloc pkey_free pkey_mprotect poll ppoll prctl pread64 preadv preadv2 prlimit64 process_mrelease pselect6
+    putpmsg pwrite64 pwritev pwritev2 query_module quotactl_fd read readahead readv reboot recvfrom recvmmsg
+    recvmsg remap_file_pages restart_syscall rseq rt_sigaction rt_sigpending rt_sigprocmask rt_sigqueueinfo
+    rt_sigreturn rt_sigsuspend rt_sigtimedwait rt_tgsigqueueinfo sched_get_priority_max sched_get_priority_min
+    sched_getaffinity sched_getattr sched_getparam sched_getscheduler sched_rr_get_interval sched_setaffinity
+    sched_setattr sched_setparam sched_setscheduler sched_yield seccomp security select sendfile
+    set_mempolicy set_mempolicy_home_node set_robust_list set_thread_area set_tid_address setdomainname
+    setfsgid setfsuid setgid setgroups sethostname setitimer setpgid setpriority setregid setresgid setresuid
+    setreuid setrlimit setsid setsockopt settimeofday setuid shutdown sigaltstack signalfd signalfd4 splice sync
+    sync_file_range syncfs sysfs sysinfo syslog tee tgkill time timer_create timer_delete timer_getoverrun
+    timer_gettime timer_settime timerfd_create timerfd_gettime timerfd_settime times tkill tuxcall umask uname
+    ustat vhangup vmsplice vserver wait4 waitid write writev""".split()
+# These resolve a path only as a UNIX socket's address, and a worker can't hold a socket: stage 1
+# denies socket and socketpair, and the sealed self-test finds nothing but pipes.
+SOCKET_ADDRESS = "bind connect sendto sendmsg sendmmsg".split()
+
+
+def test_every_syscall_this_libseccomp_names_is_classified():
+    # So a libseccomp that learns a new path-taking call can't leave it allowed unseen: each name is
+    # resolves-a-path (the seal denies it: pinned above), always denied by stage 1 (pinned above),
+    # page cache (pinned above) or listed as path-free.
+    lib = _scmp()
+    libc = ctypes.CDLL(None)
+    libc.free.argtypes = [ctypes.c_void_p]
+    arch, names = lib.seccomp_arch_native(), set()
+    for nr in range(1024):
+        name = lib.seccomp_syscall_resolve_num_arch(arch, nr)
+        if name:
+            names.add(ctypes.string_at(name).decode())
+            libc.free(name)
+    denied = set(PATHNAME) | set(NEWER_PATHNAME) | {"mincore", "cachestat"} | set(DENIED)
+    allowed = set(PATH_FREE) | set(SOCKET_ADDRESS)
+    assert not allowed & denied, sorted(allowed & denied)    # no name in two minds
+    assert not names - denied - allowed, sorted(names - denied - allowed)
+
+
+SEAL_ALONE = """
+import os, sys
+from perp_lab.sandbox import confine
+try:
+    confine.seal()
+    print("SEALED")
+except RuntimeError as e:
+    print("REFUSED", e)
+os.stat(sys.executable)                                # still works: nothing was loaded
+print("UNSEALED")
+"""
+
+
+def test_seal_refuses_without_stage_1():
+    # Stage 2 alone would leave everything stage 1 denies (and its ENOSYS range) allowed.
+    r = subprocess.run([sys.executable, "-s", "-P", "-c", SEAL_ALONE], env=ENV, cwd="/", capture_output=True,
+                       text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    first, last = r.stdout.splitlines()
+    assert first.startswith("REFUSED") and "confine()" in first and last == "UNSEALED", r.stdout
+
+
+@pytest.mark.parametrize("libc, reason", [
+    ("glibc 2.38", "glibc 2.38 < 2.39"), ("glibc 2.17", "glibc 2.17 < 2.39"),
+    (None, "glibc 2.39 or later needed, and this C library is not glibc"),
+    ("musl 1.2.5", "glibc 2.39 or later needed, and this C library is not glibc")])
+def test_probe_reports_a_c_library_whose_fstat_the_seal_breaks(monkeypatch, libc, reason):
+    def confstr(name):
+        assert name == "CS_GNU_LIBC_VERSION"
+        if libc is None:
+            raise ValueError("unrecognized configuration name")
+        return libc
+    monkeypatch.setattr(os, "confstr", confstr)
+    assert confine.probe() == reason
+
+
+@pytest.mark.parametrize("libc", ["glibc 2.39", "glibc 2.40", "glibc 3.0"])
+def test_probe_accepts_glibc_2_39_and_later(monkeypatch, libc):
+    monkeypatch.setattr(os, "confstr", lambda name: libc)
+    assert confine.probe() is None
+
+
 def test_probe_reports_none_here():
     assert confine.probe() is None
 

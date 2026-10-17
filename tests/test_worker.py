@@ -378,15 +378,25 @@ OLD_NS = 10**18                                       # 2001-09-09: older than a
 def test_a_plugin_moves_no_access_time(cfg, tmp_path):
     # On a relatime mount, reading a file, and following or reading a symlink, each update its
     # access time when that is old: a bit per file per day a worker could leave for a later one,
-    # which anyone reads back with stat(). Checked from outside, on a file inside the allowlist that
-    # no worker loads and on a symlink to it.
-    target = REPO / "perp_lab" / "holdout.py"
+    # which anyone reads back with stat(). Checked from outside, on a scratch file inside the
+    # allowlist (the virtualenv: this user's, and no repo file) and on a symlink to it.
+    target = Path(sys.prefix) / f"perp_lab_atime_test_{os.getpid()}_{time.monotonic_ns()}.txt"
     link = tmp_path / "link"
     link.symlink_to(target)
-    kept = os.stat(target)
-    os.utime(target, ns=(OLD_NS, kept.st_mtime_ns))
-    os.utime(link, ns=(OLD_NS, OLD_NS), follow_symlinks=False)
+
+    def age():
+        os.utime(target, ns=(OLD_NS, OLD_NS))
+        os.utime(link, ns=(OLD_NS, OLD_NS), follow_symlinks=False)
+
+    def atimes():
+        return os.lstat(link).st_atime_ns, os.stat(target).st_atime_ns
     try:
+        target.write_text("x")
+        age()
+        target.read_bytes()                               # a read from outside moves both: the
+        os.readlink(link)                                 # mount does record access times here
+        assert OLD_NS not in atimes()
+        age()
         src = plugin("toucher", f"""
             import errno
             out = []
@@ -399,10 +409,10 @@ def test_a_plugin_moves_no_access_time(cfg, tmp_path):
                     out.append(errno.errorcode[e.errno])
             raise RuntimeError(" ".join(out))""")
         e = plugin_error(batch_run, cfg, src)
-        assert (os.lstat(link).st_atime_ns, os.stat(target).st_atime_ns) == (OLD_NS, OLD_NS)
+        assert atimes() == (OLD_NS, OLD_NS)
         assert e.message == "EPERM EPERM EPERM EPERM", e.reason()
     finally:
-        os.utime(target, ns=(kept.st_atime_ns, kept.st_mtime_ns))
+        target.unlink(missing_ok=True)
 
 
 # The modules a plugin may import (perp_lab/strategy.py's contract), and the ones they load.
@@ -560,14 +570,49 @@ sys.exit(worker.main(sys.argv[1:]))
 
 
 @pytest.mark.sandbox
-def test_a_worker_whose_seal_did_not_take_is_unavailable(cfg):
-    r = subprocess.run([sys.executable, "-s", "-P", "-c", NO_SEAL, "--deny-probe", str(cfg.path), "--memory-mb",
-                        "3072", "--cpu-s", "60", "--parent-pid", str(os.getpid())],
-                       env=client.ENV, cwd="/", stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
-    assert r.returncode == worker.UNAVAILABLE_EXIT, r.stderr
+def _unavailable(r) -> str:
+    """The message of the "unavailable" error a worker run by hand reported, or the test fails."""
+    assert r.returncode == worker.UNAVAILABLE_EXIT, (r.returncode, r.stderr)
     n = int.from_bytes(r.stdout[:4], "big")
     error = json.loads(r.stdout[4:4 + n])["error"]
-    assert error["kind"] == "unavailable" and "sealed open" in error["message"], error
+    assert error["kind"] == "unavailable", error
+    return error["message"]
+
+
+def _by_hand(cfg, *python_args, stdin=subprocess.DEVNULL):
+    return subprocess.run([sys.executable, "-s", "-P", *python_args, "--deny-probe", str(cfg.path), "--memory-mb",
+                           "3072", "--cpu-s", "60", "--parent-pid", str(os.getpid())],
+                          env=client.ENV, cwd="/", stdin=stdin, capture_output=True, timeout=120)
+
+
+@pytest.mark.sandbox
+def test_a_worker_whose_seal_did_not_take_is_unavailable(cfg):
+    assert "sealed open" in _unavailable(_by_hand(cfg, "-c", NO_SEAL))
+
+
+@pytest.mark.sandbox
+def test_a_sealed_worker_holding_anything_but_pipes_is_unavailable(cfg, tmp_path):
+    # A descriptor on a file would let it read the file (moving its access time) without opening
+    # anything. Here the protocol's input is a file instead of the parent's pipe.
+    held = tmp_path / "held.txt"
+    held.write_bytes(b"x")
+    with open(held, "rb") as f:
+        message = _unavailable(_by_hand(cfg, "-m", "perp_lab.sandbox.worker", stdin=f))
+    assert "fd 3 is not a pipe" in message, message
+
+
+@pytest.mark.sandbox
+def test_the_seal_comes_before_any_plugin_code(cfg):
+    # Code at a plugin's module level runs as the worker loads it: sealed already.
+    src = plugin("early", "raise RuntimeError(AT_LOAD)", tail="""
+        import errno
+        try:
+            open(np.__file__, "rb").close()
+            AT_LOAD = "OK"
+        except OSError as e:
+            AT_LOAD = errno.errorcode[e.errno]
+        """)
+    assert plugin_error(batch_run, cfg, src).message == "EPERM"
 
 
 @pytest.mark.sandbox

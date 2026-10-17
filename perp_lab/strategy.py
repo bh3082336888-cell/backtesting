@@ -26,10 +26,11 @@ holds there:
       are math, numpy (with its public submodules, but not numpy.testing or
       numpy.f2py), pandas, perp_lab.strategy, perp_lab.indicators and
       perp_lab.engine.backtest, and whatever these load in turn (much of the
-      standard library: json, re, datetime, ...). Anything else, even if it
-      is on the read allowlist, raises ModuleNotFoundError: a sealed worker
-      opens no file, so it loads no module, reads no data and knows no named
-      time zone but UTC.
+      standard library: json, re, datetime, ...), plus the interpreter's
+      built-in and frozen modules (sys.builtin_module_names), which need no
+      file. Anything else, even if it is on the read allowlist, raises
+      ModuleNotFoundError: a sealed worker opens no file, so it loads no
+      module, reads no data and knows no named time zone but UTC.
 """
 
 from __future__ import annotations

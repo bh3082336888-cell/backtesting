@@ -21,8 +21,9 @@ Order, which is the point of this module:
      reads no file and follows no symlink (that would update access times), and can load no
      module: whatever it needs was loaded in (d);
   g. self-test of the seal: opening and stat-ing a file on the allowlist and readlink on the
-     interpreter's link must fail with EPERM, and fstat on a protocol pipe must work (glibc before
-     2.39 makes fstat with newfstatat, which the seal denies: such a host is unavailable);
+     interpreter's link must fail with EPERM, fstat on a protocol pipe must work (glibc before
+     2.39 makes fstat with newfstatat, which the seal denies: such a host is unavailable), and
+     every descriptor the worker holds must be a pipe;
   h. report ready with the Landlock ABI;
   i. serve requests until EOF on the protocol descriptor, then exit 0 at once (no wait for
      threads a plugin may have started).
@@ -38,6 +39,7 @@ import errno
 import json
 import os
 import signal
+import stat
 import struct
 import sys
 
@@ -79,7 +81,8 @@ def _preload():
     paths it takes after the seal. Returns `session`.
 
     A plugin may import math, numpy, pandas, perp_lab.strategy, perp_lab.indicators and
-    perp_lab.engine.backtest, and whatever these load; nothing else (ModuleNotFoundError).
+    perp_lab.engine.backtest, and whatever these load, plus the interpreter's built-in and frozen
+    modules, which need no file; nothing else (ModuleNotFoundError).
     """
     import math  # noqa: F401
     import socket  # noqa: F401  (the self-test)
@@ -155,7 +158,8 @@ def _self_test(deny_probe: str) -> None:
 def _sealed_test(path: str, link: str, fd: int) -> None:
     """Stage 2: open and stat of `path` (a file on the allowlist) and readlink of `link` must each
     fail with EPERM, which only the seal answers (otherwise they work, or give ENOENT, EINVAL or
-    EACCES); fstat on `fd`, a descriptor the worker holds, must still work."""
+    EACCES); fstat on `fd`, a descriptor the worker holds, must still work; and every descriptor
+    it holds must be a pipe (one on a file would let it read the file without opening it)."""
     for what, call in (("open", lambda: os.close(os.open(path, os.O_RDONLY))), ("stat", lambda: os.stat(path)),
                        ("readlink", lambda: os.readlink(link))):
         try:
@@ -171,6 +175,13 @@ def _sealed_test(path: str, link: str, fd: int) -> None:
     except OSError as e:
         raise RuntimeError(f"fstat failed once sealed ({errno.errorcode.get(e.errno, e.errno)}): this libc makes it "
                            "with newfstatat (glibc before 2.39)") from None
+    for held in range(confine.NOFILE):                  # RLIMIT_NOFILE: no descriptor is above it
+        try:
+            mode = os.fstat(held).st_mode
+        except OSError:                                 # EBADF: not open
+            continue
+        if not stat.S_ISFIFO(mode):
+            raise RuntimeError(f"fd {held} is not a pipe")
 
 
 def main(argv: list[str] | None = None) -> int:

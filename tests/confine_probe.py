@@ -315,10 +315,12 @@ def import_numpy_pandas_pyarrow(target, pre):
 
 
 def seal_every_thread(target, pre):
-    """seal() once the threads are running: then every thread, the ones started before it included,
-    is refused a file on the allowlist (`target`), which stage 1 alone would let it open."""
+    """The worker's own preload and warm-up (`worker._preload`, which starts numpy's and pyarrow's
+    threads), then seal(): every thread, the ones started before it included, is refused a file on
+    the allowlist (`target`), which stage 1 alone would let it open."""
+    from perp_lab.sandbox import worker
     from perp_lab.sandbox.confine import seal
-    _the_workers_imports()
+    worker._preload()
     seal()
     threads = _in_each_thread(pre["taskfd"], target)
     for tid, (name, result) in sorted(threads.items()):

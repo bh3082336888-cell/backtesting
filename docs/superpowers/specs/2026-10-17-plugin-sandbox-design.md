@@ -247,8 +247,8 @@ library imported. Until step 9 ends, only trusted code has run in it.
    frame shaped like bars (a UTC index, int, float and string columns), which loads pyarrow's
    conversion and timezone code, and one `repr` of a DataFrame, which loads pandas' formatter (a
    plugin's `print`). Threads these start inherit the confinement. These modules, and whatever
-   they load, are all a plugin can import: once sealed, nothing more can be loaded
-   (`ModuleNotFoundError`).
+   they load, are all a plugin can import, besides the interpreter's built-in and frozen modules,
+   which need no file: once sealed, nothing more can be loaded (`ModuleNotFoundError`).
 7. Self-test, stage 1: opening the parent's config file must fail with `EACCES` (Landlock), and
    creating a socket, `os.fork()` and `shmget` must each fail.
 8. Seal: a second seccomp filter, with filter thread synchronisation on (so it reaches the
@@ -263,7 +263,8 @@ library imported. Until step 9 ends, only trusted code has run in it.
    `name_to_handle_at`, `open_by_handle_at`; and the path forms of the metadata and
    extended-attribute calls (`chmod`, `fchmodat`, `fchmodat2`, `chown`, `lchown`, `fchownat`,
    `utime`, `utimes`, `utimensat`, `futimesat`, `getxattr`, `setxattr`, `listxattr`,
-   `removexattr`, their `l*` forms and the newer `*xattrat` ones). Names a libseccomp can't
+   `removexattr`, their `l*` forms, and the newer `setxattrat`, `getxattrat`, `listxattrat`,
+   `removexattrat`, `file_getattr`, `file_setattr` and `open_tree_attr`). Names a libseccomp can't
    resolve on this architecture are skipped, as in step 5; those newer than it already get
    `ENOSYS` from step 5. A Landlock layer would not do: resolving a path follows its symlinks,
    which updates their access times, before Landlock refuses anything. Once sealed the worker
@@ -272,12 +273,15 @@ library imported. Until step 9 ends, only trusted code has run in it.
    `cachestat`, and `madvise` with advice that evicts or prefetches pages (R7); other advice, which
    allocators use (`MADV_DONTNEED`, `MADV_FREE`, `MADV_HUGEPAGE`), keeps working. `fstat` on a
    descriptor keeps working where libc makes it with the `fstat` syscall (glibc 2.39 and later);
-   older glibc makes it with `newfstatat`, so step 9 fails there and the sandbox is unavailable.
+   older glibc makes it with `newfstatat`, so step 9 fails there and the sandbox is unavailable
+   (`probe()` reports it up front). `seal()` refuses unless a seccomp filter (stage 1) is already
+   in place: stage 2 alone would leave everything stage 1 denies allowed.
 9. Self-test, stage 2: opening and stat-ing a file on the allowlist (numpy's `__init__.py`) and
    `readlink` on the interpreter's `python3` link (under `/usr` for a system Python) must each
-   fail with `EPERM`, which only the seal answers, and `fstat` on a protocol pipe must work. The
-   worker then reports `ready` with its Landlock ABI. A failure in steps 1–9 is an infrastructure
-   error.
+   fail with `EPERM`, which only the seal answers; `fstat` on a protocol pipe must work; and every
+   descriptor the worker holds (up to `RLIMIT_NOFILE`) must be a pipe, since one on a file would
+   let it read the file without opening it. The worker then reports `ready` with its Landlock
+   ABI. A failure in steps 1–9 is an infrastructure error.
 
 The parent launches the worker as `python -s -P -m perp_lab.sandbox.worker`, not `-I`: `-I`
 ignores every `PYTHON*` variable, so `PYTHONHASHSEED` would have no effect and fresh workers in
@@ -289,8 +293,8 @@ stderr, so a plugin's `print` cannot corrupt the framing. (A plugin can still wr
 protocol descriptors on purpose; the result is a protocol violation, nothing more.)
 
 Requirements: Linux with Landlock ABI ≥ `sandbox.min_landlock_abi` (6, kernel 6.12 or later),
-`libseccomp.so.2` and glibc 2.39 or later (step 8). This machine has Ubuntu 24.04, kernel 7.0,
-Landlock ABI 8, libseccomp 2.5.5 and glibc 2.39.
+`libseccomp.so.2` and glibc 2.39 or later (step 8); `probe()` checks all three. This machine has
+Ubuntu 24.04, kernel 7.0, Landlock ABI 8, libseccomp 2.5.5 and glibc 2.39.
 
 The parent caps concurrent workers so that workers × `memory_mb` stays within about three
 quarters of physical memory, whatever `--workers` asks for.
@@ -571,9 +575,15 @@ Each test is written first and seen failing. Tests that need the kernel features
   outside the allowlist. The inode-flag `ioctl` is checked in a process with stage 1 only, since a
   sealed worker can open no file to try it on.
 - **The seal,** through real workers unless noted. A plugin's `open`, `stat`, `lstat`, `readlink`
-  and `listdir` of files and symlinks on the allowlist each fail with `EPERM`. Checked from
-  outside, the access times of a file on the allowlist and of a symlink to it stay where the test
-  set them after a plugin tries `stat`, `readlink` and `open` through them. A plugin can import
+  and `listdir` of files and symlinks on the allowlist each fail with `EPERM`, and so does an
+  `open` at its module level: the seal comes before any plugin code. Checked from outside, the
+  access times of a scratch file in the virtualenv and of a symlink to it stay where the test set
+  them after a plugin tries `stat`, `readlink` and `open` through them (a read from outside moves
+  both first, so the mount does record them). A worker holding a descriptor that isn't a pipe is
+  unavailable; `seal()` without `confine()` refuses; `probe()` reports glibc before 2.39 or
+  another C library. Every syscall name this libseccomp resolves is classified as resolving a
+  path (the seal denies it), always denied by stage 1, page cache, or listed as path-free, so a
+  newer libseccomp can't leave a path call allowed unseen. A plugin can import
   what the worker preloaded and print a frame, and importing a module it didn't preload is
   `plugin_error: exception: ModuleNotFoundError`; so is `perp_lab.holdout`, so no token can be
   minted inside a worker. A sealed plugin's `mincore` and its eviction and prefetch `madvise`
