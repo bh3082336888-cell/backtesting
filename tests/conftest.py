@@ -43,6 +43,29 @@ class Scripted(Strategy):
         return self.schedule.get(ctx.i, HOLD)
 
 
+@pytest.fixture(autouse=True)
+def _sandbox(request, monkeypatch):
+    """Tests marked `sandbox` use real workers, and skip where this machine can't confine one; no
+    worker may outlive its test. Every other test gets the in-process twin as `client.spawn` and a
+    `client.check` that passes."""
+    from perp_lab.sandbox import client, confine
+    from tests import sandbox_fixtures
+
+    if request.node.get_closest_marker("sandbox") is None:
+        monkeypatch.setattr(client, "spawn", sandbox_fixtures.InProcessWorker)
+        monkeypatch.setattr(client, "check", lambda cfg: 8)
+        yield
+        return
+    reason = confine.probe()
+    if reason is not None:
+        pytest.skip(f"sandbox unavailable: {reason}")
+    yield
+    left = sandbox_fixtures.running_workers()
+    if left:
+        sandbox_fixtures.kill_workers(left)
+        pytest.fail(f"sandbox workers left running: {left}")
+
+
 @pytest.fixture
 def bars():
     return make_bars()
