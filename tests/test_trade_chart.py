@@ -277,6 +277,25 @@ def test_levels_read_back_from_parquet_are_arrays(tmp_path):
     assert [y for y in tgt.y if y is not None] == [120.0, 120.0]
 
 
+@pytest.mark.parametrize("empty", [np.nan, None])
+def test_an_all_nan_target_reads_back_from_parquet_and_draws_no_target_line(tmp_path, empty):
+    # a strategy that never sets a target: pyarrow stores the column as list<null>, which reads back as
+    # object arrays of None
+    base = trade(sig=10, bars=6, stop=95.0)
+    t = pd.DataFrame([{**base, **_lv(base["entry_time"], [0, 3], [95.0, 98.0], [empty, empty])},
+                      {**trade(sig=40, bars=4, stop=90.0), **_lv(_ms("2024-01-01") + 41 * H4, [0], [90.0], [empty])}])
+    t.to_parquet(tmp_path / "t.parquet")
+    back = pd.read_parquet(tmp_path / "t.parquet")
+    assert tc.has_levels(back)
+    if empty is None:
+        assert pd.isna(back.level_target.iloc[0][0])
+    fig = tc.trade_figure(candles(n=200), back, "4h")
+    assert not _traces(fig, "target")
+    (stop,) = _traces(fig, "stop")
+    assert [y for y in stop.y if y is not None] == [95.0, 95.0, 98.0, 98.0, 90.0, 90.0]
+    assert "target at exit —" in tc.hover_text(back)[0]
+
+
 def test_old_trades_keep_the_initial_lines():
     t = pd.DataFrame([trade(sig=10, stop=95.0, target=120.0)])
     assert not tc.has_levels(t)
