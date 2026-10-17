@@ -207,9 +207,13 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
     """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam."""
     from perp_lab.judge.judge import JudgeRefused, attempt_exam
     from perp_lab.judge.judge import judge as run_judge
+    from perp_lab.sandbox.errors import SandboxUnavailable
     cfg = load_config(config)
     try:
         j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers, attempt=attempt_exam)
+    except SandboxUnavailable as e:
+        typer.secho(f"sandbox unavailable: {e}", fg="red")
+        raise typer.Exit(1)
     except JudgeRefused as e:
         typer.secho(f"refused: {e}", fg="red")
         raise typer.Exit(2)

@@ -20,6 +20,8 @@ from perp_lab.engine.metrics import summarize
 from perp_lab.judge import budget, gates
 from perp_lab.judge.exam import run_exam, window_end
 from perp_lab.plugins import PluginMetaError, PluginSource
+from perp_lab.sandbox import client
+from perp_lab.sandbox.errors import PluginError
 from perp_lab.runs import new_run_id, repo_commit, write_run
 from perp_lab.store import db
 from perp_lab.strategy import list_plugins, plugin_hash
@@ -71,22 +73,27 @@ def finish(cfg, jid: int) -> dict:
     return {**j, "verdict_path": str(write_verdict(cfg, j))}
 
 
-def plugin_parent(name: str) -> str | None:
-    """The PARENT a plugin declares, read from its source; computed metadata is a refusal."""
+def read_plugin(name: str) -> PluginSource:
+    """One read of a plugin's bytes; computed metadata is a refusal."""
     try:
-        return PluginSource.read(name).meta.parent
+        return PluginSource.read(name)
     except PluginMetaError as e:
         raise JudgeRefused(f"{name}: {e}") from e
 
 
-def resolve_family(cfg, name: str) -> str:
+def plugin_parent(name: str, src: PluginSource | None = None) -> str | None:
+    """The PARENT a plugin declares, read from its source (`src` when already read)."""
+    return (src or read_plugin(name)).meta.parent
+
+
+def resolve_family(cfg, name: str, src: PluginSource | None = None) -> str:
     """The family of a plugin. Walk the PARENT chain from `name` to its root: the first plugin
     name on the way that already has a judgement gives its earliest family, so a judged plugin
     keeps its family (and its descendants with it) even after its PARENT line is removed or
     edited. With no judgement on the chain, the family is `family:<root>`."""
     path, cur = [name], name
     while (fam := db.family_of(cfg, cur)) is None:
-        p = plugin_parent(cur)
+        p = plugin_parent(cur, src if cur == name else None)
         if p is None:
             return f"family:{cur}"
         if p in path:
@@ -160,22 +167,26 @@ def supersede(cfg, parent: str, tf: str, family: str) -> None:
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
           validate: Callable = validate_strategy, attempt: Callable | None = None) -> dict:
     jc = cfg["judge"]
-    parent = plugin_parent(name)
+    client.check(cfg)                    # no sandbox, no judging: SandboxUnavailable propagates
+    src = read_plugin(name)              # read once: this src and h are what is checked, run and recorded
+    h = src.hash
+    parent = src.meta.parent
+    psrc = None
     if parent is not None:
         if parent == name:
             raise JudgeRefused(f"{name} names itself as its PARENT")
         if parent not in list_plugins():
             raise JudgeRefused(f"PARENT '{parent}' is not a plugin in strategies/")
-    h = plugin_hash(name)
-    if parent is not None and plugin_hash(parent) == h:
-        raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
+        psrc = read_plugin(parent)
+        if psrc.hash == h:
+            raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
 
     existing = db.get_judgement(cfg, h, tf)
     if existing:   # (re)write its verdict under the judged strategy's name, even for a renamed copy
         return {**finish(cfg, existing["id"]), "existing": True}
 
-    family = resolve_family(cfg, name)
-    fails = lookahead_failures(cfg, PluginSource.read(name))
+    family = resolve_family(cfg, name, src)
+    fails = lookahead_failures(cfg, src)
     if fails:
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
@@ -183,25 +194,32 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
             "reasons": [f"lookahead: {f}" for f in fails], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
 
-    ph = plugin_hash(parent) if parent is not None else None   # before the check: the checked version
-    if parent is not None and lookahead_failures(cfg, PluginSource.read(parent)):
+    if psrc is not None and lookahead_failures(cfg, psrc):
         raise JudgeRefused(f"parent {parent} fails the lookahead check; fix or judge it first")
 
     universe = symbols or cfg.symbols
     parent_row = None
     if parent is not None:
-        parent_row = db.latest_wf_run(cfg, parent, tf, ph, universe, lineage_id=family)
+        parent_row = db.latest_wf_run(cfg, parent, tf, psrc.hash, universe, lineage_id=family)
         if parent_row is None:
-            prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family)
-            if prec["strategy_hash"] != ph:   # the parent run measured other code than was checked
-                raise RuntimeError(f"parent {parent} changed while it was being checked or run; "
-                                   "re-run lab judge")
+            try:
+                prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family, src=psrc)
+            except PluginError as e:
+                log.warning("parent %s failed in the sandbox: %s\n%s", parent, e.reason(),
+                            e.stderr.decode("utf-8", "replace"))
+                raise JudgeRefused(f"parent {parent} fails in the sandbox; fix or judge it first") from e
             parent_row = db.run_row(cfg, prec["run_id"])
 
-    rec, _ = validate(cfg, name, tf, symbols, workers=workers,
-                      parent_run_id=parent_row["run_id"] if parent_row else None, lineage_id=family)
-    if rec["strategy_hash"] != h:   # the run measured other code than the version being judged
-        raise RuntimeError(f"{name} changed while it was being judged; re-run lab judge")
+    try:
+        rec, _ = validate(cfg, name, tf, symbols, workers=workers,
+                          parent_run_id=parent_row["run_id"] if parent_row else None, lineage_id=family, src=src)
+    except PluginError as e:
+        log.warning("%s failed in the sandbox: %s\n%s", name, e.reason(), e.stderr.decode("utf-8", "replace"))
+        jid = db.record_judgement(cfg, {
+            "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
+            "parent_run_id": None, "lineage_id": family, "decision": "kill", "reasons": [e.reason()],
+            "holdout_status": "n/a", "holdout_reason": "n/a"})
+        return finish(cfg, jid)
     child = db.run_row(cfg, rec["run_id"])
     n, _ = db.trial_stats(cfg)          # N store-wide; the spread is the no-edge one (gates)
     cr = oos_portfolio(child["run_dir"])
