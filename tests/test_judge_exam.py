@@ -1,5 +1,6 @@
 import json
 import math
+import threading
 from functools import partial
 from pathlib import Path
 
@@ -394,8 +395,9 @@ def test_an_honest_seasonal_plugin_is_not_blocked_at_exam_time(cfg, plugins, mon
     budget.init_log(cfg)
     add_plugin(plugins, "seasonal", SEASONAL)
     judged(cfg, "seasonal", {"seasonal": ("candidate", STRONG)}, stub_run(0.003), days=100)
+    cfg.raw["judge"]["min_holdout_days"] = 100   # long enough, so the dated check runs over it
     [done] = exams(cfg, stub_run(0.003), 100)   # window May-Oct only
-    assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "too_short")
+    assert (done["holdout_status"], done["holdout_reason"]) == ("passed", "passed")
 
 
 # ---------------------------------------------------------------- only `lab exam` runs exams (3b-1)
@@ -619,3 +621,63 @@ def test_a_sandbox_down_before_the_mint_mints_nothing(cfg, plugins, monkeypatch,
     assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error")
     out = json.loads(verdict_path(cfg, r["strategy"], r["timeframe"], r["strategy_hash"]).read_text())
     assert (out["holdout_status"], out["holdout_reason"]) == ("pending", "exam_error")
+
+
+def test_an_exam_in_progress_is_left_alone(cfg, plugins):
+    # a scheduled `lab exam` starts while another is still examining the same judgement: it skips
+    # it (no mint, no attempt, no status change) and says so, without an error
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    inside, release, out = threading.Event(), threading.Event(), {}
+    held = stub_run(0.003)
+
+    def slow(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
+        inside.set()
+        assert release.wait(60)
+        return held(cfg, src, tf, symbols, params, token, end, stderr_dir=stderr_dir)
+    a = threading.Thread(target=lambda: out.setdefault("a", attempt_exam(
+        cfg, j["id"], run=slow, end_fn=end_after(200), cost_fn=no_cost)))
+    a.start()
+    try:
+        assert inside.wait(60)
+        b = attempt_exam(cfg, j["id"], run=boom, end_fn=boom, cost_fn=boom)
+        assert b["in_progress"] is True and (b["holdout_status"], b["holdout_reason"]) == ("pending", "awaiting_exam")
+        r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
+        assert r.exit_code == 0 and "in progress elsewhere" in r.output and "ERROR" not in r.output
+        assert budget.attempts(cfg, j["id"]) == 1
+        r = db.get_judgement_by_id(cfg, j["id"])
+        assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "awaiting_exam")
+    finally:
+        release.set()
+        a.join(60)
+    assert out["a"]["holdout_status"] == "passed" and budget.attempts(cfg, j["id"]) == 1
+
+
+def test_a_retry_minted_after_a_stale_count_runs_on_the_stored_end(cfg, plugins, monkeypatch):
+    # the reviewer's probe: the read was minted on day 200 after this exam counted none, so its
+    # mint is a retry, and the exam must run on the stored end, not on its own later one
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    budget.mint(cfg, j["lineage_id"], j["id"], 200, DAY_200)          # the other exam's mint
+    monkeypatch.setattr(budget, "holds_read", lambda *a, **kw: False)  # this exam's stale view
+    ends, run = [], stub_run(0.003)
+
+    def spy(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
+        ends.append(end)
+        return run(cfg, src, tf, symbols, params, token, end, stderr_dir=stderr_dir)
+    done = attempt_exam(cfg, j["id"], run=spy, end_fn=end_after(260), cost_fn=no_cost)
+    assert ends == [DAY_200] and done["holdout_status"] == "passed"
+    assert db.run_row(cfg, done["holdout_run_id"])["date_end"] == str(DAY_200.date())
+    assert [e["window_end"] for e in budget.read_log(budget.log_path(cfg))] == [DAY_200.isoformat()] * 2
+
+
+def test_a_short_window_waits_without_starting_a_worker(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    monkeypatch.setattr(jm, "dated_lookahead_failures", boom)
+    monkeypatch.setattr(client, "check", boom)
+    monkeypatch.setattr(client, "spawn", boom)
+    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(100), cost_fn=boom)
+    assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "too_short")
+    assert budget.reads_used(cfg) == 0

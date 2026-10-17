@@ -191,6 +191,7 @@ def test_mint_stores_the_window_end(cfg):
     assert budget.stored_window_end(cfg, 1) == END and budget.stored_window_end(cfg, 2) is None
     budget.mint(cfg, "fam", 1, 200, END + pd.Timedelta(days=30))     # a retry: its window was fixed before
     assert budget.stored_window_end(cfg, 1) == END
+    assert [json.loads(x)["window_end"] for x in p.read_text().splitlines()] == [END.isoformat()] * 2
 
 
 def test_the_stored_window_end_is_the_first_one_logged(cfg):

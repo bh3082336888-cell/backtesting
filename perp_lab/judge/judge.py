@@ -368,17 +368,31 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     1. read the plugin once; an edit since it was judged waits as plugin_changed;
     2. a judgement already holding its read: failed / exam_error after exam_max_attempts, else the
        window end stored at the mint, and on to 6 (the read is spent and the window fixed);
-    3. the window end; 4. the dated lookahead check over it; 5. the cost probe (too_slow, or
+    3. the window end (shorter than min_holdout_days: pending / too_short, before any worker
+       starts); 4. the dated lookahead check over it; 5. the cost probe (too_slow, or
        plugin_error if the plugin fails it); 6. the sandbox check; 7. mint, storing the window end
        (refused, failed / exam_error, once the read's attempts are used up); 8. the streamed exam.
 
     SandboxUnavailable at any step before the mint is pending / exam_error, re-raised: nothing is
     minted and no attempt used. A plugin error in the exam itself is failed / plugin_error (the read
     is spent); its kind and message go only to the holdout run's report, never to the verdict.
+
+    One attempt per judgement at a time (`budget.exam_lock`, held throughout): while another
+    `lab exam` examines it (an exam can take hours), this returns it unchanged, marked
+    `in_progress`, and spends nothing.
     """
-    j = db.get_judgement_by_id(cfg, jid)
-    if j is None or j["holdout_status"] != "pending":
-        return j
+    with budget.exam_lock(cfg, jid) as mine:
+        j = db.get_judgement_by_id(cfg, jid)     # read under the lock: an exam that just ended is final
+        if j is None or j["holdout_status"] != "pending":
+            return j
+        if not mine:
+            return {**j, "in_progress": True}
+        return _attempt(cfg, j, run, end_fn, cost_fn)
+
+
+def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -> dict:
+    """attempt_exam's steps, under the judgement's exam lock."""
+    jid = j["id"]
     try:                                                     # 1. these bytes are checked and examined
         src = PluginSource.read(j["strategy"])
     except PluginMetaError:
@@ -400,6 +414,9 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
                 end = end_fn(cfg, syms, tf)
         else:
             end = end_fn(cfg, syms, tf)                      # 3
+            if (end - cfg.holdout_start).days < jc["min_holdout_days"]:   # too short: no worker started
+                db.update_holdout(cfg, jid, "pending", "too_short")       # (the mint checks again, locked)
+                return finish(cfg, jid)
             if dated_lookahead_failures(cfg, src, end, params=params):     # 4
                 db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
                 return finish(cfg, jid)
@@ -423,6 +440,10 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     if token is None:
         db.update_holdout(cfg, jid, chk.status, chk.code)
         return finish(cfg, jid)
+    if chk.code == "retry":                                  # the read was minted after step 2 looked:
+        stored = budget.stored_window_end(cfg, jid, fam)     # its window is the one fixed then
+        if stored is not None:
+            end = stored
     try:                                                     # 8. in this process: the token never leaves it
         try:
             res = run(cfg, src, tf, syms, params, token, end, stderr_dir=exam_stderr_dir(cfg, jid))
@@ -445,7 +466,8 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
 
 
 def exam_pending(cfg, **kw) -> list[dict]:
-    """Retry every pending exam, oldest first; one crashing exam never blocks the rest."""
+    """Retry every pending exam, oldest first; one crashing exam never blocks the rest. One that
+    another `lab exam` is examining comes back unchanged, marked `in_progress`."""
     out = []
     for j in db.pending_judgements(cfg):
         try:

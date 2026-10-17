@@ -100,14 +100,19 @@ def attempts(cfg, judgement_id: int, lineage_id: str | None = None) -> int:
 def stored_window_end(cfg, judgement_id: int, lineage_id: str | None = None) -> pd.Timestamp | None:
     """The window end fixed when this judgement's read was minted: the first of its entries (under
     `lineage_id`, when given) that has one. None when none has (no read yet, or 3a entries only)."""
-    for e in _of(read_log(log_path(cfg)), judgement_id, lineage_id):
+    return _fixed_end(_of(read_log(log_path(cfg)), judgement_id, lineage_id), log_path(cfg))
+
+
+def _fixed_end(entries: list[dict], path: Path) -> pd.Timestamp | None:
+    """The window end of the first of a read's entries that has one."""
+    for e in entries:
         if e.get("window_end") is not None:
             try:
                 end = pd.Timestamp(e["window_end"])
             except (TypeError, ValueError) as ex:
-                raise BudgetLogError(f"holdout log {log_path(cfg)}: bad window_end {e['window_end']!r}") from ex
+                raise BudgetLogError(f"holdout log {path}: bad window_end {e['window_end']!r}") from ex
             if end.tz is None:
-                raise BudgetLogError(f"holdout log {log_path(cfg)}: window_end {e['window_end']!r} has no timezone")
+                raise BudgetLogError(f"holdout log {path}: window_end {e['window_end']!r} has no timezone")
             return end.tz_convert("UTC")
     return None
 
@@ -141,16 +146,43 @@ def _locked(path: Path):
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+@contextmanager
+def exam_lock(cfg, judgement_id: int):
+    """One `lab exam` at a time per judgement: a non-blocking exclusive lock on
+    `<holdout_log>.exam-<id>.lock`, held for the whole attempt. Yields whether this caller holds
+    it; False while another process or thread examines the judgement. A crashed exam's lock goes
+    with its process."""
+    if not isinstance(judgement_id, int) or isinstance(judgement_id, bool):
+        raise TypeError(f"judgement_id must be an int, got {judgement_id!r}")
+    p = Path(f"{log_path(cfg)}.exam-{judgement_id}.lock")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def mint(cfg, lineage_id: str, judgement_id: int, window_days: int,
          window_end: pd.Timestamp) -> tuple[BudgetCheck, HoldoutToken | None]:
     """Check the budget and, if allowed, unlock the holdout. The read is logged, with the end of the
-    window it examines, before any data is read."""
+    window it examines, before any data is read. A retry examines the window fixed at its read's
+    first mint, so that is the end it logs (whatever `window_end` says); 3a entries have none."""
     if not isinstance(window_end, pd.Timestamp) or window_end.tz is None:
         raise TypeError(f"window_end must be a tz-aware pd.Timestamp, got {window_end!r}")
     p = log_path(cfg)
     with _locked(p):
-        chk = check(cfg, read_log(p), lineage_id, judgement_id, window_days)
+        entries = read_log(p)
+        chk = check(cfg, entries, lineage_id, judgement_id, window_days)
         if chk.status != "mint":
             return chk, None
+        fixed = _fixed_end(_of(entries, judgement_id, lineage_id), p) if chk.code == "retry" else None
+        if fixed is not None:
+            window_end = fixed
         return chk, issue_holdout_token(lineage_id, f"judge exam, judgement {judgement_id}", p,
                                         judgement_id=judgement_id, window_end=window_end.isoformat())
