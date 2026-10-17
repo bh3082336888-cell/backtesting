@@ -86,7 +86,7 @@ class Decisions:
         if len({len(a) for a in self._arrays()}) != 1:
             raise ProtocolError("decision columns differ in length")
         if len(self.i):
-            if self.i[0] < 0 or self.i[-1] >= n_bars or np.any(np.diff(self.i) <= 0):
+            if np.any((self.i < 0) | (self.i >= n_bars)) or np.any(self.i[1:] <= self.i[:-1]):
                 raise ProtocolError("decision bars must be strictly increasing within [0, n_bars)")
         if np.any((self.action < 0) | (self.action >= len(ACTIONS))):
             raise ProtocolError("decision action code out of range")
