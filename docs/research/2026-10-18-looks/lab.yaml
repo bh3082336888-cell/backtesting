@@ -1,0 +1,111 @@
+account:
+  initial_equity: 10000.0
+  leverage: 3.0
+  max_margin_frac: 1.0
+  risk_per_trade: 0.01
+backfill:
+  datasets:
+  - klines
+  - fundingRate
+  - metrics
+  max_retries: 6
+  workers: 8
+costs:
+  maker: 0.0002
+  slippage_bps: 2.0
+  taker: 0.0005
+data_dir: /home/burhan/backtesting/data
+history_start: '2022-01-01'
+holdout_start: '2026-07-01'
+judge:
+  bootstrap_block_days: 10
+  dsr_min: 0.95
+  exam_max_attempts: 3
+  holdout_floor_pct: 5
+  holdout_log: /tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/runs/holdout_log.jsonl
+  holdout_max_reads: 10
+  holdout_min_trades: 10
+  min_holdout_days: 180
+  parent_beat_frac: 0.95
+  verdicts_dir: /tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/runs/verdicts
+margin_brackets:
+  AVAXUSDT:
+    cum: 0.0
+    mmr: 0.01
+  BNBUSDT:
+    cum: 0.0
+    mmr: 0.0065
+  BTCUSDT:
+    cum: 0.0
+    mmr: 0.004
+  DOGEUSDT:
+    cum: 0.0
+    mmr: 0.0065
+  ETHUSDT:
+    cum: 0.0
+    mmr: 0.005
+  LINKUSDT:
+    cum: 0.0
+    mmr: 0.01
+  SOLUSDT:
+    cum: 0.0
+    mmr: 0.0065
+  XRPUSDT:
+    cum: 0.0
+    mmr: 0.0065
+  default:
+    cum: 0.0
+    mmr: 0.01
+paper:
+  min_paper_days: 60
+  regime_change_min_days: 7
+  warmup_bars: 1000
+quote: USDT
+regime:
+  adx_n: 14
+  adx_range: 20
+  adx_trend: 25
+  timeframe: 4h
+  vol_high_pct: 0.8
+  vol_n: 42
+  vol_rank_window: 1080
+runs_dir: /tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/runs
+sandbox:
+  exam_cpu_hours: 6
+  max_output_mb: 64
+  memory_mb: 3072
+  min_landlock_abi: 6
+  stream_step_s: 30
+  task_cpu_s: 900
+  wall_factor: 4
+store:
+  url: sqlite:////tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/lab.db
+timeframes:
+- 5m
+- 15m
+- 1h
+- 4h
+universe:
+- BTC
+- ETH
+- SOL
+- BNB
+- XRP
+- DOGE
+- AVAX
+- LINK
+validation:
+  island_drop: 0.5
+  mc_iterations: 10000
+  random_percentile: 95
+  random_seeds: 200
+  sensitivity_steps:
+  - -0.2
+  - -0.1
+  - 0.1
+  - 0.2
+walkforward:
+  min_train_trades: 20
+  selection_metric: sharpe
+  test_months: 2
+  train_months: 6

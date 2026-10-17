@@ -678,9 +678,17 @@ How the looks were done:
 - `load_bars` itself reads each symbol's funding file whole, as every lab read does. It keeps only
   the settlements that fall inside, or before, the returned bars, so no post-holdout rate reaches
   a bar.
-- The scripts and their outputs (`*.out`) are in the scratch directory and are not committed.
+- Every script, its output (`*.out`), `common.py`, the research config `lab.yaml` and look 7's
+  draft are kept with this note, byte for byte as they ran, in
+  [`2026-10-18-looks/`](2026-10-18-looks/). None of the outputs holds a candidate's forward
+  return, P&L or hit rate; the only trade and exit counts in them are look 7's, on synthetic bars.
+- They ran from the scratch directory
+  `/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/`,
+  and `common.py`, `lab.yaml` and looks 7 and 7b still name paths there. To run one again, point
+  `common.CFG_PATH` (and look 7b's two paths) at the copies in `2026-10-18-looks/`; `lab.yaml`
+  reads the main checkout's `data/`, read-only.
 
-Scratch directory: `/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/`
+Directory: `docs/research/2026-10-18-looks/`
 
 | # | script | what was computed | why it is not a performance measurement |
 |---|---|---|---|
