@@ -50,6 +50,11 @@ includes slippage, because slippage is in the fill prices; fees are exchange fee
    - Its exits must not depend on the trigger bar. A target "back at the shock bar's open" would
      give random entries different and worse exits, and make the benchmark easy to beat for the
      wrong reason.
+   - Neutral exits make the test fair; they don't make a pass likely. The lab has run this exact
+     exit template once already: `funding_fade` (1h) fades extreme funding with a stop 3 ATR from
+     the close, no target and a time exit, the same exits section 5 specifies. Its OOS Sharpe sat
+     at p68 of the random entries', it lost 621 gross before costs, and its IS Sharpe beat its OOS
+     Sharpe by 1.65 (lesson 5). Section 5 says why the new plugin is not its child.
 3. **Fading a stretched price had no gross edge.** `bb_vwap_reversion` lost 21.5k gross at both
    15m and 1h, before costs. At 1h it still beat 72% of random entries, which means its VWAP-target
    exit loses on random entries too. Any new reversion candidate has to say why its trigger is
@@ -380,10 +385,35 @@ from the close, no target, exit after hold_bars bars. The exits ignore the trigg
 random entries with the same exits earn nothing, so only the entry can beat them.
 ```
 
-**`PARENT`: none. This is a new family, so the module has no `PARENT` line.** The closest
-existing plugin is `bb_vwap_reversion`, but its trigger is price-only, its target is VWAP, and
-its mechanism is "stretched price", not forced flow. Making it the parent would put this plugin
-in that family and spend that family's one holdout read on a different idea.
+**`PARENT`: none. This is a new family, so the module has no `PARENT` line.** Two existing
+plugins are close, and neither is its parent.
+
+- **`funding_fade` is the nearest neighbour.** It is also a 1h fade, with exactly these exits: a
+  stop 3 ATR from the signal bar's close, no target and a time exit. What differs is the entry,
+  and the entry is all that the random benchmark tests, because the random entries get the same
+  exits.
+  - Different information. `funding_fade` reads the settled funding rate, which is set over the
+    whole funding interval (from memory: from the perp's average premium to the index over that
+    interval) and says which side is paying to hold leverage, that is, crowded positioning. It
+    can fire only on a bar with a settlement, and it reads nothing of that bar's flow or move.
+    This plugin reads one hour's net taker flow and price move, on any bar, and no funding.
+  - Different mechanism and clock. `funding_fade` claims that the crowded side unwinds, paying
+    carry while it does; its default hold is 24 bars and its grid reaches 48. This plugin claims
+    a price concession to forced orders that recovers within hours; its default hold is 12 bars
+    and its grid stops at 24. The two grids share only the 24-bar hold.
+  - The triggers barely meet (look 9). Of the default triggers, 12.1% fall on a bar where
+    `funding_fade` could fire at all, about the one hour in eight that settles. 0.4% fall on a
+    bar where its trigger does fire at its default z of 2 (0.9% at its loosest grid value, 1.5),
+    and 5.5% fall on or within the 24 bars after one, against 6.2% of all bars. At `flow_x = 1.0`
+    the figures are 0.7% (1.5%), about twice the all-bar rate but 6 of 812 triggers, and 6.3%
+    against 6.2%.
+  - So `funding_fade`'s kill speaks to the exits, not to this entry: a fair test with these exits
+    can kill a fade whose entry carries nothing, and did (section 1, lesson 2).
+- **`bb_vwap_reversion`**: its trigger is price-only, its target is VWAP, and its mechanism is
+  "stretched price", not forced flow.
+
+Making either one the parent would put this plugin in that family and spend that family's one
+holdout read on a different idea.
 
 **Literals** (class attributes, exactly as written):
 
@@ -594,6 +624,7 @@ Scratch directory: `/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226
 | 7 | `look7_synthetic_check.py` (with `flow_shock_fade_draft.py`, a scratch draft of the spec) | On synthetic bars only (`synthetic_bars(seed=1)`, raw and with moving columns): whether the spec parses as plugin metadata, signals at its defaults and grid corners, keeps its time exit, and stays causal at the judge's cut points. | Loads no market data. It checks the spec against the harness, not against markets. |
 | 7b | `look7b_judge_check.py` | The harness's own `causality_failures` (the judge's lookahead check) on the draft, using the in-process worker twin from the test suite: no failures. The same draft with the default `flow_x` raised to 1.0 is reported as `defaults: no signals on synthetic data`. | Synthetic bars only, as for look 7. |
 | 8 | `look8_trigger_atr.py` | At 1h: the ATR14 at bar t, in bp of bar t's close, on the bars where the spec's trigger fires at (flow_x, move_k) = (0.5, 1) and (1.0, 1), with look 5's (1.0, 2) repeated as a cross-check, against all bars. Pooled p10/p50/p90, the median of the per-symbol medians, each symbol's median, and its ratio to that symbol's all-bar median, over the whole span; and the pooled median over 2022-07 to 2026-07 alone (100 and 109 bp for the two spec triggers). This is the ATR the stop is set from, so it converts section 4's hurdle from R into bp. | A same-bar feature distribution: the trigger and the ATR both use bars ≤ t, and nothing after the trigger bar is read. It says how wide the stop is on trigger bars, not what happens after them. |
+| 9 | `look9_funding_overlap.py` | At 1h: how often the spec's trigger, at flow_x 0.5 and 1.0 (move_k 1), falls on a bar where `funding_fade` could fire (a nonzero settlement), on a bar where its trigger does fire (z_thr 1.5 and 2.0; either side, and the same side), and on or within the 24 bars after one (its default hold), each against the share of all bars. Both triggers come from the committed plugins' own `prepare` and entry rules. | Co-occurrence counts of two conditions, each computed from bars ≤ t. Nothing after a trigger bar is read, and no trade is simulated. |
 
 Findings that the sections above rely on:
 
@@ -624,6 +655,14 @@ Findings that the sections above rely on:
   - flow_x = 1, move_k = 2 (look 5's trigger), 634 triggers: 57/111/255, and 137.
   - Per symbol, the median trigger bar's ATR is 0.98–1.19 times the symbol's all-bar median at
     the defaults, and 1.05–1.36 times at flow_x = 1, move_k = 1.
+- **Overlap with `funding_fade`** (look 9), pooled over the 8 symbols.
+  - `funding_fade` triggers: 1,118 at its default z_thr of 2 and 2,097 at 1.5, which is 0.35% and
+    0.67% of all bars; 6.2% and 11.5% of all bars are on or within 24 bars after one.
+  - Of the 3,998 default flow triggers: 12.1% are on a nonzero-settlement bar; 0.40% are on a
+    `funding_fade` trigger bar at z_thr 2 (0.18% on the same side) and 0.85% at 1.5; 5.5% are on
+    or within 24 bars after a z_thr-2 trigger, and 10.0% after a z_thr-1.5 one.
+  - Of the 812 flow triggers at flow_x = 1: 12.8%; 0.74% (0.49% on the same side) and 1.48%;
+    6.3% and 10.7%.
 - **Synthetic bars.** By construction, volume is uniform on 100–1000 and never exceeds about 1.8×
   its median, so a volume-multiple trigger is unverifiable there. The net-flow statistic peaks at 0.80 in absolute value, so the
   defaults (0.5, 1.0) fire and `flow_x = 1.0` doesn't.
