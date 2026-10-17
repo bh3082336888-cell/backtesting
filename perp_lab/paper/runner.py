@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Callable
@@ -29,9 +30,19 @@ from perp_lab.data.live import acall_with_backoff, ohlcv_to_candles, watch_close
 from perp_lab.engine.backtest import EngineParams, liq_price
 from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client
+from perp_lab.sandbox.errors import PluginError
 from perp_lab.strategy import PositionView, Signal
 
 log = logging.getLogger(__name__)
+
+
+def _finite(w: float) -> float:
+    """Equity after a fill or a funding charge. A fill at an infinite or overflowing price (a target
+    moved past the price on the wrong side) would leave it not finite: the plugin's `mismatch`, as
+    in a replay, raised before anything is booked."""
+    if not math.isfinite(w):
+        raise PluginError("mismatch", "", "paper equity is not finite")
+    return w
 
 
 class PaperBook:
@@ -104,7 +115,7 @@ class PaperBook:
         if not p:
             return
         f = p["side"] * p["qty"] * mark * rate
-        self.W -= f
+        self.W = _finite(self.W - f)
         p["margin"] -= f
         p["funding"] += f
         p["liq"] = liq_price(p["side"], p["entry_price"], p["qty"], p["margin"], self.ep.mmr, self.ep.cum)
@@ -127,7 +138,7 @@ class PaperBook:
             log.info("%s paper: liq inside stop; entry rejected", self.symbol)
             return
         fee = ep.taker * q * px
-        self.W -= fee
+        self.W = _finite(self.W - fee)
         self.pos = {"side": side, "qty": q, "entry_price": px, "stop": sig.stop,
                     "target": sig.target if sig.target is not None else np.nan, "margin": mg, "liq": lq,
                     "entry_i": meta["i"] + 1, "entry_time": ts, "signal_time": meta["signal_time"],
@@ -142,7 +153,7 @@ class PaperBook:
             pnl, fee = -p["margin"], 0.0
         else:
             pnl, fee = p["side"] * p["qty"] * (px - p["entry_price"]), fee_rate * p["qty"] * px
-        self.W += pnl - fee
+        self.W = _finite(self.W + (pnl - fee))
         fees = p["fees"] + fee
         net = pnl - fees - p["funding"]
         nb = 0
@@ -272,13 +283,21 @@ class PaperRunner:
         stop_evt = asyncio.Event()
         side = [asyncio.create_task(self._quotes_loop(s, stop_evt)) for s in self.symbols]
         side += [asyncio.create_task(self._funding_loop(s, stop_evt)) for s in self.symbols]
+        bars = asyncio.ensure_future(asyncio.gather(*(self._bars_loop(s, max_bars) for s in self.symbols)))
         try:
-            await asyncio.gather(*(self._bars_loop(s, max_bars) for s in self.symbols))
+            # The quote and funding loops run until the bars are done; one that ends first failed
+            # (e.g. a fill the book refused as a mismatch), and that stops the run with its error.
+            await asyncio.wait([bars, *side], return_when=asyncio.FIRST_COMPLETED)
+            for t in side:
+                if t.done():
+                    t.result()
+            await bars
         finally:
             stop_evt.set()
+            bars.cancel()                   # if a side loop failed: each bars loop closes its worker
             for t in side:
                 t.cancel()
-            await asyncio.gather(*side, return_exceptions=True)
+            await asyncio.gather(bars, *side, return_exceptions=True)
             self._persist()
             close = getattr(self.ex, "close", None)
             if close:

@@ -238,7 +238,8 @@ Requests:
   one float64 array each; bool and int are cast, anything else is `plugin_error: features`).
   `k` runs on the first k bars only. `mode` is `plain` or `random {seed, prob}`.
 - `stream_open {params, warmup_k}` → the decisions of a batch run over the first `warmup_k` bars.
-  Then `step {new_rows, position}` → `signal {action, stop, target}`.
+  Then `step {new_rows, position}` → `signal {action, stop, target}`. A stop or target is a number,
+  finite or NaN; an infinite one, in a decision log or a signal, is a protocol violation.
 - Any failure inside plugin code → `error {kind, type, message}`, with `message` cut to 200
   printable ASCII characters.
 
@@ -407,7 +408,9 @@ anything else.
 - an exception in plugin code, including `MemoryError` at `memory_mb`;
 - CPU time over `sandbox.task_cpu_s` for one batch run or one stream step, measured by the parent
   from `/proc/<pid>/stat`;
-- a protocol violation, oversized output, or a metadata, features or replay `mismatch`;
+- a protocol violation, oversized output, or a metadata, features or replay `mismatch`, including
+  equity that is not finite after a replay, a streamed run or a paper fill (a day whose return is
+  NaN would be dropped from the portfolio, not counted against the plugin);
 - the worker dying without a report, or a run exceeding `task_cpu_s × wall_factor` of wall-clock
   time (or `stream_step_s` for a stream step): this is retried once in a fresh worker, and only
   a second failure on the same task counts (`died` or `timeout`). The retry absorbs transient

@@ -45,6 +45,14 @@ def replay(bars: pd.DataFrame, dec: Decisions, *, symbol: str, tf: str, ep: Engi
                         start_i=start_i, end_i=end_i)
 
 
+def check_finite(res: BacktestResult) -> None:
+    """The trusted engine's equity must stay finite. A fill at an infinite or overflowing price makes
+    it -inf or NaN, and a day whose return is NaN is dropped from the portfolio rather than counted
+    against the plugin, so that is the plugin's `mismatch`."""
+    if not np.isfinite(res.equity).all():
+        raise PluginError("mismatch", "", "equity is not finite")
+
+
 def check_fingerprint(res: BacktestResult, fp: tuple[int, float], ep: EngineParams) -> None:
     final = float(res.equity[-1]) if len(res.equity) else ep.equity0
     if len(res.trades) != fp[0] or final != fp[1]:

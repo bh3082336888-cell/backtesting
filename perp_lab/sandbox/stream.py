@@ -36,6 +36,7 @@ from perp_lab.engine.backtest import BacktestResult, EngineParams, run_backtest
 from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client
 from perp_lab.sandbox.decisions import Decisions
+from perp_lab.sandbox.replay import check_finite
 from perp_lab.strategy import HOLD, Ctx, Signal, Strategy
 
 # load(symbol) -> (bars: research then holdout, k0: index of the first holdout bar, engine params)
@@ -124,6 +125,7 @@ def stream_symbol(cfg, src: PluginSource, symbol: str, tf: str, bars: pd.DataFra
         res = run_backtest(StreamedStrategy(w, warm, k0, bars, symbol, lockstep), bars, bars[[]],
                            symbol=symbol, tf=tf, ep=ep)
         lockstep.finish(symbol)             # done deciding: the others need not wait for the close
+        check_finite(res)                   # NaN days would be dropped from the exam, not counted
         return res
     finally:
         _close(w, symbol, None if stderr_dir is None else Path(stderr_dir))

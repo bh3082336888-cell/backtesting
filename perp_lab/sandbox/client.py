@@ -49,7 +49,7 @@ from perp_lab.sandbox.errors import (PluginError, ProtocolError, SandboxUnavaila
                                      ascii_text)
 from perp_lab.sandbox.protocol import (Arrow, decisions_from, position_json, read_frame, signal_from, table_bytes,
                                        warmup_decisions, write_frame)
-from perp_lab.sandbox.replay import check_fingerprint, random_draw, replay
+from perp_lab.sandbox.replay import check_fingerprint, check_finite, random_draw, replay
 from perp_lab.strategy import PositionView, Signal
 
 # Exactly this environment, nothing inherited (no secrets). PYTHONHASHSEED makes hash() of a
@@ -622,6 +622,7 @@ class Batch:
         out = _retry_once(lambda: self._run(params, ep, random, start_i))
         draw = None if random is None else random_draw(len(self.bars), int(random[0]), float(random[1]))
         res = replay(self.bars, out.decisions, symbol=self.symbol, tf=self.tf, ep=ep, start_i=start_i, draw=draw)
+        check_finite(res)
         check_fingerprint(res, out.fingerprint, ep)
         return res
 

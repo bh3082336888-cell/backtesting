@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 
 import numpy as np
@@ -78,6 +79,22 @@ def test_paper_trade_schema_matches_backtest():
     book.on_quote(99.9, 100.1, 2)
     pt = book.trades[0]
     assert set(bt) <= set(pt) and set(pt) - set(bt) == {"source"}
+
+
+def test_paper_refuses_a_fill_that_makes_equity_not_finite():
+    # The exam's check, in paper: a target at an infinite price on the wrong side of a short (a hold
+    # moved it there) would close at it and leave equity at -inf.
+    book = PaperBook(scripted_decide({9: Signal("short", stop=110.0)}), "X", "1h", EP)
+    book.on_closed_bar(flat_bars(10))
+    book.on_quote(99.9, 100.1, 1)                    # short at the bid
+    assert book.pos is not None and book.pos["side"] == -1
+    book.decide = lambda bars, pv: Signal("hold", None, math.inf)
+    book.on_closed_bar(flat_bars(11))
+    w, pos = book.W, dict(book.pos)
+    with pytest.raises(PluginError) as e:
+        book.on_quote(99.9, 100.1, 2)                # ask < target: the target "fills"
+    assert e.value.kind == "mismatch" and "finite" in e.value.message
+    assert book.W == w and book.pos == pos and book.trades == []    # nothing booked
 
 
 class FakeEx:
@@ -228,6 +245,40 @@ def test_paper_runner_loop_with_fake_exchange(tmp_path):
     assert r.books["BTCUSDT"].pos is not None
     assert r.books["BTCUSDT"].pos["entry_price"] == 100.1   # filled at the live ask
     assert (tmp_path / "state.json").exists()
+
+
+OVERFLOWS = '''"""Shorts, then moves its target far above the price: finite, but a fill there overflows."""
+from perp_lab.strategy import HOLD, Signal, Strategy, enter
+
+
+class Overflows(Strategy):
+    def prepare(self, bars):
+        return bars[[]]
+
+    def entry(self, ctx):
+        return enter(-1, 1.1 * ctx["close"])
+
+    def manage(self, ctx):
+        return Signal("hold", None, 1.7e308)
+'''
+
+
+class SlowFakeEx(FakeEx):
+    """A candle every 20 ms, so quotes (every 1 ms) come between closes."""
+
+    async def watch_ohlcv(self, sym, tf):
+        await asyncio.sleep(0.02)
+        return await super().watch_ohlcv(sym, tf)
+
+
+def test_paper_stops_when_a_fill_makes_equity_not_finite(tmp_path):
+    from perp_lab.config import load_config
+    r = PaperRunner(load_config(), PluginSource.from_text("overflows", OVERFLOWS), {}, "1h", ["BTCUSDT"],
+                    tmp_path, exchange=SlowFakeEx())
+    with pytest.raises(PluginError) as e:
+        asyncio.run(r.run(max_bars=8))
+    assert e.value.kind == "mismatch"
+    assert r.books["BTCUSDT"].trades == [] and np.isfinite(r.books["BTCUSDT"].W)
 
 
 def test_paper_stops_when_its_worker_fails(tmp_path):

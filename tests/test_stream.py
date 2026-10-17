@@ -5,6 +5,7 @@ and the symbols' streams advance in lockstep. Unmarked tests run on the in-proce
 
 import contextlib
 import io
+import json
 import math
 import random
 import threading
@@ -443,6 +444,46 @@ def test_the_plugin_sees_the_engines_position_at_every_step(tmp_path):
 def test_a_malformed_signal_is_a_protocol_error(sig):
     with pytest.raises(ProtocolError):
         signal_from({"ok": True, "signal": sig}, {})
+
+
+@pytest.mark.parametrize("key, value", [("stop", math.inf), ("stop", -math.inf), ("target", math.inf),
+                                        ("target", -math.inf)])
+def test_an_infinite_stop_or_target_in_a_step_is_a_protocol_error(key, value):
+    # Pinned from the final review: a hold with target +inf on a short (-inf on a long) closed at an
+    # infinite price in the parent's engine, and the exam dropped the symbol's remaining days.
+    sig = {"action": "hold", "stop": None, "target": None, "has_stop": False, "has_target": False,
+           key: value, f"has_{key}": True}
+    with pytest.raises(ProtocolError, match="finite"):
+        signal_from(json.loads(json.dumps({"ok": True, "signal": sig})), {})
+
+
+OVERFLOW = f'''"""Shorts once in the holdout, then moves its target far above the price: finite, but the
+close there overflows equity to -inf."""
+from perp_lab.strategy import HOLD, Signal, Strategy, enter
+
+
+class Overflow(Strategy):
+    params = {{}}
+
+    def prepare(self, bars):
+        return bars[[]]
+
+    def entry(self, ctx):
+        if ctx["open_time"] >= {HOLDOUT_MS} + 5 * {BAR_MS}:
+            return enter(-1, 1.1 * ctx["close"])
+        return HOLD
+
+    def manage(self, ctx):
+        return Signal("hold", None, 1.7e308)
+'''
+
+
+def test_a_streamed_run_whose_equity_is_not_finite_fails_the_exam(tmp_path):
+    # Not finite equity would drop days from the exam's portfolio, never count against it.
+    cfg = market_config(tmp_path)
+    with pytest.raises(PluginError) as e:
+        run_exam(cfg, PluginSource.from_text("overflow", OVERFLOW), "4h", cfg.symbols, {}, token(tmp_path), END)
+    assert e.value.kind == "mismatch" and "finite" in e.value.message
 
 
 def test_a_signal_with_sections_is_a_protocol_error():

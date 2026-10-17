@@ -20,6 +20,7 @@ strictly as a decision log entry (`signal_from`).
 from __future__ import annotations
 
 import json
+import math
 import struct
 
 import numpy as np
@@ -199,14 +200,18 @@ def _level(sig: dict, key: str) -> float | None:
     if type(v) not in (int, float):
         raise ProtocolError(f"signal {key} must be a number")
     try:
-        return float(v)
+        x = float(v)
     except OverflowError:
         raise ProtocolError(f"signal {key} is out of range") from None
+    if math.isinf(x):                         # NaN is a level the engine knows; an infinite one isn't
+        raise ProtocolError(f"signal {key} must be finite (or NaN)")
+    return x
 
 
 def signal_from(reply: dict, sections: dict) -> Signal:
     """A `step` reply's signal, checked as strictly as a decision log entry (parent side): an action
-    in ACTIONS, and a stop and a target that are each a number exactly when their flag is set."""
+    in ACTIONS, and a stop and a target that are each a number, finite or NaN, exactly when their
+    flag is set."""
     if sections:
         raise ProtocolError("a step reply has no sections")
     sig = reply.get("signal")

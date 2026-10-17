@@ -90,6 +90,10 @@ class Decisions:
                 raise ProtocolError("decision bars must be strictly increasing within [0, n_bars)")
         if np.any((self.action < 0) | (self.action >= len(ACTIONS))):
             raise ProtocolError("decision action code out of range")
+        # NaN is a level the engine knows (a held NaN target clears the target); an infinite one
+        # would fill at an infinite price and leave equity NaN.
+        if np.any(np.isinf(self.stop)) or np.any(np.isinf(self.target)):
+            raise ProtocolError("decision stops and targets must be finite (or NaN)")
         for k in ("has_stop", "has_target"):
             a = getattr(self, k)
             if np.any((a != 0) & (a != 1)):

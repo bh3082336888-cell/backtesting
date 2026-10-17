@@ -189,3 +189,57 @@ def test_decide_last_checks_the_signal():
     assert decide_last(Fixture(lambda ctx: Signal("long", 1.0)), "X", bars, None) == Signal("long", 1.0)
     with pytest.raises(TypeError):
         decide_last(Fixture(lambda ctx: None), "X", bars, None)
+
+
+# Pinned from the final review (nonfinite.py): an infinite stop or target passed the log check, and
+# a hold whose target sat at -inf on a long (+inf on a short) closed at an infinite price, so equity
+# turned NaN and the exam's daily returns dropped that symbol's remaining days.
+def _inf_logs(c):
+    return {"entry stop -inf": [(100, Signal("long", -math.inf, None))],
+            "hold target -inf on a long": [(100, Signal("long", c * 0.95, None)), (110, Signal("hold", None, -math.inf))],
+            "hold target +inf on a short": [(100, Signal("short", c * 1.2, None)),
+                                            (102, Signal("hold", None, math.inf))]}
+
+
+@pytest.mark.parametrize("name", ["entry stop -inf", "hold target -inf on a long", "hold target +inf on a short"])
+def test_an_infinite_stop_or_target_is_refused(name):
+    bars = make_bars(n=300, seed=3)
+    dec = Decisions.from_log(_inf_logs(float(bars["close"].iloc[100]))[name])
+    with pytest.raises(ProtocolError, match="finite"):
+        dec.validate(len(bars))
+    nan = Decisions.from_log([(100, Signal("long", 1.0, math.nan)), (110, Signal("hold", math.nan, math.nan))])
+    nan.validate(len(bars))                           # NaN stays allowed (bb_vwap_reversion sends NaN targets)
+
+
+class _ForgingWorker:
+    """Sends a finite fingerprint with a log whose replay is not finite (nothing parses it on the way)."""
+
+    pid, stderr = 0, b""
+
+    def __init__(self, cfg, src, log):
+        self.log = log
+
+    def bars(self, symbol, tf, df):
+        pass
+
+    def run(self, params, ep, **kw):
+        from perp_lab.sandbox.client import RunOutput
+        return RunOutput(Decisions.from_log(self.log), (1, ep.equity0), None)
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("name", ["hold target -inf on a long", "hold target +inf on a short"])
+def test_a_replay_whose_equity_is_not_finite_is_a_mismatch(monkeypatch, name):
+    from perp_lab.plugins import PluginSource
+    from perp_lab.sandbox import client
+    bars = make_bars(n=300, seed=3)
+    log = _inf_logs(float(bars["close"].iloc[100]))[name]
+    monkeypatch.setattr(client, "spawn", lambda cfg, src: _ForgingWorker(cfg, src, log))
+    src = PluginSource.from_text("forger", b'"""Forges."""\nfrom perp_lab.strategy import Strategy\n\n\n'
+                                           b'class F(Strategy):\n    params = {}\n')
+    with client.Batch(None, src, "X", "1h", bars) as b:
+        with pytest.raises(PluginError) as e:
+            b.backtest({}, EngineParams())
+    assert e.value.kind == "mismatch" and "finite" in e.value.message
