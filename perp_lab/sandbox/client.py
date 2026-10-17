@@ -202,13 +202,16 @@ class Worker:
         """The files this worker has mapped, as far as noted (at ready and before closing)."""
         return frozenset(self._mapped)
 
-    def _note_mapped(self) -> None:
+    def _note_mapped(self, when: str) -> None:
         """Add the files the worker maps now (/proc/<pid>/maps, which the parent may read) to
-        `mapped_files`. A sealed worker can map no other file, so at ready this names them all."""
+        `mapped_files`. A sealed worker can map no other file, so at ready this names them all.
+        If they can't be read, nothing of this worker would be evicted: that is logged."""
         try:
             with open(f"/proc/{self.pid}/maps", "rb") as f:
                 lines = f.read().splitlines()
-        except OSError:
+        except OSError as e:
+            log.warning("worker %d: its mapped files can't be read at %s (%s), so they won't be evicted from "
+                        "the page cache", self.pid, when, e.strerror)
             return
         for line in lines:
             fields = line.split(None, 5)                # address perms offset dev inode path
@@ -287,7 +290,7 @@ class Worker:
             return
         self._closed = True
         if not self._dead:
-            self._note_mapped()                         # while it still runs: its maps go when it exits
+            self._note_mapped("close")                  # while it still runs: its maps go when it exits
         if not self._dead and (self._writer is None or not self._writer.is_alive()):
             try:
                 self._proc.stdin.close()
@@ -571,7 +574,7 @@ def _start(cfg) -> Worker:
     except BaseException:
         w.close()
         raise
-    w._note_mapped()
+    w._note_mapped("ready")
     return w
 
 

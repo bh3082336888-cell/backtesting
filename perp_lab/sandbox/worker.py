@@ -175,7 +175,10 @@ def _sealed_test(path: str, link: str, fd: int) -> None:
     except OSError as e:
         raise RuntimeError(f"fstat failed once sealed ({errno.errorcode.get(e.errno, e.errno)}): this libc makes it "
                            "with newfstatat (glibc before 2.39)") from None
-    for held in range(confine.NOFILE):                  # RLIMIT_NOFILE: no descriptor is above it
+    # RLIMIT_NOFILE stops new descriptors, not old ones. None is above it: the parent starts the
+    # worker with close_fds (it inherits 0, 1 and 2 only), its own dups land on 3 and 4, and the
+    # limit is set (step c) before anything but the standard library is imported.
+    for held in range(confine.NOFILE):
         try:
             mode = os.fstat(held).st_mode
         except OSError:                                 # EBADF: not open

@@ -162,11 +162,12 @@ _NEWER_PATHNAME = _NEWER_METADATA + ["open_tree_attr"]    # every newer metadata
 # their pages are resident is visible to a later process (mincore, or how long a fault takes), so
 # a sealed worker may not query residency (mincore, cachestat) or evict or prefetch pages:
 # madvise with these advice values. Other advice (DONTNEED, FREE, HUGEPAGE: what allocators use)
-# stays. It can still fault pages in by touching them; after each exam the parent evicts every
-# file the exam's workers mapped (`client.evict_page_cache`), so nothing carries to the next one.
+# stays. It can still fault pages in by touching them; after each batch of an exam the parent
+# evicts every file its workers mapped (`client.evict_page_cache`). That narrows the channel but
+# doesn't close it (spec R7: fault-around by a live process can keep a touched page resident).
 _PAGE_CACHE = ["mincore", "cachestat"]
 _MADV_DENIED = {"MADV_WILLNEED": 3, "MADV_COLD": 20, "MADV_PAGEOUT": 21, "MADV_POPULATE_READ": 22,
-                "MADV_POPULATE_WRITE": 23}
+                "MADV_POPULATE_WRITE": 23, "MADV_COLLAPSE": 25}      # COLLAPSE reads a whole huge page in
 _SEAL_RULES = (
     [(_EPERM, name, ()) for name in _PATHNAME + _NEWER_PATHNAME + _PAGE_CACHE]
     # madvise's advice is an int: its low 32 bits, as for prctl, ioctl and fcntl.
@@ -320,6 +321,12 @@ def seal() -> None:
 
     Raises RuntimeError if it fails, or if `confine()` hasn't run (stage 2 alone would leave all
     that stage 1 denies allowed); the process must then not run plugin code.
+
+    The guard checks only that some seccomp filter is in place (PR_GET_SECCOMP is 2). Under a
+    filter inherited from outside (a Docker container's, for one) it is 2 before `confine()` too,
+    so there it can't tell. That is acceptable: the guard catches a caller's mistake, not an
+    attack (no plugin code has run yet), and the worker calls `seal()` only after `confine()` has
+    returned and its stage-1 self-test has passed.
     """
     mode = _libc().prctl(ctypes.c_int(_PR_GET_SECCOMP), ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0),
                          ctypes.c_ulong(0))

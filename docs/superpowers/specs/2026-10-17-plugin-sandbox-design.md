@@ -72,16 +72,23 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
   libraries (libarrow alone is about 11,000 pages) and could fault chosen pages in or push them
   out, for a later worker or process to read the pattern back. The seal narrows this (Confinement,
   step 8): a worker can't query residency (`mincore`, `cachestat`) or evict or prefetch pages
-  (`madvise` with `MADV_PAGEOUT`, `MADV_COLD`, `MADV_WILLNEED`, `MADV_POPULATE_READ` or
-  `MADV_POPULATE_WRITE`), so all it can do is fault pages in by touching them. After each batch
-  of an exam, whatever its outcome and once its workers are gone, and before the next batch's
-  workers start, the parent evicts every file those workers mapped (`POSIX_FADV_DONTNEED`, files
+  (`madvise` with `MADV_PAGEOUT`, `MADV_COLD`, `MADV_WILLNEED`, `MADV_POPULATE_READ`,
+  `MADV_POPULATE_WRITE` or `MADV_COLLAPSE`), so it can only bring pages in, by touching them.
+  `MADV_RANDOM`, `MADV_SEQUENTIAL` and `mlock` stay allowed: they let it touch exactly the pages
+  it chooses (no readahead around them), though they evict nothing. After each batch of an exam,
+  whatever its outcome and once its workers are gone, and before the next batch's workers start,
+  the parent evicts every file those workers mapped (`POSIX_FADV_DONTNEED`, files
   read from `/proc/<pid>/maps`); so does a batch's rerun before it starts. Batch 1's workers have
   streamed the whole holdout before batch 2's start, so without this batch 2's symbols could read
-  other symbols' later bars. What remains: a process running during an exam (a concurrent
-  `lab judge`'s workers) could read residency by fault timing while it runs, which is R6's live
-  overlap; and pages another process keeps mapped (the parent's own numpy and pyarrow, for one)
-  stay resident, which carries nothing from a worker, while other processes add noise.
+  other symbols' later bars. This narrows the channel; it does not close it:
+  - Fault-around: when a live process faults a page of a file, the kernel also maps the nearby
+    pages already in the page cache into it (64 KiB around it by default), and a mapped page
+    survives `POSIX_FADV_DONTNEED`. A process that maps the same libraries and faults near a page
+    a worker touched, the exam's own parent included (it runs numpy and pyarrow too), can keep
+    that page resident past the eviction for a later reader to find.
+  - A process running during an exam (a concurrent `lab judge`'s workers) could read residency by
+    fault timing while it runs, which is R6's live overlap.
+  - Other processes' use of the same files adds noise, which a reader would have to beat.
 
 ## Threat model
 
@@ -589,7 +596,8 @@ Each test is written first and seen failing. Tests that need the kernel features
   what the worker preloaded and print a frame, and importing a module it didn't preload is
   `plugin_error: exception: ModuleNotFoundError`; so is `perp_lab.holdout`, so no token can be
   minted inside a worker. A sealed plugin's `mincore` and its eviction and prefetch `madvise`
-  calls get `EPERM`, while `MADV_DONTNEED` and allocation work. The exam evicts every file a batch's
+  calls get `EPERM` (`MADV_COLLAPSE` too, in the filter), while `MADV_DONTNEED` and allocation work;
+  a worker whose maps can't be read is logged. The exam evicts every file a batch's
   workers mapped once they are closed, passed or failed, before the next batch's first spawn, and
   a rerun starts only once the lost attempt's files are evicted (with the twin and a spy); it does
   so after a real streamed exam with no worker left running; eviction drops a file's pages from

@@ -388,18 +388,20 @@ def test_the_seal_pins_every_rule():
 
 # The page cache of files a worker has mapped (its libraries): what it may not see or steer.
 MADV_DENIED = {"MADV_WILLNEED": 3, "MADV_COLD": 20, "MADV_PAGEOUT": 21, "MADV_POPULATE_READ": 22,
-               "MADV_POPULATE_WRITE": 23}
+               "MADV_POPULATE_WRITE": 23, "MADV_COLLAPSE": 25}
 MADV_ALLOWED = {"MADV_NORMAL": 0, "MADV_RANDOM": 1, "MADV_SEQUENTIAL": 2, "MADV_DONTNEED": 4, "MADV_FREE": 8,
                 "MADV_HUGEPAGE": 14, "MADV_NOHUGEPAGE": 15, "MADV_DONTDUMP": 16, "MADV_DODUMP": 17}
 
 
 def test_the_seal_denies_reading_or_steering_the_page_cache():
-    lib, seal = _scmp(), _filter_bpf(2)
+    lib, seal, stage1 = _scmp(), _filter_bpf(2), _filter_bpf(1)
     arch = lib.seccomp_arch_native()
-    for name in ("mincore", "cachestat"):
-        n = lib.seccomp_syscall_resolve_name(name.encode())
-        assert n >= 0, name
-        assert _run_bpf(seal, arch, n) == EPERM, name
+    assert _run_bpf(seal, arch, lib.seccomp_syscall_resolve_name(b"mincore")) == EPERM
+    cachestat = lib.seccomp_syscall_resolve_name(b"cachestat")
+    if cachestat == -1:                       # newer than this libseccomp: stage 1's ENOSYS answers it
+        assert _run_bpf(stage1, arch, 451) == ENOSYS
+    else:
+        assert _run_bpf(seal, arch, cachestat) == EPERM
     madvise = lib.seccomp_syscall_resolve_name(b"madvise")
     for name, advice in MADV_DENIED.items():
         assert _run_bpf(seal, arch, madvise, (0x7F0000000000, 4096, advice)) == EPERM, name
