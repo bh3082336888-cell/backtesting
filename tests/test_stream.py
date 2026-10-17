@@ -595,6 +595,25 @@ def test_sleeping_in_a_stream_step_fails_the_exam(tmp_path, monkeypatch):
 
 
 @pytest.mark.sandbox
+@pytest.mark.parametrize("step_s", [1, 2])
+def test_a_busy_loop_in_a_stream_step_is_cpu_limit(tmp_path, monkeypatch, step_s):
+    # A step's CPU and wall-clock limits are equal, so a spinning step trips the wall clock first
+    # (with a little less CPU, the time it took to start). It is the plugin's busy loop, not lost
+    # time: cpu_limit, not retried.
+    cfg = sandboxed(market_config(tmp_path), stream_step_s=step_s)
+    started, real = [], client.spawn
+
+    def counting(*a):
+        started.append(1)
+        return real(*a)
+    monkeypatch.setattr(client, "spawn", counting)
+    src = plugin("spinner", 'if ctx["open_time"] >= HOLDOUT_MS:\n            while True:\n                pass')
+    with pytest.raises(PluginError) as e:
+        run_exam(cfg, src, "4h", ["BTCUSDT"], {}, token(tmp_path), SHORT_END)
+    assert e.value.kind == "cpu_limit" and len(started) == 1
+
+
+@pytest.mark.sandbox
 def test_a_forged_signal_is_a_protocol_error(tmp_path):
     cfg = market_config(tmp_path)
     bad = ('{"ok": True, "signal": {"action": "long", "stop": True, "target": None, "has_stop": True, '

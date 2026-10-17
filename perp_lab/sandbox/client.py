@@ -14,7 +14,9 @@ Limits: each request may use `sandbox.task_cpu_s` of the worker's CPU time (read
 /proc/<pid>/stat) and `task_cpu_s * wall_factor` of wall-clock time; a stream step (one `prepare`
 and one decision) may use `sandbox.stream_step_s` of each. Over the CPU limit the worker is killed
 and the request is `PluginError("cpu_limit")`; over the wall-clock limit it is killed and
-`WorkerLost("timeout")`; a worker that goes away is `WorkerLost("died")`. `Batch` and `fresh_run`
+`WorkerLost("timeout")`, unless it had used BUSY_SHARE of its CPU limit by then: that is a busy
+loop the wall clock caught first (a stream step's two limits are equal), so `cpu_limit` too, and
+not retried. A worker that goes away is `WorkerLost("died")`. `Batch` and `fresh_run`
 retry a `WorkerLost` once in a fresh worker; a second is `PluginError(kind)`. Streams are run by
 `stream.py`.
 
@@ -61,6 +63,7 @@ STDERR_TAIL = 2 << 10                   # carried on PluginError.stderr, for the
 READY_S = 120                           # interpreter start, confinement and the numpy/pandas/pyarrow imports
 CLOSE_S = 2                             # after stdin closes, before the kill
 SLICE_S = 0.25                          # how often a waiting request checks the limits
+BUSY_SHARE = 0.9                        # CPU used / CPU limit at the wall-clock limit: a busy loop
 # The only error kinds a worker may report: "exception", and "features" on a run that asked for
 # them. Every other kind (cpu_limit, died, timeout, protocol, mismatch, metadata) is the parent's
 # to decide; a worker claiming one is a protocol violation, so it can't earn itself a retry.
@@ -330,6 +333,9 @@ class Worker:
                 if box and not isinstance(box[0], OSError):
                     raise box[0]        # our request could not be framed
                 if time.monotonic() - t0 > wall_limit:
+                    if used >= BUSY_SHARE * cpu_limit:      # spinning, not stalled: not retried
+                        raise self._fail(PluginError("cpu_limit", "", f"over {wall_limit:g} s of wall-clock "
+                                                                      f"time, {used:.1f} s of it on CPU"))
                     raise self._fail(WorkerLost("timeout", f"over {wall_limit:g} s of wall-clock time"))
         except BaseException:
             self._kill()

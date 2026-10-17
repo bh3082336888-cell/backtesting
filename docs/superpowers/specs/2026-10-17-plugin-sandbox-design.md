@@ -326,9 +326,12 @@ runs, any judgement is reported `in_progress`, unchanged and with nothing spent,
 different families, which would not be in lockstep with each other, never overlap.
 
 Each stream step has its own limit, `sandbox.stream_step_s` of CPU and of wall-clock time,
-tight compared to the batch limit because one step is one `prepare`. A plugin that sleeps or
-spins fails the step, and after the one retry (which restarts the whole batch in fresh workers:
-restarting one symbol would put it behind the others and break lockstep) the exam fails with `plugin_error`.
+tight compared to the batch limit because one step is one `prepare`. A plugin that spins fails
+the step as `cpu_limit`, not retried: with equal limits the wall clock may trip first, so a step
+that has used at least 90% of its CPU limit by then is a busy loop, not lost time. One that
+sleeps fails it as `timeout`, and after the one retry (which restarts the whole batch in fresh
+workers: restarting one symbol would put it behind the others and break lockstep) the exam fails
+with `plugin_error`.
 
 The retry is held to the lost run: it must repeat every decision that run made, symbol by symbol,
 up to the bar where each symbol stopped (the warm-up's decisions, then each step's signal). Any
