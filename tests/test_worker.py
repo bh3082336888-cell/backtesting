@@ -1,6 +1,7 @@
 """The confined worker and its trusted client: batch runs, limits, failures and confinement seen
 through a real worker. Tests marked `sandbox` spawn real workers; the rest run on the twin."""
 
+import ast
 import ctypes
 import errno
 import json
@@ -423,6 +424,103 @@ def test_a_plugin_can_import_only_what_the_worker_preloaded(cfg):
     e = plugin_error(batch_run, cfg, src)
     assert (e.kind, e.type) == ("exception", "ModuleNotFoundError") and "colorsys" in e.message, e.reason()
     assert e.reason().startswith("plugin_error: exception: ModuleNotFoundError: ")
+
+
+@pytest.mark.sandbox
+def test_pandas_methods_that_load_code_lazily_work_in_a_sealed_worker(cfg):
+    src = plugin("lazy", """
+        f = bars[["close", "open"]].head()
+        out = []
+        for fn in (lambda: f.to_dict(), lambda: f.stack().unstack(), lambda: f["close"].to_frame().unstack(),
+                   lambda: pd.crosstab(bars.regime, bars.regime), lambda: f.to_csv()):
+            try:
+                fn()
+                out.append("ok")
+            except Exception as e:
+                out.append(f"{type(e).__name__}:{e}")
+        raise RuntimeError(" ".join(out))""")
+    e = plugin_error(batch_run, cfg, src)
+    assert e.message == "ok ok ok ok ok", e.reason()
+
+
+PRELOADED = """
+import json, sys
+from perp_lab.sandbox import worker
+worker._preload()
+print(json.dumps(sorted(sys.modules)))
+"""
+# Modules numpy and pandas import inside functions that the worker does not preload, each with why
+# a plugin doesn't need it. Anything else such a function imports must be preloaded: a sealed
+# worker can't load it, so the method would fail with ModuleNotFoundError.
+NOT_PRELOADED = {
+    "numpy.core": "deprecated alias of numpy._core",
+    "numpy.f2py": "Fortran wrapper generator",
+    "numpy.matlib": "deprecated matrix library",
+    "numpy.testing": "test helpers",
+    "numpy.lib.recfunctions": "imported only by numpy.testing",
+    "numpy._core._multiarray_tests": "numpy's own tests",
+    "pandas._version": "pd.show_versions()",
+    "pandas.core._numba": "the numba engine (numba is not installed)",
+    "pandas.core.arrays.arrow": "Arrow-backed extension dtypes, from Arrow data a plugin never gets",
+    "pandas.core.arrays.sparse.scipy_sparse": "scipy (not installed)",
+    "pandas.core.interchange": "the dataframe interchange protocol, for other libraries",
+    "pandas.io.clipboard": "clipboard I/O",
+    "pandas.io.formats.excel": "Excel I/O (openpyxl)",
+    "pandas.io.formats.html": "HTML output",
+    "pandas.io.formats.style": "Styler (jinja2)",
+    "pandas.io.formats.xml": "XML output (lxml)",
+    "pandas.io.sas": "SAS file I/O",
+    "pandas.plotting": "plotting (matplotlib)",
+}
+
+
+def _lazy_imports(package: str, loaded: set[str]) -> dict[str, list[str]]:
+    """Modules of `package` imported inside its functions and not in `loaded`: {module: [where]}."""
+    root = Path(__import__(package).__file__).parent
+
+    def is_module(name):
+        base = root.parent.joinpath(*name.split("."))
+        return base.with_suffix(".py").is_file() or (base / "__init__.py").is_file() \
+            or any(base.parent.glob(base.name + ".*.so"))
+    found: dict[str, list[str]] = {}
+    for path in sorted(root.rglob("*.py")):
+        if "tests" in path.relative_to(root).parts:
+            continue
+        here = ".".join(path.relative_to(root.parent).with_suffix("").parts).removesuffix(".__init__")
+        package_of_here = here if path.name == "__init__.py" else here.rpartition(".")[0]
+        for fn in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Import):
+                    targets = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    base = node.module or ""
+                    if node.level:
+                        pkg = package_of_here
+                        for _ in range(node.level - 1):
+                            pkg = pkg.rpartition(".")[0]
+                        base = f"{pkg}.{base}" if base else pkg
+                    targets = [base] + [f"{base}.{a.name}" for a in node.names if is_module(f"{base}.{a.name}")]
+                else:
+                    continue
+                for t in targets:
+                    if t.split(".")[0] == package and t not in loaded:
+                        found.setdefault(t, []).append(f"{path.relative_to(root)}:{node.lineno}")
+    return found
+
+
+@pytest.mark.parametrize("package", ["numpy", "pandas"])
+def test_the_preload_leaves_no_lazy_import_a_plugin_could_hit(package):
+    # A fresh interpreter launched as the worker is: what it holds after _preload() is what a
+    # sealed worker has. (Confinement doesn't change which modules load, so none is needed here.)
+    r = subprocess.run([sys.executable, "-s", "-P", "-c", PRELOADED], env=client.ENV, cwd="/", capture_output=True,
+                       text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    lazy = _lazy_imports(package, set(json.loads(r.stdout)))
+    unexplained = {m: w[:3] for m, w in lazy.items()
+                   if not any(m == x or m.startswith(x + ".") for x in NOT_PRELOADED)}
+    assert not unexplained, unexplained
 
 
 NO_SEAL = """

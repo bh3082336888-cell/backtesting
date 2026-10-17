@@ -225,7 +225,11 @@ library imported. Until step 9 ends, only trusted code has run in it.
 6. Preload and warm-up. Imports numpy, pandas, pyarrow, `perp_lab.strategy`,
    `perp_lab.indicators` and `perp_lab.engine.backtest`; numpy's public submodules that numpy 2
    otherwise loads on first use (`numpy.rec`, which pandas reads in `isna`, and `char`,
-   `ctypeslib`, `fft`, `polynomial`, `strings`); and `socket`, for the self-test. Then it warms
+   `ctypeslib`, `fft`, `polynomial`, `strings`); the pandas modules pandas imports inside
+   methods a plugin may call (`to_dict`; `stack`, `unstack` and `crosstab`; `to_csv`); and
+   `socket`, for the self-test. A test scans numpy and pandas for any other module their
+   functions import that the preload leaves out, each exception listed with its reason (plotting,
+   optional-dependency I/O, test helpers), so an upgrade can't add one silently. Then it warms
    up the lazy paths it takes later, one comment each in `worker.py`: an Arrow decode of a small
    frame shaped like bars (a UTC index, int, float and string columns), which loads pyarrow's
    conversion and timezone code, and one `repr` of a DataFrame, which loads pandas' formatter (a

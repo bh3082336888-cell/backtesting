@@ -95,6 +95,11 @@ def _preload():
     import numpy.rec  # noqa: F401
     import numpy.strings  # noqa: F401
     import pandas as pd
+    # pandas imports these inside methods a plugin may call: DataFrame.to_dict; stack, unstack and
+    # crosstab; to_csv (to a buffer). tests/test_worker.py scans numpy and pandas for any other.
+    import pandas.core.methods.to_dict  # noqa: F401
+    import pandas.core.reshape.reshape  # noqa: F401
+    import pandas.io.formats.csvs  # noqa: F401
 
     import perp_lab.engine.backtest  # noqa: F401
     import perp_lab.indicators  # noqa: F401
