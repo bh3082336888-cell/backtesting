@@ -84,6 +84,32 @@ def printable(s):
     return all(" " <= c <= "~" for c in s)
 
 
+@pytest.fixture
+def spawns(monkeypatch):
+    """Counts the workers `client.spawn` starts during the test."""
+    real, started = client.spawn, []
+
+    def counting(*a):
+        started.append(1)
+        return real(*a)
+    monkeypatch.setattr(client, "spawn", counting)
+    return started
+
+
+def forging(frame: str, then: str = "time.sleep(30)") -> str:
+    """A prepare() body that writes `frame` (a bytes expression) to the protocol descriptor, fd 4,
+    which a plugin can always find, then does `then`."""
+    return f"""
+        import json, struct
+        os.write(4, {frame})
+        {then}"""
+
+
+def header(obj: str) -> str:
+    """A whole frame with no sections, its header the Python expression `obj`."""
+    return f'(lambda h: struct.pack(">I", len(h)) + h)(json.dumps({obj}).encode())'
+
+
 @pytest.mark.sandbox
 @pytest.mark.parametrize("name", REAL_PLUGINS)
 def test_sandboxed_batch_equals_in_process(cfg, name):
@@ -151,6 +177,61 @@ def test_os_exit_is_retried_once_then_died(cfg, monkeypatch, tmp_path):
     assert b"about to exit" in e.stderr and b"\x1b" not in e.stderr
     files = sorted((tmp_path / "err").glob("BTCUSDT-*.txt"))
     assert len(files) == 2 and all(b"about to exit" in f.read_bytes() for f in files)
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("value", ["10 ** 400", "float('nan')", "float('inf')"])
+def test_a_fingerprint_that_is_not_a_finite_number_is_a_protocol_error(cfg, value):
+    # A well-formed run reply (no decisions) whose only fault is the final equity.
+    empty = [{"name": k, "dtype": d, "n": 0} for k, d in (("i", "<i8"), ("action", "<i1"), ("stop", "<f8"),
+                                                         ("target", "<f8"), ("has_stop", "<i1"), ("has_target", "<i1"))]
+    src = plugin("fp", forging(header(f'{{"ok": True, "fingerprint": [0, {value}], "features": None, '
+                                      f'"sections": {empty!r}}}')))
+    e = plugin_error(batch_run, cfg, src)
+    assert e.kind == "protocol" and printable(e.message)
+
+
+@pytest.mark.sandbox
+def test_a_protocol_error_from_the_reader_is_cut_to_printable_ascii(cfg):
+    src = plugin("dtype", forging(header('{"ok": True, "sections": [{"name": "a", "dtype": "\\u00e9\\x1b" * 1500, '
+                                        '"n": 1}]}')))
+    e = plugin_error(batch_run, cfg, src)
+    assert e.kind == "protocol" and "dtype" in e.message
+    assert printable(e.message) and len(e.message) <= 200
+    assert printable(str(e)) and len(str(e)) <= 300
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("kind", ["cpu_limit", "died", "timeout", "protocol", "mismatch", "metadata", "features",
+                                  "bogus"])
+def test_a_worker_cannot_claim_a_parent_only_error(cfg, spawns, kind):
+    # Only "exception" (and "features" when features were asked for) may come from a worker;
+    # claiming "timeout" or "died" must not earn a retry.
+    src = plugin("claims", forging(header(f'{{"error": {{"kind": "{kind}", "type": "X", "message": "forged"}}, '
+                                          f'"sections": []}}')))
+    e = plugin_error(batch_run, cfg, src)
+    assert e.kind == "protocol" and len(spawns) == 1
+
+
+@pytest.mark.sandbox
+def test_a_non_numeric_feature_is_a_features_error(cfg):
+    src = plugin("objfeat", 'return bars[[]].assign(s="x")')
+    e = plugin_error(client.fresh_run, cfg, src, "X", "1h", make_bars(n=50), {}, EngineParams(), features=True)
+    assert e.kind == "features" and "numeric" in e.message
+
+
+@pytest.mark.sandbox
+def test_half_a_frame_then_exit_is_retried_then_died(cfg, spawns):
+    src = plugin("half", forging('struct.pack(">I", 100) + b\'{"ok": tr\'', then="os._exit(3)"))
+    e = plugin_error(batch_run, cfg, src)
+    assert e.kind == "died" and len(spawns) == 2
+
+
+@pytest.mark.sandbox
+def test_half_a_frame_from_a_live_worker_is_a_protocol_error(cfg, spawns):
+    src = plugin("halfalive", forging('struct.pack(">I", 100) + b\'{"ok": tr\'', then="os.close(4); time.sleep(30)"))
+    e = plugin_error(batch_run, cfg, src)
+    assert e.kind == "protocol" and len(spawns) == 1
 
 
 @pytest.mark.sandbox

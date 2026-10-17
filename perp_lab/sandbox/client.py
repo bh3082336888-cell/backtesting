@@ -57,7 +57,10 @@ STDERR_TAIL = 2 << 10                   # carried on PluginError.stderr, for the
 READY_S = 120                           # interpreter start, confinement and the numpy/pandas/pyarrow imports
 CLOSE_S = 2                             # after stdin closes, before the kill
 SLICE_S = 0.25                          # how often a waiting request checks the limits
-WORKER_KINDS = ("exception", "features", "metadata", "protocol")   # the errors a worker may report
+# The only error kinds a worker may report: "exception", and "features" on a run that asked for
+# them. Every other kind (cpu_limit, died, timeout, protocol, mismatch, metadata) is the parent's
+# to decide; a worker claiming one is a protocol violation, so it can't earn itself a retry.
+WORKER_KINDS = ("exception", "features")
 _DECISION_KEYS = ("i", "action", "stop", "target", "has_stop", "has_target")
 _META = ("params", "grid", "timeframes")
 _CLK_TCK = os.sysconf("SC_CLK_TCK")
@@ -72,12 +75,36 @@ class RunOutput:
 
 # ---------------------------------------------------------------- the worker's threads
 
+class _Tracked:
+    """The worker's stdout, noting whether a read came back short (end of stream)."""
+
+    def __init__(self, stream):
+        self.stream, self.ended = stream, False
+
+    def read(self, n: int) -> bytes:
+        b = self.stream.read(n)
+        if len(b) < n:
+            self.ended = True
+        return b
+
+
+class _Truncated(Exception):
+    """The stream ended inside a frame: the worker died mid-reply, or closed its descriptor."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
 def _read_frames(stream, frames: queue.Queue, max_bytes: int, stop: threading.Event) -> None:
     """Puts each reply frame, or the exception that ended the stream, on `frames` (one at a time)."""
+    tracked = _Tracked(stream)
     while True:
         try:
-            item = read_frame(stream, max_bytes=max_bytes, from_worker=True)
-        except BaseException as e:       # EOFError, ProtocolError, or the pipe closed under us
+            item = read_frame(tracked, max_bytes=max_bytes, from_worker=True)
+        except ProtocolError as e:
+            item = _Truncated(e.message) if tracked.ended else e
+        except BaseException as e:       # EOFError, or the pipe closed under us
             item = e
         while not stop.is_set():
             try:
@@ -198,6 +225,18 @@ class Worker:
             self._finalizer()
             self._drainer.join(timeout=2)   # so the stderr tail is complete
 
+    def _stream_failure(self, item: BaseException) -> Exception:
+        """What the end of the reply stream means. A stream cut mid-frame by a worker that has
+        exited is the worker dying (retried); cut by a live one, a protocol violation."""
+        if isinstance(item, _Truncated):
+            try:
+                self._proc.wait(timeout=1)      # its pipe closes a moment before it is reaped
+            except subprocess.TimeoutExpired:
+                return self._fail(ProtocolError(ascii_text(item.message)))
+        elif isinstance(item, ProtocolError):   # its message quotes what the worker sent
+            return self._fail(ProtocolError(ascii_text(item.message)))
+        return self._fail(WorkerLost("died", f"worker exited with code {self._proc.poll()}"))
+
     def _fail(self, exc: Exception) -> Exception:
         """Kill the worker; the exception, carrying the stderr tail, for the caller to raise."""
         self._kill()
@@ -255,10 +294,10 @@ class Worker:
             early = self._frames.get_nowait()
         except queue.Empty:
             early = None
-        if isinstance(early, (EOFError, OSError, ValueError)):
-            raise self._fail(WorkerLost("died", f"worker exited with code {self._proc.poll()}"))
-        if early is not None:
+        if isinstance(early, tuple):
             raise self._fail(ProtocolError("worker sent a frame outside a request"))
+        if early is not None:
+            raise self._stream_failure(early)
 
         cpu0 = self._cpu() or 0.0
         t0 = time.monotonic()
@@ -290,16 +329,15 @@ class Worker:
         finally:
             self.last_cpu_s = used
 
-        if isinstance(item, ProtocolError):
-            raise self._fail(item)
         if isinstance(item, BaseException):
-            raise self._fail(WorkerLost("died", f"worker exited with code {self._proc.poll()}"))
+            raise self._stream_failure(item)
         self._writer.join(timeout=5)
         if self._writer.is_alive() or box:
             raise self._fail(ProtocolError("worker replied before reading its request"))
         reply, secs = item
         if "error" in reply:
-            e = reply_error(reply["error"], self._stderr_tail())
+            features = header.get("op") == "run" and header.get("features") is True
+            e = reply_error(reply["error"], self._stderr_tail(), features=features)
             raise self._fail(e) if e.kind == "protocol" else e
         if reply.get("ok") is not True:
             raise self._fail(ProtocolError("reply is neither ok nor an error"))
@@ -326,7 +364,9 @@ class Worker:
         try:
             return run_output(reply, secs, self._index if k is None else self._index[:k], features)
         except ProtocolError as e:
-            raise self._fail(e) from None
+            raise self._fail(ProtocolError(ascii_text(e.message))) from None
+        except Exception as e:          # whatever the reply made us raise, it is the worker's doing
+            raise self._fail(ProtocolError(f"malformed run reply ({type(e).__name__})")) from None
 
 
 # ---------------------------------------------------------------- what crosses the pipe
@@ -345,6 +385,12 @@ def run_output(reply: dict, sections: dict, index: pd.Index, features: bool) -> 
     if not (isinstance(fp, list) and len(fp) == 2 and type(fp[0]) is int and fp[0] >= 0
             and type(fp[1]) in (int, float)):
         raise ProtocolError("malformed fingerprint")
+    try:
+        equity = float(fp[1])
+    except OverflowError:
+        raise ProtocolError("fingerprint equity is out of range") from None
+    if not math.isfinite(equity):
+        raise ProtocolError("fingerprint equity is not a finite number")
     names = reply.get("features")
     expected = set(_DECISION_KEYS)
     if features:
@@ -366,16 +412,20 @@ def run_output(reply: dict, sections: dict, index: pd.Index, features: bool) -> 
             if a.dtype != np.dtype("<f8") or len(a) != n:
                 raise ProtocolError(f"feature {j} must be {n} float64 values")
         feats = pd.DataFrame({name: sections[f"f{j}"] for j, name in enumerate(names)}, index=index, copy=True)
-    return RunOutput(decisions, (fp[0], float(fp[1])), feats)
+    return RunOutput(decisions, (fp[0], equity), feats)
 
 
-def reply_error(err, stderr: bytes) -> PluginError:
-    """A worker's error reply as a PluginError, its text cut to printable ASCII again here."""
-    if not isinstance(err, dict) or err.get("kind") not in WORKER_KINDS:
+def reply_error(err, stderr: bytes, *, features: bool = False) -> PluginError:
+    """A worker's error reply as a PluginError, its text cut to printable ASCII again here. A kind
+    the worker may not report (see WORKER_KINDS) is a ProtocolError. `features`: the request was a
+    run that asked for features."""
+    if not isinstance(err, dict):
         return ProtocolError("malformed error reply", stderr)
-    if err["kind"] == "protocol":
-        return ProtocolError(ascii_text(err.get("message")), stderr)
-    return PluginError(err["kind"], ascii_text(err.get("type")), ascii_text(err.get("message")), stderr)
+    kind = err.get("kind")
+    if kind not in (WORKER_KINDS if features else WORKER_KINDS[:1]):
+        return ProtocolError(ascii_text(f"worker reported a {ascii_text(kind, 40) or '?'} error: "
+                                        f"{ascii_text(err.get('message'))}"), stderr)
+    return PluginError(kind, ascii_text(err.get("type")), ascii_text(err.get("message")), stderr)
 
 
 def _canon(value) -> str | None:

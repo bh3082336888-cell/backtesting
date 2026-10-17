@@ -62,13 +62,13 @@ class InProcessWorker:
     def stderr(self) -> bytes:
         return ascii_bytes(self._out.getvalue().encode("utf-8", "replace")[:client.STDERR_CAP])
 
-    def _call(self, fn, *args):
+    def _call(self, fn, *args, features=False):
         t0 = time.process_time()
         try:
             with _CAPTURE, contextlib.redirect_stdout(self._out), contextlib.redirect_stderr(self._out):
                 return fn(*args)
         except (Exception, SystemExit) as e:
-            raise client.reply_error(self._session.error_reply(e)["error"], self.stderr) from e
+            raise client.reply_error(self._session.error_reply(e)["error"], self.stderr, features=features) from e
         finally:
             self.last_cpu_s = time.process_time() - t0
 
@@ -82,7 +82,7 @@ class InProcessWorker:
         req = json.loads(json.dumps(client.run_request(params, ep, k=k, start_i=start_i, random=random,
                                                        features=features), allow_nan=True))
         result = self._call(self._s.run, req["params"], req["ep"], req["k"], req["start_i"], req["random"],
-                            req["features"])
+                            req["features"], features=req["features"])
         reply, sections = self._session.run_reply(result, req["features"])
         reply = json.loads(json.dumps(reply, allow_nan=True))
         return client.run_output(reply, sections, self._index if k is None else self._index[:k], features)

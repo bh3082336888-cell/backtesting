@@ -42,12 +42,13 @@ def load_plugin(name: str, text: bytes) -> type[Strategy]:
     return cls
 
 
-def _json(value, what: str):
-    """The value as JSON gives it back, which is what the parent sees; PluginError if it isn't JSON."""
+def _json(value):
+    """The value as JSON gives it back, which is what the parent sees. None if it isn't JSON: the
+    source's params, grid and timeframes are never null, so the parent's metadata check fails."""
     try:
         return json.loads(json.dumps(value, allow_nan=True))
     except (TypeError, ValueError, RecursionError):
-        raise PluginError("metadata", "", f"{what} is not a JSON value") from None
+        return None
 
 
 def _features(feats: pd.DataFrame, index: pd.Index) -> tuple[list[str], list[np.ndarray]]:
@@ -74,7 +75,7 @@ class Session:
     def load(self, name: str, text: bytes) -> dict:
         """Load the plugin; its params, grid and timeframes at runtime, for the parent to compare."""
         self.cls = load_plugin(name, text)
-        return {k: _json(getattr(self.cls, k), k) for k in _META}
+        return {k: _json(getattr(self.cls, k)) for k in _META}
 
     def bars(self, symbol: str, tf: str, df: pd.DataFrame) -> int:
         """Replace the bars this worker holds."""
