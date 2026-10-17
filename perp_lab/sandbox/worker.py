@@ -10,16 +10,24 @@ Order, which is the point of this module:
      is SIGKILL (seccomp later stops plugin code from clearing it), and a worker whose parent
      is already gone (getppid() is not `--parent-pid`) exits at once. EOF reaches only an idle
      worker; this reaches a busy one, which may hold holdout bars;
-  c. confine this process (`confine.confine`), while it has one thread and has imported nothing
-     but the standard library and `perp_lab.sandbox.confine`;
-  d. import `session` (numpy, pandas, pyarrow, the engine), whose threads inherit the confinement;
-  e. self-test: opening the deny-probe (the parent's config file), creating a socket, fork and
-     shmget must each fail;
-  f. report ready with the Landlock ABI;
-  g. serve requests until EOF on the protocol descriptor, then exit 0 at once (no wait for
+  c. confine this process (`confine.confine`, stage 1), while it has one thread and has imported
+     nothing but the standard library and `perp_lab.sandbox.confine`;
+  d. preload: import `session` (numpy, pandas, pyarrow, the engine), whose threads inherit the
+     confinement, and every module a plugin may import; then warm up the lazy paths this worker
+     takes later (`_preload`);
+  e. self-test: opening the deny-probe (the parent's config file) must fail with EACCES
+     (Landlock), and creating a socket, fork and shmget must each fail;
+  f. seal (`confine.seal`, stage 2): from here on no path resolves, so the worker opens, stats and
+     reads no file and follows no symlink (that would update access times), and can load no
+     module: whatever it needs was loaded in (d);
+  g. self-test of the seal: opening and stat-ing a file on the allowlist and readlink on the
+     interpreter's link must fail with EPERM, and fstat on a protocol pipe must work (glibc before
+     2.39 makes fstat with newfstatat, which the seal denies: such a host is unavailable);
+  h. report ready with the Landlock ABI;
+  i. serve requests until EOF on the protocol descriptor, then exit 0 at once (no wait for
      threads a plugin may have started).
 
-A failure in a-e is the host's, not the plugin's: an "unavailable" error, exit 3. Until (g) no
+A failure in a-g is the host's, not the plugin's: an "unavailable" error, exit 3. Until (i) no
 plugin byte has been read. `session` is the only module that executes plugin code.
 """
 
@@ -65,14 +73,55 @@ def _follow_parent(parent_pid: int) -> None:
         os._exit(ORPHANED_EXIT)
 
 
+def _preload():
+    """Imports, before the seal, every module a plugin may import and every one this worker needs
+    once sealed (a sealed worker can't open a file, so it can load nothing), then warms up the lazy
+    paths it takes after the seal. Returns `session`.
+
+    A plugin may import math, numpy, pandas, perp_lab.strategy, perp_lab.indicators and
+    perp_lab.engine.backtest, and whatever these load; nothing else (ModuleNotFoundError).
+    """
+    import math  # noqa: F401
+    import socket  # noqa: F401  (the self-test)
+
+    import numpy as np
+    # numpy 2 loads these public submodules on first use (np.rec, np.fft, ...), which a sealed
+    # worker can't: pandas itself reads np.rec in isna(), and the rest are numpy's numeric API a
+    # plugin may use. Not loaded: np.testing, np.f2py and the deprecated np.matlib and np.core.
+    import numpy.char  # noqa: F401
+    import numpy.ctypeslib  # noqa: F401
+    import numpy.fft  # noqa: F401
+    import numpy.polynomial  # noqa: F401
+    import numpy.rec  # noqa: F401
+    import numpy.strings  # noqa: F401
+    import pandas as pd
+
+    import perp_lab.engine.backtest  # noqa: F401
+    import perp_lab.indicators  # noqa: F401
+    import perp_lab.strategy  # noqa: F401
+    from perp_lab.sandbox import errors, protocol, session  # noqa: F401  (session: pyarrow, decisions)
+
+    # Warm-up, one item per lazy path the worker takes after the seal:
+    # - decoding bars (`protocol.table_frame`): on its first decode of a UTC index and of int,
+    #   float and string columns, pyarrow imports its pandas conversion and timezone code.
+    t = 1_700_000_000_000 + 3_600_000 * np.arange(3)
+    bars = pd.DataFrame({"open_time": t, "close": [1.0, 2.0, 3.0], "regime": ["ranging", "trending", "ranging"]},
+                        index=pd.to_datetime(t, unit="ms", utc=True))
+    protocol.table_frame(protocol.table_bytes(bars))
+    # - printing a frame (a plugin's print, for its stderr): pandas imports its string formatter
+    #   on the first repr of a DataFrame.
+    repr(bars)
+    return session
+
+
 def _self_test(deny_probe: str) -> None:
-    """Each of these must fail now; if one works, confinement did not take."""
+    """Stage 1: each of these must fail now; if one works, confinement did not take."""
     try:
         open(deny_probe, "rb").close()
-    except PermissionError:
-        pass
     except OSError as e:                      # e.g. ENOENT would prove nothing
-        raise RuntimeError(f"deny-probe {deny_probe}: expected EACCES, got {errno.errorcode.get(e.errno, e.errno)}")
+        if e.errno != errno.EACCES:
+            raise RuntimeError(f"deny-probe {deny_probe}: expected EACCES, got "
+                               f"{errno.errorcode.get(e.errno, e.errno)}") from None
     else:
         raise RuntimeError(f"deny-probe {deny_probe} was readable")
     import socket
@@ -98,6 +147,27 @@ def _self_test(deny_probe: str) -> None:
         raise RuntimeError("shmget() worked")
 
 
+def _sealed_test(path: str, link: str, fd: int) -> None:
+    """Stage 2: open and stat of `path` (a file on the allowlist) and readlink of `link` must each
+    fail with EPERM, which only the seal answers (otherwise they work, or give ENOENT, EINVAL or
+    EACCES); fstat on `fd`, a descriptor the worker holds, must still work."""
+    for what, call in (("open", lambda: os.close(os.open(path, os.O_RDONLY))), ("stat", lambda: os.stat(path)),
+                       ("readlink", lambda: os.readlink(link))):
+        try:
+            call()
+        except OSError as e:
+            if e.errno != errno.EPERM:
+                raise RuntimeError(f"sealed {what}: expected EPERM, got {errno.errorcode.get(e.errno, e.errno)}") \
+                    from None
+        else:
+            raise RuntimeError(f"sealed {what} worked")
+    try:
+        os.fstat(fd)
+    except OSError as e:
+        raise RuntimeError(f"fstat failed once sealed ({errno.errorcode.get(e.errno, e.errno)}): this libc makes it "
+                           "with newfstatat (glibc before 2.39)") from None
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     # a. The protocol moves to private descriptors; fds 0 and 1 become stderr.
@@ -114,13 +184,17 @@ def main(argv: list[str] | None = None) -> int:
         deny_probe, memory_mb, cpu_s, parent_pid = _args(argv)                       # b
         _follow_parent(parent_pid)
         abi = confine.confine(memory_mb=memory_mb, cpu_s=cpu_s, read_paths=confine.allowlist())  # c
-        from perp_lab.sandbox import session                                         # d
+        session = _preload()                                                         # d
         _self_test(deny_probe)                                                       # e
+        allowlisted = sys.modules["numpy"].__file__
+        link = os.path.join(sys.base_prefix, "bin", "python3")      # a symlink (under /usr for a system Python)
+        confine.seal()                                                               # f
+        _sealed_test(allowlisted, link, proto_out)                                   # g
     except BaseException as e:
         _send(out, {"error": {"kind": "unavailable", "type": type(e).__name__, "message": str(e)[:1000]}})
         return UNAVAILABLE_EXIT
-    _send(out, {"ok": True, "ready": True, "abi": abi})                              # f
-    return _serve(inp, out, memory_mb << 20, session)                                # g
+    _send(out, {"ok": True, "ready": True, "abi": abi})                              # h
+    return _serve(inp, out, memory_mb << 20, session)                                # i
 
 
 def _handle(session, sess, header: dict, sections: dict) -> tuple[dict, dict]:

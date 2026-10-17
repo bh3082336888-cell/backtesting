@@ -22,7 +22,14 @@ holds there:
       source without executing it.
     - Features are numeric or bool columns.
     - A plugin gets only the bars it is sent; it can't see later ones.
-    - Imports are limited to the read allowlist.
+    - Imports: only the modules the worker loads before it seals itself, which
+      are math, numpy (with its public submodules, but not numpy.testing or
+      numpy.f2py), pandas, perp_lab.strategy, perp_lab.indicators and
+      perp_lab.engine.backtest, and whatever these load in turn (much of the
+      standard library: json, re, datetime, ...). Anything else, even if it
+      is on the read allowlist, raises ModuleNotFoundError: a sealed worker
+      opens no file, so it loads no module, reads no data and knows no named
+      time zone but UTC.
 """
 
 from __future__ import annotations

@@ -19,10 +19,13 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
 
 ### What this guarantees
 
-- **G1 Isolation.** A plugin's process can read only the Python installation (everything under
-  the interpreter's prefixes: for a system Python, all of `/usr`), site-packages and the
-  `perp_lab/` package source, plus the bars and parameters it is sent. It cannot write files
-  or change any file's metadata (mode, owner, timestamps, extended attributes, inode flags), open
+- **G1 Isolation.** A plugin's process loads its modules from the Python installation (everything
+  under the interpreter's prefixes: for a system Python, all of `/usr`), site-packages and the
+  `perp_lab/` package source, then seals itself before any plugin byte arrives. Once sealed it
+  can't resolve any path at all: it opens, stats, lists, reads and writes no file and follows or
+  reads no symlink, and it gets everything it works on (the plugin's source, bars, parameters)
+  through its pipe. So it can't change any file's metadata either (mode, owner, timestamps,
+  access times of files and symlinks included, extended attributes, inode flags). It cannot open
   sockets, start processes, share memory with another process, or signal, trace, or change the
   limits or scheduling of any process outside itself. It inherits no environment variables, so no
   secrets.
@@ -53,9 +56,12 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
 - **R3 Waste.** A plugin can burn CPU and memory up to its limits, or crash. Both end in a
   recorded kill.
 - **R4 Kernel bugs.** Confinement rests on Landlock and seccomp. A kernel exploit escapes it.
-- **R5 File metadata.** `stat()` metadata (size, modification time) of files outside the
-  allowlist stays *readable* to a plugin: Landlock has no right for it and seccomp can't filter by
-  path. Changing metadata is denied (step 5 below), and file contents stay unreadable.
+- **R5 File metadata.** Closed for plugins, on both sides. A sealed worker can't `stat()`
+  anything (Confinement, step 8), so it reads no file's size or times, and it changes no file's
+  metadata, access times included (steps 5 and 8). Landlock has no right for `stat()` and seccomp
+  can't filter by path, which is why the seal denies every call that resolves a path rather than
+  some paths. What remains is outside the sandbox: any other process of this user can `stat()`
+  `data/`, which 3b-2 must deny its proposer (see the end).
 - **R6 Isolation across processes.** The wave and lockstep isolation holds within one lookahead
   check or one exam. It does not hold across lookahead checks that run at the same time in
   separate processes, or between such a check and an exam (through CPU timing). Two exams never
@@ -75,11 +81,20 @@ log or the verdicts, or patch the engine in-process to report better numbers. On
 could also reach `/var/run/docker.sock`, which is root on the host, because the user is in the
 `docker` group.
 
+Access times, found after the first build: on a `relatime` mount (this machine's `/`), reading a
+file updates its access time when that is a day old, and so does following or reading a symlink.
+Reading the allowlist was allowed, so a worker could mark about a bit per allowlisted file or
+symlink per day (`/usr` alone has hundreds of thousands), and a later worker, such as a later
+family's exam, or any process could read the marks back with `stat()`: holdout data carried from
+one exam to the next. A Landlock layer that denies every read does not close it, because resolving
+a path follows its symlinks, and updates their access times, before Landlock refuses the open.
+Hence the seal (Confinement, step 8): once its modules are loaded, a worker resolves no path.
+
 ## Decisions
 
 | Question | Decision |
 |---|---|
-| Confinement ★ | Landlock (ABI ≥ 6) plus seccomp plus rlimits plus `no_new_privs`, applied by each worker process to itself while it is still single-threaded, before any plugin byte is read. Linux only. No new pip dependency (ctypes; libseccomp comes from the OS). |
+| Confinement ★ | Landlock (ABI ≥ 6) plus seccomp plus rlimits plus `no_new_privs`, applied by each worker process to itself while it is still single-threaded; then, once its modules are loaded and before any plugin byte is read, a second seccomp filter seals it: no path resolves. Linux only. No new pip dependency (ctypes; libseccomp comes from the OS). |
 | No sandbox available | Fail closed: plugin code does not run. No CLI flag bypasses it. Running a plugin in-process exists only as a test fixture under `tests/`. |
 | What crosses the boundary | In: plugin bytes, bars, params, engine params. Out: decisions, plus features for the lookahead check. Nothing from a worker is ever unpickled. |
 | Who computes results | The trusted engine, replaying the decisions. |
@@ -111,10 +126,12 @@ Rejected:
 
 New package `perp_lab/sandbox/`, one job per file:
 
-- `confine.py`: applies confinement to the calling process; `probe()` reports whether this
-  machine can (Landlock ABI, libseccomp present) without spawning anything.
+- `confine.py`: applies confinement to the calling process (`confine()`, then `seal()`);
+  `probe()` reports whether this machine can (Landlock ABI, libseccomp present) without spawning
+  anything.
 - `worker.py`: entry point `python -s -P -m perp_lab.sandbox.worker`. Confines itself, imports
-  `session`, runs its self-test and serves requests.
+  `session` and everything a plugin may import, seals itself, runs its self-tests and serves
+  requests.
 - `session.py`: the **only** module that executes plugin code (split from `worker.py`, which
   must confine itself before it imports numpy).
 - `protocol.py`: framing and validation. The parent-side reader is the trust boundary.
@@ -138,7 +155,7 @@ Landlock and seccomp confine the calling thread, and a thread that already exist
 unconfined: plugin code could reach it through ctypes. Importing numpy starts threads (24 on this
 machine without the thread-count variables; pyarrow's allocator adds one even with them). So the
 worker confines itself **first**, while it is the only thread, with nothing but the standard
-library imported. Until step 7 ends, only trusted code has run in it.
+library imported. Until step 9 ends, only trusted code has run in it.
 
 1. Checks that `/proc/self/task` has exactly one entry; otherwise it exits with an
    infrastructure error.
@@ -154,7 +171,7 @@ library imported. Until step 7 ends, only trusted code has run in it.
    read-dir beneath the interpreter's prefixes (`sys.base_prefix` and `sys.prefix`),
    site-packages and the `perp_lab/` package directory. Nothing else is readable: not `data/`,
    `runs/`, `config/`, `strategies/`, `.git`, `$HOME`, `/tmp`, `/run` or `/var`. The builder may
-   add read-only system paths that numpy, pandas or pyarrow need at import or at runtime (e.g.
+   add read-only system paths that numpy, pandas or pyarrow need at import or in the warm-up (e.g.
    `/usr/share/zoneinfo`, parts of `/sys/devices/system/cpu`, the worker's own `/proc` entry)
    and must list each one with its reason in the module. Where the ABI offers thread
    synchronisation (`LANDLOCK_RESTRICT_SELF_TSYNC`, ABI 8), it is used as well.
@@ -205,11 +222,43 @@ library imported. Until step 7 ends, only trusted code has run in it.
    A syscall through a non-native ABI (i386, x32) kills the process (`SCMP_ACT_KILL_PROCESS`). Sockets are denied outright
    because Landlock's network rules cover TCP only: UDP and existing UNIX sockets such as the
    Docker socket are outside them.
-6. Imports numpy, pandas, pyarrow, `perp_lab.strategy`, `perp_lab.indicators` and
-   `perp_lab.engine.backtest`. Threads these start inherit the confinement.
-7. Self-test: opening a file under `data/`, creating a socket, `os.fork()` and `shmget` must each
-   fail. The worker then reports `ready` with its Landlock ABI. A failure here is an
-   infrastructure error.
+6. Preload and warm-up. Imports numpy, pandas, pyarrow, `perp_lab.strategy`,
+   `perp_lab.indicators` and `perp_lab.engine.backtest`; numpy's public submodules that numpy 2
+   otherwise loads on first use (`numpy.rec`, which pandas reads in `isna`, and `char`,
+   `ctypeslib`, `fft`, `polynomial`, `strings`); and `socket`, for the self-test. Then it warms
+   up the lazy paths it takes later, one comment each in `worker.py`: an Arrow decode of a small
+   frame shaped like bars (a UTC index, int, float and string columns), which loads pyarrow's
+   conversion and timezone code, and one `repr` of a DataFrame, which loads pandas' formatter (a
+   plugin's `print`). Threads these start inherit the confinement. These modules, and whatever
+   they load, are all a plugin can import: once sealed, nothing more can be loaded
+   (`ModuleNotFoundError`).
+7. Self-test, stage 1: opening the parent's config file must fail with `EACCES` (Landlock), and
+   creating a socket, `os.fork()` and `shmget` must each fail.
+8. Seal: a second seccomp filter, with filter thread synchronisation on (so it reaches the
+   threads numpy and pyarrow started), the same kill-process on a non-native ABI, and default
+   allow. Every syscall that resolves a pathname returns `EPERM`: `open`, `openat`, `openat2`,
+   `creat`, `stat`, `lstat`, `newfstatat`, `statx`, `statfs`, `access`, `faccessat`,
+   `faccessat2`, `readlink`, `readlinkat`, `chdir`, `truncate`; every call that makes, removes,
+   renames or links a name (`mkdir`, `mknod`, `rmdir`, `unlink`, `rename`, `link`, `symlink` and
+   their `*at` forms, `renameat2`); `execve`, `execveat`, `uselib`, `acct`, `swapon`, `swapoff`,
+   `quotactl`, `chroot`, `pivot_root`, `mount`, `umount2`, `open_tree`, `move_mount`, `fsopen`,
+   `fsconfig`, `fspick`, `mount_setattr`, `inotify_add_watch`, `fanotify_mark`,
+   `name_to_handle_at`, `open_by_handle_at`; and the path forms of the metadata and
+   extended-attribute calls (`chmod`, `fchmodat`, `fchmodat2`, `chown`, `lchown`, `fchownat`,
+   `utime`, `utimes`, `utimensat`, `futimesat`, `getxattr`, `setxattr`, `listxattr`,
+   `removexattr`, their `l*` forms and the newer `*xattrat` ones). Names a libseccomp can't
+   resolve on this architecture are skipped, as in step 5; those newer than it already get
+   `ENOSYS` from step 5. A Landlock layer would not do: resolving a path follows its symlinks,
+   which updates their access times, before Landlock refuses anything. Once sealed the worker
+   opens, stats and reads no file, follows no symlink and names no path; it holds its pipes and
+   what it has loaded, and gets the rest through the pipe. `fstat` on a descriptor keeps working
+   where libc makes it with the `fstat` syscall (glibc 2.39 and later); older glibc makes it with
+   `newfstatat`, so step 9 fails there and the sandbox is unavailable.
+9. Self-test, stage 2: opening and stat-ing a file on the allowlist (numpy's `__init__.py`) and
+   `readlink` on the interpreter's `python3` link (under `/usr` for a system Python) must each
+   fail with `EPERM`, which only the seal answers, and `fstat` on a protocol pipe must work. The
+   worker then reports `ready` with its Landlock ABI. A failure in steps 1–9 is an infrastructure
+   error.
 
 The parent launches the worker as `python -s -P -m perp_lab.sandbox.worker`, not `-I`: `-I`
 ignores every `PYTHON*` variable, so `PYTHONHASHSEED` would have no effect and fresh workers in
@@ -220,8 +269,9 @@ stdin and stdout; stderr into a buffer capped at 64 KiB. After `ready`, the work
 stderr, so a plugin's `print` cannot corrupt the framing. (A plugin can still write to the
 protocol descriptors on purpose; the result is a protocol violation, nothing more.)
 
-Requirements: Linux with Landlock ABI ≥ `sandbox.min_landlock_abi` (6, kernel 6.12 or later) and
-`libseccomp.so.2`. This machine has Ubuntu 24.04, kernel 7.0, Landlock ABI 8 and libseccomp.
+Requirements: Linux with Landlock ABI ≥ `sandbox.min_landlock_abi` (6, kernel 6.12 or later),
+`libseccomp.so.2` and glibc 2.39 or later (step 8). This machine has Ubuntu 24.04, kernel 7.0,
+Landlock ABI 8, libseccomp 2.5.5 and glibc 2.39.
 
 The parent caps concurrent workers so that workers × `memory_mb` stays within about three
 quarters of physical memory, whatever `--workers` asks for.
@@ -499,7 +549,17 @@ Each test is written first and seen failing. Tests that need the kernel features
   unreadable. A System V shared-memory segment the test creates can't be attached, and one worker
   can't leave a segment for the next. `prlimit` on the parent fails and the parent's limits are
   unchanged. Every thread the worker has after its imports (`/proc/self/task`) is denied a read
-  outside the allowlist.
+  outside the allowlist. The inode-flag `ioctl` is checked in a process with stage 1 only, since a
+  sealed worker can open no file to try it on.
+- **The seal,** through real workers unless noted. A plugin's `open`, `stat`, `lstat`, `readlink`
+  and `listdir` of files and symlinks on the allowlist each fail with `EPERM`. Checked from
+  outside, the access times of a file on the allowlist and of a symlink to it stay where the test
+  set them after a plugin tries `stat`, `readlink` and `open` through them. A plugin can import
+  what the worker preloaded and print a frame, and importing a module it didn't preload is
+  `plugin_error: exception: ModuleNotFoundError`; so is `perp_lab.holdout`, so no token can be
+  minted inside a worker. A worker whose seal silently did nothing reports unavailable. In a probe
+  process, every thread, those started before the seal included, is refused an allowlisted file
+  once sealed; a test exports the stage-2 filter and runs it over every rule.
 - **Determinism:** two fresh workers give `hash()` of a string the same value.
 - **Fail closed:** with `probe()` failing, `lab judge` exits 1 and records nothing, and
   `attempt_exam` doesn't mint.
@@ -541,7 +601,7 @@ Each test is written first and seen failing. Tests that need the kernel features
 - README: the rules table gained the sandbox rows; the "(plugin code is not sandboxed yet …)"
   qualifier went.
 - The `strategy.py` contract docstring: metadata must be literals, features numeric, a plugin
-  gets only the bars it is sent, and it can import only what is on the read allowlist.
+  gets only the bars it is sent, and it can import only the modules the worker preloads.
 
 ## Out of scope / follow-ups
 
@@ -563,3 +623,5 @@ Each test is written first and seen failing. Tests that need the kernel features
 - It never runs `lab exam`, and it gets verdicts as their contents only: no file timestamps, and
   nothing else that tells it when an exam ran or how long it took (R2).
 - It can read the harness source, so assume it knows exactly how the lookahead check works (R1).
+- R5 applies to the proposer's own process too: it must not be able to `stat()` `data/` (the sizes
+  and modification times of holdout files).

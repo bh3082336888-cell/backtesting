@@ -3,6 +3,7 @@ through a real worker. Tests marked `sandbox` spawn real workers; the rest run o
 
 import ctypes
 import errno
+import json
 import os
 import select
 import subprocess
@@ -324,19 +325,123 @@ def test_data_and_runs_are_unreadable(cfg):
 
 
 @pytest.mark.sandbox
-def test_a_forged_token_cannot_load_holdout_bars(cfg, tmp_path):
+def test_a_plugin_can_neither_mint_a_token_nor_read_holdout_bars(cfg, tmp_path):
+    # The worker never loads perp_lab.holdout (where _MINT_KEY lives), and once sealed it can't
+    # load anything, so no token can be minted inside it; the holdout bars can't be opened anyway.
     token = issue_holdout_token("lin", "test", tmp_path / "log.jsonl")
     assert len(load_candles(cfg, "BTCUSDT", "4h", holdout=token)) > 0   # the bars are there to read
+    parquet = cfg.data_dir / "BTCUSDT" / "4h" / "all.parquet"
     src = plugin("forger", f"""
-        from perp_lab import holdout
-        from perp_lab.config import Config
-        from perp_lab.data.store import load_bars
-        tok = holdout.HoldoutToken("lin", "forged", "n", holdout._MINT_KEY)
-        holdout.check_token(tok)                      # minting works inside the worker...
-        load_bars(Config(raw={cfg.raw!r}), "BTCUSDT", "4h", holdout=tok)   # ...reading doesn't
-        raise RuntimeError("holdout bars were read")""")
+        import errno
+        out = []
+        try:
+            import perp_lab.holdout
+            out.append("imported")
+        except ImportError as e:
+            out.append(type(e).__name__)
+        try:
+            open({str(parquet)!r}, "rb").read(1)
+            out.append("read")
+        except OSError as e:
+            out.append(type(e).__name__ + ":" + errno.errorcode[e.errno])
+        raise RuntimeError(" ".join(out))""")
     e = plugin_error(batch_run, cfg, src)
-    assert e.kind == "exception" and e.type in ("FileNotFoundError", "PermissionError"), e.reason()
+    assert e.message == "ModuleNotFoundError PermissionError:EPERM", e.reason()
+
+
+@pytest.mark.sandbox
+def test_a_sealed_plugin_can_open_stat_or_readlink_nothing(cfg):
+    # The allowlist is readable while the worker loads its modules; once sealed, no path resolves.
+    stdlib, ours, link = json.__file__, REPO / "perp_lab" / "strategy.py", Path(sys.base_prefix, "bin", "python3")
+    assert Path(stdlib).is_file() and ours.is_file() and link.is_symlink()
+    src = plugin("sealed", f"""
+        import errno
+        out = []
+        for fn in (lambda: open({stdlib!r}, "rb"), lambda: open({str(ours)!r}, "rb"),
+                   lambda: os.stat({stdlib!r}), lambda: os.lstat({str(ours)!r}),
+                   lambda: os.readlink({str(link)!r}), lambda: os.listdir({str(ours.parent)!r})):
+            try:
+                fn()
+                out.append("OK")
+            except OSError as e:
+                out.append(errno.errorcode[e.errno])
+        raise RuntimeError(" ".join(out))""")
+    e = plugin_error(batch_run, cfg, src)
+    assert e.message == "EPERM EPERM EPERM EPERM EPERM EPERM", e.reason()
+
+
+OLD_NS = 10**18                                       # 2001-09-09: older than any relatime window
+
+
+@pytest.mark.sandbox
+def test_a_plugin_moves_no_access_time(cfg, tmp_path):
+    # On a relatime mount, reading a file, and following or reading a symlink, each update its
+    # access time when that is old: a bit per file per day a worker could leave for a later one,
+    # which anyone reads back with stat(). Checked from outside, on a file inside the allowlist that
+    # no worker loads and on a symlink to it.
+    target = REPO / "perp_lab" / "holdout.py"
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    kept = os.stat(target)
+    os.utime(target, ns=(OLD_NS, kept.st_mtime_ns))
+    os.utime(link, ns=(OLD_NS, OLD_NS), follow_symlinks=False)
+    try:
+        src = plugin("toucher", f"""
+            import errno
+            out = []
+            for fn in (lambda: os.stat({str(link)!r}), lambda: os.readlink({str(link)!r}),
+                       lambda: open({str(link)!r}, "rb").read(1), lambda: open({str(target)!r}, "rb").read(1)):
+                try:
+                    fn()
+                    out.append("OK")
+                except OSError as e:
+                    out.append(errno.errorcode[e.errno])
+            raise RuntimeError(" ".join(out))""")
+        e = plugin_error(batch_run, cfg, src)
+        assert (os.lstat(link).st_atime_ns, os.stat(target).st_atime_ns) == (OLD_NS, OLD_NS)
+        assert e.message == "EPERM EPERM EPERM EPERM", e.reason()
+    finally:
+        os.utime(target, ns=(kept.st_atime_ns, kept.st_mtime_ns))
+
+
+# The modules a plugin may import (perp_lab/strategy.py's contract), and the ones they load.
+PLUGIN_IMPORTS = ["math", "numpy", "pandas", "perp_lab.strategy", "perp_lab.indicators", "perp_lab.engine.backtest"]
+
+
+@pytest.mark.sandbox
+def test_a_plugin_can_import_only_what_the_worker_preloaded(cfg):
+    src = plugin("importer", f"""
+        import sys
+        for name in {PLUGIN_IMPORTS!r}:
+            __import__(name)
+        for sub in ("char", "ctypeslib", "fft", "polynomial", "rec", "strings"):
+            getattr(np, sub)                          # numpy 2 loads these on first use
+        print(bars.head())                            # pandas loads its frame formatter on first use
+        assert "colorsys" not in sys.modules          # standard library, on the allowlist, never loaded
+        import colorsys
+        return bars[[]]""")
+    e = plugin_error(batch_run, cfg, src)
+    assert (e.kind, e.type) == ("exception", "ModuleNotFoundError") and "colorsys" in e.message, e.reason()
+    assert e.reason().startswith("plugin_error: exception: ModuleNotFoundError: ")
+
+
+NO_SEAL = """
+import sys
+from perp_lab.sandbox import confine, worker
+confine.seal = lambda: None                           # a seal that silently did nothing
+sys.exit(worker.main(sys.argv[1:]))
+"""
+
+
+@pytest.mark.sandbox
+def test_a_worker_whose_seal_did_not_take_is_unavailable(cfg):
+    r = subprocess.run([sys.executable, "-s", "-P", "-c", NO_SEAL, "--deny-probe", str(cfg.path), "--memory-mb",
+                        "3072", "--cpu-s", "60", "--parent-pid", str(os.getpid())],
+                       env=client.ENV, cwd="/", stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+    assert r.returncode == worker.UNAVAILABLE_EXIT, r.stderr
+    n = int.from_bytes(r.stdout[:4], "big")
+    error = json.loads(r.stdout[4:4 + n])["error"]
+    assert error["kind"] == "unavailable" and "sealed open" in error["message"], error
 
 
 @pytest.mark.sandbox
@@ -399,34 +504,6 @@ def test_a_plugin_cannot_change_file_metadata(cfg, tmp_path):
     assert (after.st_mode, after.st_uid, after.st_gid) == (before.st_mode, before.st_uid, before.st_gid)
     assert (after.st_mtime_ns, after.st_ctime_ns) == (before.st_mtime_ns, before.st_ctime_ns)   # chown moves ctime
     assert os.listxattr(target) == ["user.kept"] and os.getxattr(target, "user.kept") == b"v"
-
-
-@pytest.mark.sandbox
-def test_a_plugin_cannot_set_inode_flags(cfg):
-    # On a file it may open (its own package's source, owned by this user), setting the flags,
-    # attributes and write hint it already has would change nothing, and is still refused.
-    src = plugin("chattr", """
-        import errno, fcntl
-        import perp_lab
-        out = []
-        fd = os.open(perp_lab.__file__, os.O_RDONLY)
-        try:
-            flags = fcntl.ioctl(fd, 0x80086601, bytes(8))            # FS_IOC_GETFLAGS
-            attrs = fcntl.ioctl(fd, 0x801C581F, bytes(28))           # FS_IOC_FSGETXATTR
-            hint = fcntl.fcntl(fd, 1035, bytes(8))                   # F_GET_RW_HINT
-            for fn in (lambda: fcntl.ioctl(fd, 0x40086602, flags),   # FS_IOC_SETFLAGS
-                       lambda: fcntl.ioctl(fd, 0x401C5820, attrs),   # FS_IOC_FSSETXATTR
-                       lambda: fcntl.fcntl(fd, 1036, hint)):         # F_SET_RW_HINT
-                try:
-                    fn()
-                    out.append("OK")
-                except OSError as e:
-                    out.append(errno.errorcode[e.errno])
-        finally:
-            os.close(fd)
-        raise RuntimeError(" ".join(out))""")
-    e = plugin_error(batch_run, cfg, src)
-    assert e.message == "EPERM EPERM EPERM", e.reason()
 
 
 PARENT = """

@@ -1,15 +1,23 @@
-"""Confines the calling process for good: the spec's Confinement steps 1-5, in order.
+"""Confines the calling process for good, in two stages.
 
-1. exactly one thread; 2. hard rlimits; 3. no_new_privs; 4. Landlock (read-only allowlist, no TCP,
-abstract UNIX sockets and signals scoped); 5. seccomp (sockets, exec, fork, System V IPC, calls
-aimed at another process, clearing the parent-death signal, changing a file's metadata, file
-locks, leases and notifications, and kernel-facing calls return an error; so does every call newer
-than libseccomp, with ENOSYS).
+`confine()` is stage 1, the spec's Confinement steps 1-5, in order: 1. exactly one thread; 2. hard
+rlimits; 3. no_new_privs; 4. Landlock (read-only allowlist, no TCP, abstract UNIX sockets and
+signals scoped); 5. seccomp (sockets, exec, fork, System V IPC, calls aimed at another process,
+clearing the parent-death signal, changing a file's metadata, file locks, leases and
+notifications, and kernel-facing calls return an error; so does every call newer than
+libseccomp, with ENOSYS).
+
+`seal()` is stage 2, once the process has loaded everything it will need: a second seccomp filter
+under which no call that resolves a pathname works, so the process opens, stats and reads no
+file and follows no symlink. Reading a file, or following or reading a symlink, updates its access
+time on a relatime mount: without the seal a worker could leave a bit per allowlisted file or
+symlink per day for a later worker to read back with stat().
 
 Landlock and seccomp confine the calling thread and the threads it starts later; a thread that
 already exists stays unconfined, and plugin code could reach it through ctypes. So `confine()`
 refuses unless the process has one thread, and this module uses only the standard library: the
-worker calls it before importing numpy, which starts threads.
+worker calls it before importing numpy, which starts threads. `seal()` is seccomp only, with
+filter thread synchronisation, so it reaches the threads that exist by then (pyarrow's) too.
 
 Linux on x86_64 or aarch64 (the Landlock syscall numbers below are theirs). `probe()` says, without
 spawning anything, whether this machine can confine; if it can't, plugin code does not run.
@@ -130,6 +138,26 @@ _RULES = (
     + [(_EPERM, "fcntl", ((1, _SCMP_CMP_MASKED_EQ, 0xFFFFFFFF, cmd),)) for cmd in _FCNTL_EPERM.values()]
 )
 
+# Stage 2 (`seal`): every syscall that resolves a pathname (from the x86_64 and aarch64 tables).
+# Resolving a path follows its symlinks, which updates their access times, before Landlock or
+# anything else can refuse the call; so even a refused open() through a symlink leaves a mark,
+# and readlink() leaves one too. A sealed process names no path at all: it opens, stats and lists
+# nothing and reads no link. What it already holds (its pipes, memory, threads) keeps working, so
+# fstat on a descriptor does too, as long as libc makes it with fstat and not newfstatat (glibc
+# 2.39 and later). Some names exist on one architecture only (open, stat, ...: x86_64), as in
+# stage 1. Calls with a name libseccomp doesn't know are newer than it: stage 1 answers ENOSYS.
+_PATHNAME = """
+    open openat openat2 creat open_by_handle_at name_to_handle_at uselib execve execveat
+    stat lstat newfstatat fstatat64 statx statfs access faccessat faccessat2 readlink readlinkat
+    chdir chroot pivot_root mount umount2 open_tree move_mount fsopen fsconfig fspick mount_setattr
+    mkdir mkdirat mknod mknodat rmdir unlink unlinkat rename renameat renameat2 link linkat
+    symlink symlinkat truncate acct swapon swapoff quotactl inotify_add_watch fanotify_mark
+    chmod fchmodat chown lchown fchownat utime utimes utimensat futimesat
+    getxattr lgetxattr setxattr lsetxattr removexattr lremovexattr listxattr llistxattr""".split()
+_NEWER_PATHNAME = _NEWER_METADATA + ["open_tree_attr"]    # every newer metadata call takes a path too
+_SEAL_RULES = [(_EPERM, name, ()) for name in _PATHNAME + _NEWER_PATHNAME]
+_NEWER = set(_NEWER_PATHNAME)
+
 _libc_dll = None
 _seccomp_dll = None
 
@@ -205,7 +233,8 @@ def probe(min_abi: int = MIN_ABI) -> str | None:
 
 
 def allowlist() -> list[str]:
-    """The directories a confined worker may read (files and listings); nothing else is readable."""
+    """The directories a confined worker may read (files and listings) until it seals itself;
+    nothing else is readable, and once sealed nothing at all."""
     paths = [sys.base_prefix,                 # the standard library
              sys.prefix,                      # the virtualenv, if any
              *site.getsitepackages(),         # numpy, pandas, pyarrow
@@ -248,8 +277,21 @@ def confine(*, memory_mb: int, cpu_s: int, read_paths: list[str]) -> int:
 
     # 4. Landlock, then 5. seccomp.
     abi = _landlock(read_paths)
-    _seccomp_filter(seccomp)
+    _seccomp_filter(seccomp, 1)
     return abi
+
+
+def seal() -> None:
+    """Stage 2, for good, in every thread: from now on no call that resolves a pathname works
+    (EPERM). Call it once everything the process will need is loaded.
+
+    Raises RuntimeError if it fails; the process must then not run plugin code.
+    """
+    try:
+        lib = _seccomp()
+    except (OSError, AttributeError) as e:
+        raise RuntimeError(f"libseccomp.so.2: {e}") from e
+    _seccomp_filter(lib, 2)
 
 
 def _landlock(read_paths: list[str]) -> int:
@@ -291,17 +333,18 @@ def _landlock(read_paths: list[str]) -> int:
     return abi
 
 
-def _seccomp_filter(lib) -> None:
-    ctx = _build_filter(lib)
+def _seccomp_filter(lib, stage: int) -> None:
+    ctx = _build_filter(lib, stage)
     try:
-        _check(lib.seccomp_load(ctx), "seccomp_load")
+        _check(lib.seccomp_load(ctx), f"seccomp_load (stage {stage})")
     finally:
         lib.seccomp_release(ctx)
 
 
-def _build_filter(lib):
-    """The filter, built but not loaded: a libseccomp context the caller must release. (The tests
-    export it with seccomp_export_bpf and check every rule without confining themselves.)"""
+def _build_filter(lib, stage: int = 1):
+    """Stage 1's filter (`confine`) or stage 2's (`seal`), built but not loaded: a libseccomp
+    context the caller must release. (The tests export it with seccomp_export_bpf and check every
+    rule without confining themselves.)"""
     ctx = lib.seccomp_init(_SCMP_ACT_ALLOW)
     if not ctx:
         raise RuntimeError("seccomp_init failed")
@@ -311,10 +354,10 @@ def _build_filter(lib):
         _check(lib.seccomp_attr_set(ctx, _SCMP_FLTATR_ACT_BADARCH, _SCMP_ACT_KILL_PROCESS),
                "seccomp_attr_set(ACT_BADARCH)")
         _check(lib.seccomp_attr_set(ctx, _SCMP_FLTATR_CTL_TSYNC, 1), "seccomp_attr_set(CTL_TSYNC)")
-        for action, name, conditions in _RULES:
+        for action, name, conditions in (_RULES if stage == 1 else _SEAL_RULES):
             nr = lib.seccomp_syscall_resolve_name(name.encode())
-            if nr == _NR_SCMP_ERROR and name in _NEWER_METADATA:
-                continue                      # newer than this libseccomp: ENOSYS, below
+            if nr == _NR_SCMP_ERROR and name in _NEWER:
+                continue                      # newer than this libseccomp: stage 1's ENOSYS, below
             if nr == _NR_SCMP_ERROR:          # unknown to this libseccomp: fail closed, not a hole
                 raise RuntimeError(f"libseccomp cannot name the syscall {name}")
             if nr < 0:
@@ -324,9 +367,10 @@ def _build_filter(lib):
                    f"seccomp_rule_add_array({name})")
         # A call newer than this libseccomp (e.g. setxattrat, file_setattr on a kernel ahead of it)
         # can't be named here, so none of the rules above can reach it: ENOSYS, as from an older
-        # kernel, which callers already handle.
-        for nr in range(_highest_known(lib) + 1, SYSCALL_BOUND):
-            _check(lib.seccomp_rule_add_array(ctx, _ENOSYS, nr, 0, None), f"seccomp_rule_add_array({nr})")
+        # kernel, which callers already handle. Stage 1 stays loaded under stage 2, so this covers both.
+        if stage == 1:
+            for nr in range(_highest_known(lib) + 1, SYSCALL_BOUND):
+                _check(lib.seccomp_rule_add_array(ctx, _ENOSYS, nr, 0, None), f"seccomp_rule_add_array({nr})")
     except BaseException:
         lib.seccomp_release(ctx)
         raise

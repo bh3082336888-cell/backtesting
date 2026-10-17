@@ -1,7 +1,9 @@
 """Confinement: every escape a plugin could try fails, checked from outside where the test can.
 
 Each test runs tests/confine_probe.py in a fresh interpreter launched the way the worker is
-(`-s -P`, the spec's environment, cwd /, a new session), since confinement can't be undone.
+(`-s -P`, the spec's environment, cwd /, a new session), since confinement can't be undone. Most
+probes apply stage 1 only (`confine()`); a worker also seals itself (`seal()`) before plugin code
+runs, which tests/test_worker.py checks through real workers.
 """
 
 import ctypes
@@ -80,6 +82,7 @@ EXPECTED = {
     "fcntl_setlk": "DENIED EPERM",
     "fcntl_ofd_setlk": "DENIED EPERM",
     "fcntl_notify": "DENIED EPERM",               # seccomp: a directory watch, like inotify
+    "set_inode_flags": "DENIED EPERM",            # seccomp: chattr on a file it may open
 }
 
 
@@ -104,6 +107,8 @@ def test_each_escape_is_denied(probe, tmp_path):
         target = Path(socket.__file__)            # on the allowlist: the open works, the lock doesn't
     elif probe == "fcntl_notify":
         target = Path(socket.__file__).parent
+    elif probe == "set_inode_flags":
+        target = REPO / "perp_lab" / "__init__.py"   # this user's, on the allowlist
     elif probe == "mq_open":
         target = f"/perp_lab_confine_{os.getpid()}"
         assert not _queue_left(target)
@@ -146,6 +151,18 @@ def test_numpy_pandas_pyarrow_import_after_confinement():
     assert len(threads) == count >= 2, out
     assert all(line.endswith(" DENIED EACCES") for line in threads), out
     assert out[-1] == "DENIED EACCES"
+
+
+def test_the_seal_reaches_every_thread():
+    # seal() runs once numpy and pyarrow have started their threads; seccomp's thread sync must
+    # reach those too, or plugin code could borrow one to open files (through ctypes).
+    import numpy
+    out = run_probe("seal_every_thread", Path(numpy.__file__))
+    threads = [line for line in out if line.startswith("THREAD ")]
+    count = int(next(line for line in out if line.startswith("THREADS ")).split()[1])
+    assert len(threads) == count >= 2, out
+    assert all(line.endswith(" DENIED EPERM") for line in threads), out
+    assert out[-1] == "DENIED EPERM"
 
 
 def test_priority_of_this_process_still_works():
@@ -233,10 +250,11 @@ def _highest_known(lib, arch) -> int:
     return top
 
 
-def _filter_bpf() -> bytes:
-    """confine's seccomp filter as the kernel would be given it, exported without loading it."""
+def _filter_bpf(stage: int = 1) -> bytes:
+    """confine's seccomp filter (stage 1) or seal's (stage 2) as the kernel would be given it,
+    exported without loading it."""
     lib = confine._seccomp()
-    ctx = confine._build_filter(lib)
+    ctx = confine._build_filter(lib, stage)
     fd = os.memfd_create("seccomp-bpf")
     try:
         assert lib.seccomp_export_bpf(ctx, fd) == 0
@@ -326,6 +344,46 @@ def test_the_filter_pins_every_rule():
     assert _run_bpf(prog, 0x40000003, 20) == KILL_PROCESS            # i386
     if os.uname().machine == "x86_64":
         assert run(0x40000000 | 39) == KILL_PROCESS                   # x32
+
+
+# Stage 2 (Confinement, the seal): every call that resolves a pathname, so a sealed worker follows
+# and reads no symlink and opens, stats or names no file.
+PATHNAME = """
+    open openat openat2 creat open_by_handle_at name_to_handle_at uselib execve execveat
+    stat lstat newfstatat statx statfs access faccessat faccessat2 readlink readlinkat
+    chdir chroot pivot_root mount umount2 open_tree move_mount fsopen fsconfig fspick mount_setattr
+    mkdir mkdirat mknod mknodat rmdir unlink unlinkat rename renameat renameat2 link linkat symlink symlinkat
+    truncate acct swapon swapoff quotactl inotify_add_watch fanotify_mark
+    chmod fchmodat chown lchown fchownat utime utimes utimensat futimesat
+    getxattr lgetxattr setxattr lsetxattr removexattr lremovexattr listxattr llistxattr""".split()
+NEWER_PATHNAME = {**NEWER, "open_tree_attr": 467}     # every one of NEWER takes a path too
+# What a sealed worker still does with what it holds: its pipes, memory, threads.
+SEALED_ALLOWED = """read write close fstat fstatfs lseek mmap munmap mprotect futex fcntl ioctl getdents64 fchdir
+    getcwd dup dup3 pipe2 clone memfd_create getrandom clock_gettime exit_group""".split()
+
+
+def test_the_seal_pins_every_rule():
+    lib, seal, stage1 = _scmp(), _filter_bpf(2), _filter_bpf(1)
+    arch = lib.seccomp_arch_native()
+
+    def nr(name):
+        n = lib.seccomp_syscall_resolve_name(name.encode())
+        assert n != -1, f"libseccomp cannot name {name}"
+        return n
+
+    for name in PATHNAME:
+        if nr(name) >= 0:                     # (a negative number: no such call on this architecture)
+            assert _run_bpf(seal, arch, nr(name)) == EPERM, name
+            assert _run_bpf(seal, arch, nr(name), [JUNK | 7] * 6) == EPERM, name
+    for name, n in NEWER_PATHNAME.items():    # unknown to this libseccomp: stage 1's ENOSYS stands in
+        known = lib.seccomp_syscall_resolve_name(name.encode()) == n
+        assert (_run_bpf(seal, arch, n) == EPERM) if known else (_run_bpf(stage1, arch, n) == ENOSYS), name
+    for name in SEALED_ALLOWED:
+        if nr(name) >= 0:
+            assert _run_bpf(seal, arch, nr(name)) == ALLOW, name
+    assert _run_bpf(seal, 0x40000003, 5) == KILL_PROCESS                 # i386 open
+    if os.uname().machine == "x86_64":
+        assert _run_bpf(seal, arch, 0x40000000 | 2) == KILL_PROCESS       # x32 open
 
 
 def test_probe_reports_none_here():
