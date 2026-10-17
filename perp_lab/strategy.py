@@ -18,7 +18,7 @@ Contract:
 Plugin code is never loaded here. It runs only in the sandbox session
 (perp_lab/sandbox/session.py), inside the confined worker. The contract that
 holds there:
-    - NAME, PARAMS, GRID and TIMEFRAMES are literals the parent reads from the
+    - PARENT, params, grid and timeframes are literals the parent reads from the
       source without executing it.
     - Features are numeric or bool columns.
     - A plugin gets only the bars it is sent; it can't see later ones.
@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import inspect
 import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
