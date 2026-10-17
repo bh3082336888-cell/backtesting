@@ -4,6 +4,7 @@ through a real worker. Tests marked `sandbox` spawn real workers; the rest run o
 import ctypes
 import errno
 import os
+import select
 import subprocess
 import sys
 import textwrap
@@ -19,7 +20,7 @@ from perp_lab.data.store import load_candles
 from perp_lab.engine.backtest import EngineParams, run_backtest
 from perp_lab.holdout import issue_holdout_token
 from perp_lab.plugins import PluginSource
-from perp_lab.sandbox import client, confine, session
+from perp_lab.sandbox import client, confine, session, worker
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.validate.causality import with_moving_columns
 from tests import sandbox_fixtures
@@ -282,6 +283,58 @@ def test_worker_exits_when_its_parent_goes_away(cfg):
     finally:
         if _running(pid):
             os.kill(pid, 9)
+
+
+SLEEPER_PARENT = """
+import sys, threading, time
+from pathlib import Path
+from perp_lab.config import load_config
+from perp_lab.engine.backtest import EngineParams
+from perp_lab.plugins import PluginSource
+from perp_lab.sandbox import client
+from perp_lab.validate.causality import synthetic_bars
+w = client.spawn(load_config(sys.argv[1]), PluginSource.from_text("sleeper", Path(sys.argv[2]).read_bytes()))
+w.bars("X", "1h", synthetic_bars(n=50))
+threading.Thread(target=w.run, args=({}, EngineParams()), daemon=True).start()
+while b"sleeping" not in w.stderr:                    # the worker is inside prepare(), not reading
+    time.sleep(0.01)
+print(w.pid, flush=True)
+time.sleep(600)
+"""
+
+
+@pytest.mark.sandbox
+def test_a_busy_worker_dies_with_its_parent(cfg, tmp_path):
+    # EOF can't reach a worker that is busy in plugin code; the parent-death signal must.
+    path = tmp_path / "sleeper.py"
+    path.write_bytes(plugin("sleeper", 'print("sleeping", flush=True)\ntime.sleep(600)').text)
+    helper = subprocess.Popen([sys.executable, "-c", SLEEPER_PARENT, str(cfg.path), str(path)], cwd=REPO,
+                              stdout=subprocess.PIPE, text=True)
+    pid = None
+    try:
+        assert select.select([helper.stdout], [], [], 60)[0], "the helper never reported its worker"
+        pid = int(helper.stdout.readline())
+        assert _running(pid)
+        helper.kill()                                 # SIGKILL: no close(), no atexit, no finalizer
+        helper.wait()
+        deadline = time.monotonic() + 5
+        while _running(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _running(pid)
+    finally:
+        helper.kill()
+        helper.wait()
+        helper.stdout.close()
+        if pid is not None and _running(pid):
+            os.kill(pid, 9)
+
+
+def test_a_worker_whose_parent_is_already_gone_exits_at_once(cfg):
+    # The parent died before the worker set its parent-death signal: getppid() is no longer it.
+    r = subprocess.run([sys.executable, "-s", "-P", "-m", "perp_lab.sandbox.worker", "--deny-probe", str(cfg.path),
+                        "--memory-mb", "3072", "--cpu-s", "60", "--parent-pid", str(os.getpid() + 1_000_000)],
+                       env=client.ENV, cwd="/", capture_output=True, timeout=60)
+    assert r.returncode == worker.ORPHANED_EXIT and r.stdout == b"", r.stderr
 
 
 def test_check_raises_when_confinement_fails(cfg, monkeypatch):

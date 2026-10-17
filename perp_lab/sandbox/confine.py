@@ -2,7 +2,8 @@
 
 1. exactly one thread; 2. hard rlimits; 3. no_new_privs; 4. Landlock (read-only allowlist, no TCP,
 abstract UNIX sockets and signals scoped); 5. seccomp (sockets, exec, fork, System V IPC, calls
-aimed at another process, and kernel-facing calls return an error).
+aimed at another process, clearing the parent-death signal, and kernel-facing calls return an
+error).
 
 Landlock and seccomp confine the calling thread and the threads it starts later; a thread that
 already exists stays unconfined, and plugin code could reach it through ctypes. So `confine()`
@@ -37,6 +38,7 @@ _FS_REFER, _FS_TRUNCATE, _FS_IOCTL_DEV = 1 << 13, 1 << 14, 1 << 15
 _NET_BIND_TCP, _NET_CONNECT_TCP = 1 << 0, 1 << 1
 _SCOPE_ABSTRACT_UNIX_SOCKET, _SCOPE_SIGNAL = 1 << 0, 1 << 1
 _PR_SET_NO_NEW_PRIVS = 38
+_PR_SET_PDEATHSIG = 1
 
 
 class _RulesetAttr(ctypes.Structure):
@@ -90,6 +92,9 @@ _RULES = (
     [(_EPERM, name, ()) for name in _ALWAYS_EPERM]
     + [(_EPERM, "clone", ((0, _SCMP_CMP_MASKED_EQ, _CLONE_THREAD, 0),)),  # a thread is fine, a process isn't
        (_ENOSYS, "clone3", ())]                                          # so libc falls back to clone
+    # The worker sets its parent-death signal before confining itself; plugin code may not clear
+    # or change it. The option is an int: compare its low 32 bits, or junk above them would pass.
+    + [(_EPERM, "prctl", ((0, _SCMP_CMP_MASKED_EQ, 0xFFFFFFFF, _PR_SET_PDEATHSIG),))]
     + [(_EPERM, name, ((0, _SCMP_CMP_NE, 0, 0),)) for name in _PID_ARG0]  # pid 0: this process only
     + [rule for name, which in _WHICH_WHO.items()                        # this process only
        for rule in ((_EPERM, name, ((0, _SCMP_CMP_NE, which, 0),)), (_EPERM, name, ((1, _SCMP_CMP_NE, 0, 0),)))]

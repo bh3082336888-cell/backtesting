@@ -15,6 +15,10 @@ Limits: each request may use `sandbox.task_cpu_s` of the worker's CPU time (read
 worker is killed and the request is `PluginError("cpu_limit")`; over the wall-clock limit it is
 killed and `WorkerLost("timeout")`; a worker that goes away is `WorkerLost("died")`. `Batch` and
 `fresh_run` retry a `WorkerLost` once in a fresh worker; a second is `PluginError(kind)`.
+
+A worker dies with its parent: it is SIGKILLed when the thread that spawned it exits (the
+kernel's parent-death signal belongs to that thread, not to the process). So a worker must be
+closed by the thread that spawned it, never handed to another thread that outlives this one.
 """
 
 from __future__ import annotations
@@ -120,7 +124,8 @@ def _reap(proc: subprocess.Popen, stop: threading.Event) -> None:
 # ---------------------------------------------------------------- one worker
 
 class Worker:
-    """One confined worker process. One request at a time; not for use from several threads."""
+    """One confined worker process. One request at a time; not for use from several threads.
+    Close it from the thread that spawned it: it is killed when that thread exits."""
 
     def __init__(self, cfg, proc: subprocess.Popen):
         sb = cfg["sandbox"]
@@ -396,7 +401,8 @@ def _start(cfg) -> Worker:
     cmd = [sys.executable, "-s", "-P", "-m", "perp_lab.sandbox.worker",
            "--deny-probe", str(Path(cfg.path).resolve()),       # the config: readable here, never there
            "--memory-mb", str(int(sb["memory_mb"])),
-           "--cpu-s", str(math.ceil(sb["exam_cpu_hours"] * 3600 * 2))]   # lifetime backstop only
+           "--cpu-s", str(math.ceil(sb["exam_cpu_hours"] * 3600 * 2)),   # lifetime backstop only
+           "--parent-pid", str(os.getpid())]                            # it dies with this process
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=dict(ENV), cwd="/", close_fds=True, start_new_session=True)
@@ -424,7 +430,8 @@ def check(cfg) -> int:
 
 def spawn(cfg, src: PluginSource) -> Worker:
     """A worker with the plugin loaded. SandboxUnavailable before the plugin is sent;
-    PluginError("metadata") if its runtime params, grid or timeframes differ from the source."""
+    PluginError("metadata") if its runtime params, grid or timeframes differ from the source.
+    The calling thread must close it: the worker is killed when that thread exits."""
     w = _start(cfg)
     try:
         w._load(src)

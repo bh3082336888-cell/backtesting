@@ -72,6 +72,8 @@ EXPECTED = {
     "ioprio_get_user": "DENIED EPERM",            # seccomp: IOPRIO_WHO_USER, likewise
     "mq_open": "DENIED EPERM",                    # seccomp: POSIX message queues
     "inotify_init1": "DENIED EPERM",              # seccomp: Landlock has no right for file watches
+    "pdeathsig_clear": "DENIED EPERM",            # seccomp: a worker must die with its parent
+    "pdeathsig_clear_wide": "DENIED EPERM",       # seccomp: the option's low 32 bits are what count
     "read_pre_existing_thread": "REFUSED",        # confine() must be the only thread
 }
 
@@ -139,6 +141,10 @@ def test_numpy_pandas_pyarrow_import_after_confinement():
 
 def test_priority_of_this_process_still_works():
     assert run_probe("getpriority_self")[-1] == "ALLOWED"
+
+
+def test_other_prctl_calls_still_work():
+    assert run_probe("prctl_set_name")[-1] == "ALLOWED"
 
 
 @pytest.mark.skipif(os.uname().machine != "x86_64", reason="x32 is an x86_64 ABI")

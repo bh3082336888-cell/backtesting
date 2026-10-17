@@ -1,11 +1,15 @@
-"""A confined worker: `python -s -P -m perp_lab.sandbox.worker --deny-probe PATH --memory-mb N --cpu-s N`.
+"""A confined worker: `python -s -P -m perp_lab.sandbox.worker --deny-probe PATH --memory-mb N --cpu-s N
+--parent-pid PID`.
 
 Order, which is the point of this module:
 
   a. move the protocol to private descriptors and point fds 0 and 1 at stderr, so a plugin's
      print() cannot corrupt the framing;
   b. read the limits the parent passes (`--cpu-s` is only a lifetime backstop: the parent
-     enforces each request's limits itself);
+     enforces each request's limits itself), and die with the parent: the parent-death signal
+     is SIGKILL (seccomp later stops plugin code from clearing it), and a worker whose parent
+     is already gone (getppid() is not `--parent-pid`) exits at once. EOF reaches only an idle
+     worker; this reaches a busy one, which may hold holdout bars;
   c. confine this process (`confine.confine`), while it has one thread and has imported nothing
      but the standard library and `perp_lab.sandbox.confine`;
   d. import `session` (numpy, pandas, pyarrow, the engine), whose threads inherit the confinement;
@@ -25,12 +29,15 @@ import ctypes
 import errno
 import json
 import os
+import signal
 import struct
 import sys
 
 from perp_lab.sandbox import confine
 
 UNAVAILABLE_EXIT = 3
+ORPHANED_EXIT = 5                             # the parent was gone before the worker could follow it
+_PR_SET_PDEATHSIG = 1
 _SHM_FLAGS = 0o1000 | 0o600                   # IPC_CREAT | 0600
 _IPC_RMID = 0
 
@@ -42,11 +49,20 @@ def _send(f, header: dict) -> None:
     f.flush()
 
 
-def _args(argv: list[str]) -> tuple[str, int, int]:
+def _args(argv: list[str]) -> tuple[str, int, int, int]:
     opts = dict(zip(argv[::2], argv[1::2]))
-    if len(argv) % 2 or set(opts) != {"--deny-probe", "--memory-mb", "--cpu-s"}:
-        raise ValueError(f"usage: --deny-probe PATH --memory-mb N --cpu-s N, got {argv}")
-    return opts["--deny-probe"], int(opts["--memory-mb"]), int(opts["--cpu-s"])
+    if len(argv) % 2 or set(opts) != {"--deny-probe", "--memory-mb", "--cpu-s", "--parent-pid"}:
+        raise ValueError(f"usage: --deny-probe PATH --memory-mb N --cpu-s N --parent-pid PID, got {argv}")
+    return opts["--deny-probe"], int(opts["--memory-mb"]), int(opts["--cpu-s"]), int(opts["--parent-pid"])
+
+
+def _follow_parent(parent_pid: int) -> None:
+    """SIGKILL this process when the parent goes; exit now if it already has."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+        raise RuntimeError(f"prctl(PR_SET_PDEATHSIG): {os.strerror(ctypes.get_errno())}")
+    if os.getppid() != parent_pid:
+        os._exit(ORPHANED_EXIT)
 
 
 def _self_test(deny_probe: str) -> None:
@@ -95,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     out = os.fdopen(proto_out, "wb")
     inp = os.fdopen(proto_in, "rb")
     try:
-        deny_probe, memory_mb, cpu_s = _args(argv)                                   # b
+        deny_probe, memory_mb, cpu_s, parent_pid = _args(argv)                       # b
+        _follow_parent(parent_pid)
         abi = confine.confine(memory_mb=memory_mb, cpu_s=cpu_s, read_paths=confine.allowlist())  # c
         from perp_lab.sandbox import session                                         # d
         _self_test(deny_probe)                                                       # e

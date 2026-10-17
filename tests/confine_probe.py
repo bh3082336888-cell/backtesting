@@ -124,6 +124,22 @@ def getpriority_self(target, pre):
     os.getpriority(os.PRIO_PROCESS, 0)
 
 
+def pdeathsig_clear(target, pre):
+    _ok(libc.prctl(1, 0, 0, 0, 0))                     # PR_SET_PDEATHSIG 0: outlive the parent
+
+
+def pdeathsig_clear_wide(target, pre):
+    """The same call with junk above the option's 32 bits. The kernel reads an int, so a filter
+    comparing all 64 bits for == 1 would let this one through."""
+    nr = {"x86_64": 157, "aarch64": 167}[os.uname().machine]   # prctl
+    _ok(libc.syscall(ctypes.c_long(nr), ctypes.c_long((1 << 32) | 1), ctypes.c_long(0), ctypes.c_long(0),
+                     ctypes.c_long(0), ctypes.c_long(0)))
+
+
+def prctl_set_name(target, pre):
+    _ok(libc.prctl(15, b"probe", 0, 0, 0))             # PR_SET_NAME: other prctl calls stay allowed
+
+
 def mq_open(target, pre):
     q = _ok(libc.mq_open(target.encode(), os.O_CREAT | os.O_WRONLY, 0o600, None))
     libc.mq_close(q)
@@ -232,7 +248,7 @@ PROBES = {f.__name__.rstrip("_"): f for f in (
     read_repo_file, write_tmp, tcp_connect, udp_send, unix_connect, fork, subprocess_, shmget,
     prlimit_parent, kill_parent, sched_getaffinity_parent, read_pre_existing_thread, read_allowlisted,
     import_numpy_pandas_pyarrow, setpriority_pgrp, ioprio_get_user, getpriority_self, mq_open,
-    x32_syscall, clone3, inotify_init1)}
+    x32_syscall, clone3, inotify_init1, pdeathsig_clear, pdeathsig_clear_wide, prctl_set_name)}
 
 
 def main(argv):
