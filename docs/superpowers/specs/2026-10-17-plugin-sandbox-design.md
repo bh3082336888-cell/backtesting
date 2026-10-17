@@ -19,8 +19,9 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
 
 ### What this guarantees
 
-- **G1 Isolation.** A plugin's process can read only the Python installation, site-packages and
-  the `perp_lab/` package source, plus the bars and parameters it is sent. It cannot write files
+- **G1 Isolation.** A plugin's process can read only the Python installation (everything under
+  the interpreter's prefixes: for a system Python, all of `/usr`), site-packages and the
+  `perp_lab/` package source, plus the bars and parameters it is sent. It cannot write files
   or change any file's metadata (mode, owner, timestamps, extended attributes, inode flags), open
   sockets, start processes, share memory with another process, or signal, trace, or change the
   limits or scheduling of any process outside itself. It inherits no environment variables, so no
@@ -68,10 +69,10 @@ the judge, able to read the harness source, plus honest mistakes in hand-written
 such a plugin could want: a promotion, a passed exam, holdout data, or a changed budget, log or
 verdict. A human with a shell on this machine is out of scope.
 
-Today a plugin runs inside the judge's process, so it could read `data/` (holdout prices)
-directly, mint an unlogged token through `_MINT_KEY`, rewrite `runs/lab.db`, the holdout log or
-the verdicts, or patch the engine in-process to report better numbers. On this machine it could
-also reach `/var/run/docker.sock`, which is root on the host, because the user is in the
+Before this phase a plugin ran inside the judge's process, so it could read `data/` (holdout
+prices) directly, mint an unlogged token through `_MINT_KEY`, rewrite `runs/lab.db`, the holdout
+log or the verdicts, or patch the engine in-process to report better numbers. On this machine it
+could also reach `/var/run/docker.sock`, which is root on the host, because the user is in the
 `docker` group.
 
 ## Decisions
@@ -112,19 +113,24 @@ New package `perp_lab/sandbox/`, one job per file:
 
 - `confine.py`: applies confinement to the calling process; `probe()` reports whether this
   machine can (Landlock ABI, libseccomp present) without spawning anything.
-- `worker.py`: entry point `python -s -P -m perp_lab.sandbox.worker`. The **only** module that
-  executes plugin code.
+- `worker.py`: entry point `python -s -P -m perp_lab.sandbox.worker`. Confines itself, imports
+  `session`, runs its self-test and serves requests.
+- `session.py`: the **only** module that executes plugin code (split from `worker.py`, which
+  must confine itself before it imports numpy).
 - `protocol.py`: framing and validation. The parent-side reader is the trust boundary.
-- `client.py` (trusted): spawns workers, enforces limits, classifies failures. Offers a batch
-  session and a stream session.
-- `replay.py` (trusted): `ScriptedStrategy`, random-entry verification, fingerprint comparison.
+- `client.py` (trusted): spawns workers, enforces limits, classifies failures; batch runs
+  (`Batch`, `fresh_run`).
+- `stream.py` (trusted): the streamed exam, its lockstep and its one rerun.
+- `decisions.py`, `replay.py` (trusted): decision logs, `ScriptedStrategy`, random-entry
+  verification, fingerprint comparison.
+- `errors.py`: the error types both sides share.
 
-New `perp_lab/plugins.py` (trusted): `PluginSource(name)` reads `strategies/<name>.py` once and
+`perp_lab/plugins.py` (trusted): `PluginSource(name)` reads `strategies/<name>.py` once and
 holds its bytes, its hash and its AST metadata.
 
-`load_strategy_class` moves into the worker. `plugin_parent` and `Strategy.hypothesis()` callers
-outside the worker switch to `PluginSource`. `RandomEntry` stays in `strategy.py`, used only
-inside the worker.
+`load_strategy_class` is gone: plugin code is loaded only by `session.load_plugin`, inside a
+worker (or the tests' in-process twin). `plugin_parent` and the hypothesis come from
+`PluginSource`. `RandomEntry` stays in `strategy.py`, used only inside the worker.
 
 ## Confinement
 
@@ -406,9 +412,9 @@ check, the walk-forward, sensitivity and the benchmark. 3a's checks for a plugin
 while it was being checked or run`) can no longer fire; the builder may remove them or keep them
 as assertions.
 
-## Where plugin code runs today, and after
+## Where plugin code ran before this phase, and now
 
-| Today | After |
+| Before | Now |
 |---|---|
 | `lab strategies` loads every plugin | AST only |
 | `lab backtest` | batch sessions plus replay |
@@ -497,9 +503,9 @@ Each test is written first and seen failing. Tests that need the kernel features
 - **Determinism:** two fresh workers give `hash()` of a string the same value.
 - **Fail closed:** with `probe()` failing, `lab judge` exits 1 and records nothing, and
   `attempt_exam` doesn't mint.
-- **Single executor:** no module in `perp_lab/` or `dashboard/` except `perp_lab/sandbox/worker.py`
-  calls `exec`, `exec_module`, `spec_from_file_location`, `load_strategy_class` or `import_module`
-  on a plugin (AST scan anchored on the repo root, so it can't pass vacuously from another
+- **Single executor:** no module in `perp_lab/` or `dashboard/` except `perp_lab/sandbox/session.py`
+  calls `exec`, `compile`, `exec_module`, `spec_from_file_location`, `load_plugin` or
+  `import_module` (AST scan anchored on the repo root, so it can't pass vacuously from another
   directory).
 - **Metadata:** AST values equal runtime values for every real plugin; a computed `PARENT` and a
   computed `grid` are refused; a plugin that changes `params` at import gets
@@ -527,13 +533,13 @@ Each test is written first and seen failing. Tests that need the kernel features
 - **End to end** on small synthetic data with a temp config and store, through the real sandbox:
   a kill, a promotion left `pending`, and an exam examined and passed.
 
-## Changes to existing documents
+## Changes made to existing documents
 
 - The 3a spec: the caveat in its Goal and the last bullet of its carried requirements point to
-  this spec. Its step 10 changes: `lab judge` no longer attempts the exam. Its holdout budget
-  section gains the stored window end and the attempt cap.
-- README: the rules table gains the sandbox rows; the "(plugin code is not sandboxed yet …)"
-  qualifier goes.
+  this spec. Its step 10 changed: `lab judge` no longer attempts the exam. Its holdout budget
+  section gained the stored window end and the attempt cap.
+- README: the rules table gained the sandbox rows; the "(plugin code is not sandboxed yet …)"
+  qualifier went.
 - The `strategy.py` contract docstring: metadata must be literals, features numeric, a plugin
   gets only the bars it is sent, and it can import only what is on the read allowlist.
 
