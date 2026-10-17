@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 
 from perp_lab.config import TF_MS, ccxt_symbol
+from perp_lab.plugins import PluginSource
+from perp_lab.sandbox import client
 from perp_lab.validate.regime import regime_frame
 
 
@@ -94,14 +96,14 @@ def refresh_paper_run(cfg, run_id: str, exchange=None) -> dict:
     return update_paper_tracking(cfg, run_id, changes, detail)
 
 
-def replay_divergence(cfg, paper_dir: Path, strategy_cls, params: dict, tf: str) -> pd.DataFrame:
+def replay_divergence(cfg, paper_dir: Path, src: PluginSource, params: dict, tf: str) -> pd.DataFrame:
     """Re-run the backtest engine on exactly the bars the paper runner saw.
 
     Returns daily cumulative pnl (% of starting equity, summed over symbols) for
     paper vs replay, and their difference. Same strategy, same bars — the gap is
     execution: spread vs slippage model, live stop fills, timing.
     """
-    from perp_lab.engine.backtest import EngineParams, run_backtest
+    from perp_lab.engine.backtest import EngineParams
     paper_dir = Path(paper_dir)
     tp = paper_dir / "trades.parquet"
     paper = pd.read_parquet(tp) if tp.exists() else pd.DataFrame()
@@ -113,9 +115,8 @@ def replay_divergence(cfg, paper_dir: Path, strategy_cls, params: dict, tf: str)
         live = np.flatnonzero(bars["live"].to_numpy())
         if len(live) == 0:
             continue
-        s = strategy_cls(**params)
-        res = run_backtest(s, bars, s.prepare(bars), symbol=sym, tf=tf,
-                           ep=EngineParams.from_config(cfg, sym), start_i=int(live[0]))
+        with client.Batch(cfg, src, sym, tf, bars) as batch:
+            res = batch.backtest(params, EngineParams.from_config(cfg, sym), start_i=int(live[0]))
         rep_rows += res.trades
     rep = pd.DataFrame(rep_rows)
 

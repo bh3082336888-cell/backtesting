@@ -70,26 +70,27 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
              config: Optional[str] = CfgOpt):
     """Single fixed-param backtest over the research span. This is IN-SAMPLE by definition."""
     from perp_lab.data.store import load_bars
-    from perp_lab.engine.backtest import EngineParams, run_backtest
+    from perp_lab.engine.backtest import EngineParams
     from perp_lab.engine.metrics import daily_returns, portfolio_returns, summarize
+    from perp_lab.plugins import PluginSource
     from perp_lab.runs import new_run_id, repo_commit, write_run
-    from perp_lab.strategy import load_strategy_class, plugin_hash
+    from perp_lab.sandbox import client
 
     cfg = load_config(config)
-    cls = load_strategy_class(strategy)
+    src = PluginSource.read(strategy)
     p = json.loads(params)
     per, trades = {}, []
     for s in _syms(cfg, symbols):
         bars = load_bars(cfg, s, tf)
-        st = cls(**p)
-        r = run_backtest(st, bars, st.prepare(bars), symbol=s, tf=tf, ep=EngineParams.from_config(cfg, s))
+        with client.Batch(cfg, src, s, tf, bars) as batch:
+            r = batch.backtest({**src.meta.params, **p}, EngineParams.from_config(cfg, s))
         per[s] = daily_returns(r.equity, r.time)
         trades += r.trades
     tr = pd.DataFrame(trades)
     m = summarize(portfolio_returns(per), tr)
     rid = new_run_id()
-    rec = {"run_id": rid, "strategy": strategy, "strategy_hash": plugin_hash(strategy),
-           "hypothesis": cls.hypothesis(), "repo_commit": repo_commit(), "params": {**cls.params, **p},
+    rec = {"run_id": rid, "strategy": strategy, "strategy_hash": src.hash,
+           "hypothesis": src.meta.hypothesis, "repo_commit": repo_commit(), "params": {**src.meta.params, **p},
            "universe": list(per), "timeframes": [tf], "validation_mode": "IS",
            "date_start": str(cfg.history_start.date()), "date_end": str(cfg.holdout_start.date()),
            "metrics": m, "parent_run_id": None, "created_at": datetime.now(timezone.utc).isoformat(),
@@ -132,7 +133,7 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
     from perp_lab.paper.runner import PaperRunner
     from perp_lab.runs import new_run_id, repo_commit
     from perp_lab.store.db import current_status, engine, record_run, runs
-    from perp_lab.strategy import load_strategy_class, plugin_hash
+    from perp_lab.plugins import PluginSource
     cfg = load_config(config)
     with engine(cfg).connect() as c:
         r = c.execute(sa.select(runs).where(runs.c.run_id == from_run)).mappings().first()
@@ -144,19 +145,19 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
         raise typer.Exit(2)
     params = (r["metrics"] or {}).get("modal_params") or json.loads(
         (cfg.runs_dir / from_run / "summary.json").read_text())["sensitivity"]["base_params"]
-    cls = load_strategy_class(r["strategy"])
+    src = PluginSource.read(r["strategy"])
     rid = new_run_id()
     out = cfg.runs_dir / rid
     syms = _syms(cfg, symbols) if symbols else r["universe"]
     started = datetime.now(timezone.utc)
-    record_run(cfg, {"run_id": rid, "strategy": r["strategy"], "strategy_hash": plugin_hash(r["strategy"]),
-                     "hypothesis": cls.hypothesis(), "params": params, "universe": syms,
+    record_run(cfg, {"run_id": rid, "strategy": r["strategy"], "strategy_hash": src.hash,
+                     "hypothesis": src.meta.hypothesis, "params": params, "universe": syms,
                      "timeframes": [r["timeframe"]], "validation_mode": "paper", "repo_commit": repo_commit(),
                      "parent_run_id": from_run, "lineage_id": r["lineage_id"], "created_at": started.isoformat(),
                      "paper_started_at": started.isoformat(), "metrics": {},
                      "artifacts": {"trades": str(out / "trades.parquet")}}, out)
     typer.echo(f"paper run {rid} → {out}")
-    pr = PaperRunner(cfg, cls, params, r["timeframe"], syms, out)
+    pr = PaperRunner(cfg, src, params, r["timeframe"], syms, out)
     asyncio.run(pr.run(max_bars=max_bars))
 
 

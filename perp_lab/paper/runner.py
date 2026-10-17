@@ -19,21 +19,25 @@ import json
 import logging
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
 
 from perp_lab.config import TF_MS, ccxt_symbol
 from perp_lab.data.live import acall_with_backoff, ohlcv_to_candles, watch_closed
-from perp_lab.engine.backtest import EngineParams, build_arrays, liq_price
-from perp_lab.strategy import Ctx, PositionView, Signal, Strategy
+from perp_lab.engine.backtest import EngineParams, liq_price
+from perp_lab.plugins import PluginSource
+from perp_lab.sandbox import client
+from perp_lab.strategy import PositionView, Signal
 
 log = logging.getLogger(__name__)
 
 
 class PaperBook:
-    def __init__(self, strategy: Strategy, symbol: str, tf: str, ep: EngineParams):
-        self.s, self.symbol, self.tf, self.ep = strategy, symbol, tf, ep
+    def __init__(self, decide: Callable[[pd.DataFrame, PositionView | None], Signal], symbol: str, tf: str,
+                 ep: EngineParams):
+        self.decide, self.symbol, self.tf, self.ep = decide, symbol, tf, ep
         self.W = ep.equity0
         self.pos: dict | None = None
         self.pending: Signal | None = None
@@ -45,21 +49,18 @@ class PaperBook:
     # -- bar close: decide
     def on_closed_bar(self, bars: pd.DataFrame) -> Signal:
         self.bars = bars
-        feats = self.s.prepare(bars)
-        A = build_arrays(bars, feats)
-        ctx = Ctx(A, self.symbol)
-        ctx.i = len(bars) - 1
+        i = len(bars) - 1
         c = float(bars.close.iloc[-1])
         p = self.pos
+        pv = None
         if p:
             if (p["side"] > 0 and c > p["best"]) or (p["side"] < 0 and c < p["best"]):
                 p["best"] = c
             pv = PositionView()
             pv.side, pv.entry_price, pv.entry_i = p["side"], p["entry_price"], p["entry_i"]
             pv.stop, pv.target, pv.qty, pv.best_close = p["stop"], p["target"], p["qty"], p["best"]
-            pv.bars_held = ctx.i - p["entry_i"] + 1
-            ctx.position = pv
-        sig = self.s.on_bar(ctx)
+            pv.bars_held = i - p["entry_i"] + 1
+        sig = self.decide(bars, pv)
         if sig.action == "hold":
             if p and sig.stop is not None and sig.stop == sig.stop:
                 if (p["side"] > 0 and sig.stop > p["stop"]) or (p["side"] < 0 and sig.stop < p["stop"]):
@@ -70,7 +71,7 @@ class PaperBook:
             self.pending = sig
             self.pending_meta = {"signal_time": int(bars.open_time.iloc[-1]), "close": c,
                                  "regime": str(bars["regime"].iloc[-1]) if "regime" in bars else "unknown",
-                                 "i": ctx.i}
+                                 "i": i}
         return sig
 
     # -- quotes: execute pending, then stops/targets/liq
@@ -162,15 +163,19 @@ class PaperBook:
         self.pos = None
 
 
+def _no_worker(bars, pv):
+    raise RuntimeError("no worker is open for this symbol yet")
+
+
 class PaperRunner:
-    def __init__(self, cfg, strategy_cls, params: dict, tf: str, symbols: list[str], out_dir: Path,
+    def __init__(self, cfg, src: PluginSource, params: dict, tf: str, symbols: list[str], out_dir: Path,
                  exchange=None):
-        self.cfg, self.cls, self.params, self.tf, self.symbols = cfg, strategy_cls, params, tf, symbols
+        self.cfg, self.src, self.params, self.tf, self.symbols = cfg, src, params, tf, symbols
         self.out = Path(out_dir)
         self.out.mkdir(parents=True, exist_ok=True)
         self.ex = exchange
-        self.books = {s: PaperBook(strategy_cls(**params), s, tf, EngineParams.from_config(cfg, s))
-                      for s in symbols}
+        self.eps = {s: EngineParams.from_config(cfg, s) for s in symbols}
+        self.books = {s: PaperBook(_no_worker, s, tf, self.eps[s]) for s in symbols}
         self.quote = cfg.get("quote", "USDT")
         self.seen: dict[str, pd.DataFrame] = {}
         self.warmup = cfg["paper"]["warmup_bars"]
@@ -202,9 +207,21 @@ class PaperRunner:
                                        errors="ignore"), st, self.tf)
 
     async def _bars_loop(self, sym, max_bars):
+        # The worker is spawned and closed in this thread (its parent-death signal is the spawning thread's).
         book = self.books[sym]
         bars = await self._warm(sym)
+        worker = client.spawn(self.cfg, self.src)
+        try:
+            await self._stream(sym, book, worker, bars, max_bars)
+        finally:
+            worker.close()
+
+    async def _stream(self, sym, book, worker, bars, max_bars):
         self.seen[sym] = bars.assign(live=False).reset_index(drop=True)
+        worker.bars(sym, self.tf, bars.set_axis(pd.to_datetime(bars.open_time.astype("int64"), unit="ms",
+                                                                utc=True)))
+        worker.stream_open(self.params, self.eps[sym], 0)
+        book.decide = lambda window, pv: worker.step(pv, window=window)
         n = 0
         async for c in watch_closed(self.ex, sym, self.tf, self.quote):
             row = pd.DataFrame([c.to_dict()])

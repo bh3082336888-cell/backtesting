@@ -7,15 +7,55 @@ import pytest
 
 from perp_lab.engine.backtest import EngineParams
 from perp_lab.paper.runner import PaperBook, PaperRunner
+from perp_lab.plugins import PluginSource
+from perp_lab.sandbox import client
+from perp_lab.sandbox.decisions import decide_last
+from perp_lab.sandbox.errors import PluginError
 from perp_lab.strategy import EXIT, Signal
-from tests.conftest import Scripted, flat_bars
+from tests.conftest import Scripted, flat_bars, market_config
+from tests.judge_fixtures import plugins  # noqa: F401
 
 EP = EngineParams()
 
 
+def scripted_decide(schedule):
+    s = Scripted(schedule)
+    return lambda bars, pv: decide_last(s, "X", bars, pv)
+
+
+ALWAYS = '''"""Always long."""
+from perp_lab.strategy import Signal, Strategy
+
+
+class Always(Strategy):
+    def prepare(self, bars):
+        return bars[[]]
+
+    def on_bar(self, ctx):
+        return Signal("long", stop=90.0)
+'''
+
+FAILS_SECOND = '''"""Raises on its second bar."""
+from perp_lab.strategy import Signal, Strategy
+
+CALLS = []
+
+
+class Fails(Strategy):
+    def prepare(self, bars):
+        return bars[[]]
+
+    def on_bar(self, ctx):
+        CALLS.append(1)
+        if len(CALLS) == 2:
+            raise RuntimeError("boom")
+        return Signal("long", stop=90.0)
+'''
+
+
 def test_paper_fills_at_book_and_stops_on_bid():
     b = flat_bars(10)
-    book = PaperBook(Scripted({9: Signal("long", stop=95.0)}), "X", "1h", EP)
+    book = PaperBook(scripted_decide({9: Signal("long", stop=95.0)}), "X", "1h", EP)
     book.on_closed_bar(b)
     book.on_quote(99.9, 100.1, 1)
     assert book.pos["entry_price"] == 100.1          # bought the ask
@@ -31,7 +71,7 @@ def test_paper_trade_schema_matches_backtest():
     b = flat_bars(20)
     s = Scripted({5: Signal("long", stop=95.0), 8: EXIT})
     bt = run_backtest(s, b, s.prepare(b), symbol="X", tf="1h", ep=EP).trades[0]
-    book = PaperBook(Scripted({9: Signal("long", stop=95.0)}), "X", "1h", EP)
+    book = PaperBook(scripted_decide({9: Signal("long", stop=95.0)}), "X", "1h", EP)
     book.on_closed_bar(b.iloc[:10])
     book.on_quote(99.9, 100.1, 1)
     book.pending = EXIT
@@ -182,10 +222,49 @@ def test_ccxt_ws_drain_keeps_aiohttp_queue_accounting_balanced():
 def test_paper_runner_loop_with_fake_exchange(tmp_path):
     from perp_lab.config import load_config
     cfg = load_config()
-    cls = type("Always", (Scripted,), {"__init__": lambda self, **kw: Scripted.__init__(
-        self, {i: Signal("long", stop=90.0) for i in range(2000)})})
-    r = PaperRunner(cfg, cls, {}, "1h", ["BTCUSDT"], tmp_path, exchange=FakeEx())
+    r = PaperRunner(cfg, PluginSource.from_text("always", ALWAYS), {}, "1h", ["BTCUSDT"], tmp_path,
+                    exchange=FakeEx())
     asyncio.run(r.run(max_bars=3))
     assert r.books["BTCUSDT"].pos is not None
     assert r.books["BTCUSDT"].pos["entry_price"] == 100.1   # filled at the live ask
     assert (tmp_path / "state.json").exists()
+
+
+def test_paper_stops_when_its_worker_fails(tmp_path):
+    from perp_lab.config import load_config
+    r = PaperRunner(load_config(), PluginSource.from_text("fails", FAILS_SECOND), {}, "1h", ["BTCUSDT"],
+                    tmp_path, exchange=FakeEx())
+    with pytest.raises(PluginError):
+        asyncio.run(r.run(max_bars=5))
+    assert (tmp_path / "state.json").exists()
+
+
+def test_paper_closes_its_workers(tmp_path, monkeypatch):
+    from perp_lab.config import load_config
+    made = []
+    real = client.spawn
+
+    def spy(cfg, src):
+        w = real(cfg, src)
+        closed = []
+        w.close = lambda: closed.append(1)
+        made.append(closed)
+        return w
+    monkeypatch.setattr(client, "spawn", spy)
+    r = PaperRunner(load_config(), PluginSource.from_text("always", ALWAYS), {}, "1h", ["BTCUSDT"], tmp_path,
+                    exchange=FakeEx())
+    asyncio.run(r.run(max_bars=2))
+    assert made == [[1]]
+
+
+def test_cli_backtest_runs_through_the_sandbox(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    cfg = market_config(tmp_path)
+    spawned = []
+    real = client.spawn
+    monkeypatch.setattr(client, "spawn", lambda c, src: spawned.append(src.name) or real(c, src))
+    r = CliRunner().invoke(app, ["backtest", "donchian_atr", "--tf", "4h", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+    assert spawned == ["donchian_atr"] * len(cfg.symbols)
