@@ -70,6 +70,20 @@ def fork(target, pre):
     os.waitpid(pid, 0)
 
 
+def clone3(target, pre):
+    import signal
+    args = (ctypes.c_uint64 * 11)()                    # struct clone_args, 88 bytes
+    args[4] = signal.SIGCHLD                           # flags 0, exit_signal SIGCHLD: a plain fork
+    pid = _ok(libc.syscall(ctypes.c_long(435), args, ctypes.c_size_t(ctypes.sizeof(args))))
+    if pid == 0:
+        os._exit(0)
+    os.waitpid(pid, 0)
+
+
+def inotify_init1(target, pre):
+    os.close(_ok(libc.inotify_init1(0)))
+
+
 def subprocess_(target, pre):
     import subprocess
     subprocess.run([sys.executable, "-c", "pass"], check=True)
@@ -94,12 +108,11 @@ def sched_getaffinity_parent(target, pre):
     os.sched_getaffinity(os.getppid())
 
 
-def setpriority_user(target, pre):
-    # PRIO_USER with who 0 means every process of this user. Nice -20 with RLIMIT_NICE 0 can't be
-    # set on any process that isn't there already, so even a filter that let this through changes
-    # nothing; the kernel would answer EACCES, the filter answers EPERM.
-    resource.setrlimit(resource.RLIMIT_NICE, (0, 0))
-    os.setpriority(os.PRIO_USER, 0, -20)
+def setpriority_pgrp(target, pre):
+    # which != PRIO_PROCESS must be denied (PRIO_USER, who 0 would be every process of this
+    # user). PRIO_PGRP is used here because the probe runs in its own session, alone in its
+    # process group, so a filter that let this through could renice only the probe itself.
+    os.setpriority(os.PRIO_PGRP, 0, 19)
 
 
 def ioprio_get_user(target, pre):
@@ -218,8 +231,8 @@ def import_numpy_pandas_pyarrow(target, pre):
 PROBES = {f.__name__.rstrip("_"): f for f in (
     read_repo_file, write_tmp, tcp_connect, udp_send, unix_connect, fork, subprocess_, shmget,
     prlimit_parent, kill_parent, sched_getaffinity_parent, read_pre_existing_thread, read_allowlisted,
-    import_numpy_pandas_pyarrow, setpriority_user, ioprio_get_user, getpriority_self, mq_open,
-    x32_syscall)}
+    import_numpy_pandas_pyarrow, setpriority_pgrp, ioprio_get_user, getpriority_self, mq_open,
+    x32_syscall, clone3, inotify_init1)}
 
 
 def main(argv):

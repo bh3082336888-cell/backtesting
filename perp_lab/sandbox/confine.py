@@ -75,7 +75,8 @@ _ALWAYS_EPERM = """
     migrate_pages move_pages mount umount2 pivot_root chroot unshare setns bpf perf_event_open
     userfaultfd io_uring_setup io_uring_enter io_uring_register keyctl add_key request_key
     init_module finit_module delete_module kexec_load kexec_file_load
-    mq_open mq_unlink mq_timedsend mq_timedreceive mq_notify mq_getsetattr""".split()
+    mq_open mq_unlink mq_timedsend mq_timedreceive mq_notify mq_getsetattr
+    inotify_init inotify_init1 fanotify_init""".split()     # Landlock has no right for file watches
 _PID_ARG0 = """
     prlimit64 sched_setaffinity sched_getaffinity sched_setscheduler sched_getscheduler
     sched_setparam sched_getparam sched_rr_get_interval sched_setattr sched_getattr""".split()

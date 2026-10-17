@@ -62,14 +62,16 @@ EXPECTED = {
     "udp_send": "DENIED EPERM",
     "unix_connect": "DENIED EPERM",
     "fork": "DENIED EPERM",                       # seccomp: clone without CLONE_THREAD
+    "clone3": "DENIED ENOSYS",                    # seccomp: clone3, so libc falls back to clone
     "subprocess": "DENIED EPERM",
     "shmget": "DENIED EPERM",                     # seccomp: System V IPC
     "prlimit_parent": "DENIED EPERM",             # seccomp: prlimit64 aimed at another pid
     "kill_parent": "DENIED EPERM",                # Landlock: signal scope
     "sched_getaffinity_parent": "DENIED EPERM",   # seccomp: sched_* aimed at another pid
-    "setpriority_user": "DENIED EPERM",           # seccomp: PRIO_USER, who 0 is every process of this user
+    "setpriority_pgrp": "DENIED EPERM",           # seccomp: which must be PRIO_PROCESS
     "ioprio_get_user": "DENIED EPERM",            # seccomp: IOPRIO_WHO_USER, likewise
     "mq_open": "DENIED EPERM",                    # seccomp: POSIX message queues
+    "inotify_init1": "DENIED EPERM",              # seccomp: Landlock has no right for file watches
     "read_pre_existing_thread": "REFUSED",        # confine() must be the only thread
 }
 
