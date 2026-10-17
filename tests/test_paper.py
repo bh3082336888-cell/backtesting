@@ -11,7 +11,7 @@ from perp_lab.paper.runner import PaperBook, PaperRunner
 from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client
 from perp_lab.sandbox.decisions import decide_last
-from perp_lab.sandbox.errors import PluginError
+from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.strategy import EXIT, Signal
 from tests.conftest import Scripted, flat_bars, market_config
 from tests.judge_fixtures import plugins  # noqa: F401
@@ -319,3 +319,46 @@ def test_cli_backtest_runs_through_the_sandbox(tmp_path, monkeypatch, plugins):
     r = CliRunner().invoke(app, ["backtest", "donchian_atr", "--tf", "4h", "--config", str(cfg.path)])
     assert r.exit_code == 0, r.output
     assert spawned == ["donchian_atr"] * len(cfg.symbols)
+
+
+def _no_sandbox(monkeypatch):
+    def unavailable(*a, **kw):
+        raise SandboxUnavailable("Landlock ABI 5 < 6")
+    monkeypatch.setattr(client, "spawn", unavailable)
+
+
+@pytest.mark.parametrize("command", [["backtest", "donchian_atr", "--tf", "4h"],
+                                     ["walkforward", "donchian_atr", "--tf", "4h", "--workers", "1"]])
+def test_cli_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins, command):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    cfg = market_config(tmp_path)
+    _no_sandbox(monkeypatch)
+    r = CliRunner().invoke(app, command + ["--config", str(cfg.path)])
+    assert (r.exit_code, type(r.exception)) == (1, SystemExit), r.exception    # no traceback
+    assert "sandbox unavailable: Landlock ABI 5 < 6" in r.output
+
+
+def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    from perp_lab.store import db
+    from tests.test_store import fake_run
+    cfg = market_config(tmp_path)
+    fake_run(cfg, "c1", strategy="donchian_atr", verdict="candidate")
+    jid = db.record_judgement(cfg, {
+        "strategy": "donchian_atr", "timeframe": "4h", "strategy_hash": "abc", "child_run_id": "c1",
+        "parent_run_id": None, "lineage_id": "c1", "decision": "promote", "reasons": [],
+        "holdout_status": "pending", "holdout_reason": "awaiting_exam"})
+    db.update_holdout(cfg, jid, "passed", "passed")
+    db.approve_paper(cfg, "c1", "me")
+
+    async def run(self, max_bars=None):          # as the runner's first spawn would
+        client.spawn(self.cfg, self.src)
+    monkeypatch.setattr(PaperRunner, "run", run)
+    _no_sandbox(monkeypatch)
+    r = CliRunner().invoke(app, ["paper", "c1", "--config", str(cfg.path)])
+    assert (r.exit_code, type(r.exception)) == (1, SystemExit), r.exception
+    assert "sandbox unavailable: Landlock ABI 5 < 6" in r.output

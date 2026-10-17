@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -17,6 +18,18 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 log = logging.getLogger("lab")
 
 CfgOpt = typer.Option(None, "--config", "-c", help="path to lab.yaml")
+
+
+@contextmanager
+def _sandbox_required():
+    """Plugin code runs only in the sandbox: where this machine can't provide one, say why and exit
+    1, without a traceback."""
+    from perp_lab.sandbox.errors import SandboxUnavailable
+    try:
+        yield
+    except SandboxUnavailable as e:
+        typer.secho(f"sandbox unavailable: {e}", fg="red")
+        raise typer.Exit(1)
 
 
 def _syms(cfg, symbols: Optional[str]) -> list[str]:
@@ -82,7 +95,7 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
     per, trades = {}, []
     for s in _syms(cfg, symbols):
         bars = load_bars(cfg, s, tf)
-        with client.Batch(cfg, src, s, tf, bars) as batch:
+        with _sandbox_required(), client.Batch(cfg, src, s, tf, bars) as batch:
             r = batch.backtest({**src.meta.params, **p}, EngineParams.from_config(cfg, s))
         per[s] = daily_returns(r.equity, r.time)
         trades += r.trades
@@ -111,8 +124,9 @@ def walkforward(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
     """Walk-forward + sensitivity + random-entry + MC + regime split. OOS headline only."""
     from perp_lab.validate.pipeline import validate_strategy
     cfg = load_config(config)
-    rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
-                                    parent_run_id=parent_run)
+    with _sandbox_required():
+        rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
+                                        parent_run_id=parent_run)
     o, i = rec["metrics"], rec["is_metrics"]
     typer.secho(f"{strategy} @ {tf}  →  {rec['status'].upper()}", bold=True,
                 fg="red" if rec["status"] == "noise" else "green")
@@ -158,7 +172,8 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
                      "artifacts": {"trades": str(out / "trades.parquet")}}, out)
     typer.echo(f"paper run {rid} → {out}")
     pr = PaperRunner(cfg, src, params, r["timeframe"], syms, out)
-    asyncio.run(pr.run(max_bars=max_bars))
+    with _sandbox_required():
+        asyncio.run(pr.run(max_bars=max_bars))
 
 
 @app.command("paper-refresh")
@@ -209,13 +224,10 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
     which only `lab exam` runs."""
     from perp_lab.judge.judge import JudgeRefused
     from perp_lab.judge.judge import judge as run_judge
-    from perp_lab.sandbox.errors import SandboxUnavailable
     cfg = load_config(config)
     try:
-        j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers)
-    except SandboxUnavailable as e:
-        typer.secho(f"sandbox unavailable: {e}", fg="red")
-        raise typer.Exit(1)
+        with _sandbox_required():
+            j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers)
     except JudgeRefused as e:
         typer.secho(f"refused: {e}", fg="red")
         raise typer.Exit(2)
