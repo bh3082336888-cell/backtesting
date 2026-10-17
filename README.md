@@ -90,7 +90,7 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 
 - Plugin code runs only in a confined worker process (`perp_lab/sandbox/`); `session.py` is the one module that executes it.
-- A worker reads only the Python installation and `perp_lab/`, plus the bars it is sent. It opens no socket and starts no process.
+- A worker reads only the Python installation and `perp_lab/`, plus the bars it is sent. It writes no file and changes no file's metadata (mode, owner, times, extended attributes, inode flags), opens no socket and starts no process.
 - It reports decisions, not results: the trusted engine replays them, and any disagreement is a `mismatch`.
 - `lab judge` runs lookahead checks, walk-forward and the benchmark through workers; an error caused by the plugin is a recorded kill (`plugin_error`).
 - `lab exam` streams the holdout to each worker one bar at a time, symbols in lockstep, and is the only command that runs exams.
@@ -110,7 +110,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | OOS is the headline; IS is shown greyed and labelled | `validate/pipeline.py` report |
 | A strategy must beat random-entry (same exits, matched frequency) p95 OOS | `validate/benchmarks.py` |
 | Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days | `judge/budget.py`, `tests/test_budget.py` |
-| Plugin code runs only in a confined worker: Landlock, seccomp and rlimits; it reads no data, store, log or verdict, opens no socket | `sandbox/confine.py`, `tests/test_confine.py` |
+| Plugin code runs only in a confined worker: Landlock, seccomp and rlimits; it reads no data, store, log or verdict, writes no file or file metadata, opens no socket | `sandbox/confine.py`, `tests/test_confine.py` |
 | Scores come from the trusted engine replaying the plugin's decisions, never from numbers the plugin reports | `sandbox/replay.py`, `tests/test_replay.py` |
 | The exam streams the holdout one bar at a time, symbols in lockstep, so a plugin never holds a later bar | `sandbox/stream.py`, `tests/test_stream.py` |
 | Only `lab exam` runs exams; `lab judge` records `awaiting_exam` and returns | `judge/judge.py`, `tests/test_judge_exam.py` |

@@ -20,10 +20,11 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
 ### What this guarantees
 
 - **G1 Isolation.** A plugin's process can read only the Python installation, site-packages and
-  the `perp_lab/` package source, plus the bars and parameters it is sent. It cannot write files,
-  open sockets, start processes, share memory with another process, or signal, trace, or change
-  the limits or scheduling of any process outside itself. It inherits no environment variables,
-  so no secrets.
+  the `perp_lab/` package source, plus the bars and parameters it is sent. It cannot write files
+  or change any file's metadata (mode, owner, timestamps, extended attributes, inode flags), open
+  sockets, start processes, share memory with another process, or signal, trace, or change the
+  limits or scheduling of any process outside itself. It inherits no environment variables, so no
+  secrets.
 - **G2 Scoring.** Trades, equity and every metric come from the trusted engine replaying the
   plugin's decisions. A worker that reports anything inconsistent with the replay is caught
   (`mismatch`).
@@ -52,8 +53,8 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
   recorded kill.
 - **R4 Kernel bugs.** Confinement rests on Landlock and seccomp. A kernel exploit escapes it.
 - **R5 File metadata.** `stat()` metadata (size, modification time) of files outside the
-  allowlist stays visible to a plugin. Landlock has no right for it and seccomp can't filter by
-  path. File contents stay unreadable.
+  allowlist stays *readable* to a plugin: Landlock has no right for it and seccomp can't filter by
+  path. Changing metadata is denied (step 5 below), and file contents stay unreadable.
 - **R6 Isolation across processes.** The wave and lockstep isolation holds within one lookahead
   check or one exam. It does not hold across lookahead checks or exams that run at the same
   time in separate processes.
@@ -161,6 +162,16 @@ library imported. Until step 7 ends, only trusted code has run in it.
      `mq_notify`, `mq_getsetattr`. Like System V IPC, Landlock doesn't cover them;
    - file watches: `inotify_init`, `inotify_init1`, `fanotify_init`. Landlock has no right for
      them;
+   - file metadata: `chmod`, `fchmod`, `fchmodat`, `fchmodat2`, `chown`, `fchown`, `lchown`,
+     `fchownat`, `utime`, `utimes`, `utimensat`, `futimesat`, and setting, removing, reading or
+     listing extended attributes (`setxattr`, `lsetxattr`, `fsetxattr`, `removexattr`,
+     `lremovexattr`, `fremovexattr`, `getxattr`, `lgetxattr`, `fgetxattr`, `listxattr`,
+     `llistxattr`, `flistxattr`, and their `*at` forms); `ioctl` requests that set an inode's
+     flags, attributes or generation (`FS_IOC_SETFLAGS`, `FS_IOC_FSSETXATTR`, `FS_IOC_SETVERSION`
+     and their aliases) and `fcntl(F_SET_RW_HINT)`. Landlock has no right for a file's metadata,
+     so without these rules a worker could leave bytes in the mode bits, timestamps or extended
+     attributes of any file this user owns, or the flags of any it can open, for a later worker
+     to read (tested);
    - calls aimed at another process: `ptrace`, `process_vm_readv`, `process_vm_writev`,
      `process_madvise`, `kcmp`, `pidfd_open`, `pidfd_getfd`, `migrate_pages`, `move_pages`.
      `prlimit64` and the `sched_*` calls that take a pid are allowed only on the calling
@@ -173,6 +184,11 @@ library imported. Until step 7 ends, only trusted code has run in it.
    - `mount`, `umount2`, `pivot_root`, `chroot`, `unshare`, `setns`; `bpf`, `perf_event_open`,
      `userfaultfd`, the `io_uring_*` calls; `keyctl`, `add_key`, `request_key`; module loading
      and `kexec` calls.
+
+   Every syscall number above the highest this libseccomp can name, up to 1024, returns `ENOSYS`:
+   on a kernel newer than the library, calls such as `setxattrat` or `file_setattr` have no name
+   a rule could use, and `ENOSYS` is what an older kernel answers, which callers handle. A test
+   exports the filter without loading it and runs it over every rule above.
 
    A syscall through a non-native ABI (i386, x32) kills the process (`SCMP_ACT_KILL_PROCESS`). Sockets are denied outright
    because Landlock's network rules cover TCP only: UDP and existing UNIX sockets such as the
@@ -442,7 +458,10 @@ Each test is written first and seen failing. Tests that need the kernel features
   possible. Each of these fails: reading a file under `data/`, `runs/lab.db` or the holdout log;
   writing a sentinel file (the test checks it doesn't exist); a TCP connect to a listener the test
   runs (the listener sees no connection); a UDP send; connecting to a UNIX socket the test
-  creates; `os.fork`, `subprocess.run`; `os.kill` on the parent (the parent survives). A
+  creates; `os.fork`, `subprocess.run`; `os.kill` on the parent (the parent survives);
+  `chmod`, `chown`, `utime` and extended attributes on a scratch file the test owns (its mode,
+  times and attributes are unchanged afterwards), an inode-flag `ioctl`, and a syscall newer than
+  libseccomp (`ENOSYS`). A
   sentinel secret set in the parent's environment is absent in the worker. Minting a token
   through `_MINT_KEY` inside the worker succeeds but `load_bars` with it fails, because `data/` is
   unreadable. A System V shared-memory segment the test creates can't be attached, and one worker

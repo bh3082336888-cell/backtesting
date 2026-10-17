@@ -362,6 +362,73 @@ def test_one_worker_cannot_see_another_through_sysv(cfg):
         libc.shmctl(sid, IPC_RMID, None)
 
 
+@pytest.mark.sandbox
+def test_a_plugin_cannot_change_file_metadata(cfg, tmp_path):
+    # Mode bits, owner, timestamps and extended attributes would each hold bytes for a later worker.
+    target = tmp_path / "scratch.txt"                 # outside the allowlist, owned by this user
+    target.write_text("x")
+    os.chmod(target, 0o644)
+    os.utime(target, ns=(10**18, 10**18))
+    os.setxattr(target, "user.kept", b"v")
+    before = os.stat(target)
+    src = plugin("meta", f"""
+        import ctypes, errno
+        T = {str(target)!r}
+        libc = ctypes.CDLL(None, use_errno=True)
+        L = ctypes.c_long
+
+        def setxattrat():                             # 463 on every architecture; newer than libseccomp 2.5
+            value = ctypes.create_string_buffer(b"y")
+            xattr_args = (ctypes.c_uint64 * 2)(ctypes.addressof(value), 1)    # value, size 1, flags 0
+            if libc.syscall(L(463), L(-100), T.encode(), L(0), b"user.at", xattr_args, L(16)) != 0:
+                raise OSError(ctypes.get_errno(), "setxattrat")
+        out = []
+        for fn in (lambda: os.chmod(T, 0o600), lambda: os.chown(T, os.getuid(), os.getgid()),
+                   lambda: os.utime(T, (1_500_000_000, 1_500_000_000)), lambda: os.setxattr(T, "user.new", b"x"),
+                   lambda: os.removexattr(T, "user.kept"), lambda: os.getxattr(T, "user.kept"),
+                   lambda: os.listxattr(T), setxattrat):
+            try:
+                fn()
+                out.append("OK")
+            except OSError as e:
+                out.append(errno.errorcode[e.errno])
+        raise RuntimeError(" ".join(out))""")
+    e = plugin_error(batch_run, cfg, src)
+    assert e.message == "EPERM EPERM EPERM EPERM EPERM EPERM EPERM ENOSYS", e.reason()
+    after = os.stat(target)
+    assert (after.st_mode, after.st_uid, after.st_gid) == (before.st_mode, before.st_uid, before.st_gid)
+    assert (after.st_mtime_ns, after.st_ctime_ns) == (before.st_mtime_ns, before.st_ctime_ns)   # chown moves ctime
+    assert os.listxattr(target) == ["user.kept"] and os.getxattr(target, "user.kept") == b"v"
+
+
+@pytest.mark.sandbox
+def test_a_plugin_cannot_set_inode_flags(cfg):
+    # On a file it may open (its own package's source, owned by this user), setting the flags,
+    # attributes and write hint it already has would change nothing, and is still refused.
+    src = plugin("chattr", """
+        import errno, fcntl
+        import perp_lab
+        out = []
+        fd = os.open(perp_lab.__file__, os.O_RDONLY)
+        try:
+            flags = fcntl.ioctl(fd, 0x80086601, bytes(8))            # FS_IOC_GETFLAGS
+            attrs = fcntl.ioctl(fd, 0x801C581F, bytes(28))           # FS_IOC_FSGETXATTR
+            hint = fcntl.fcntl(fd, 1035, bytes(8))                   # F_GET_RW_HINT
+            for fn in (lambda: fcntl.ioctl(fd, 0x40086602, flags),   # FS_IOC_SETFLAGS
+                       lambda: fcntl.ioctl(fd, 0x401C5820, attrs),   # FS_IOC_FSSETXATTR
+                       lambda: fcntl.fcntl(fd, 1036, hint)):         # F_SET_RW_HINT
+                try:
+                    fn()
+                    out.append("OK")
+                except OSError as e:
+                    out.append(errno.errorcode[e.errno])
+        finally:
+            os.close(fd)
+        raise RuntimeError(" ".join(out))""")
+    e = plugin_error(batch_run, cfg, src)
+    assert e.message == "EPERM EPERM EPERM", e.reason()
+
+
 PARENT = """
 import os, sys
 from pathlib import Path

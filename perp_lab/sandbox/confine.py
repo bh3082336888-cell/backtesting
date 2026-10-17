@@ -2,8 +2,8 @@
 
 1. exactly one thread; 2. hard rlimits; 3. no_new_privs; 4. Landlock (read-only allowlist, no TCP,
 abstract UNIX sockets and signals scoped); 5. seccomp (sockets, exec, fork, System V IPC, calls
-aimed at another process, clearing the parent-death signal, and kernel-facing calls return an
-error).
+aimed at another process, clearing the parent-death signal, changing a file's metadata, and
+kernel-facing calls return an error; so does every call newer than libseccomp, with ENOSYS).
 
 Landlock and seccomp confine the calling thread and the threads it starts later; a thread that
 already exists stays unconfined, and plugin code could reach it through ctypes. So `confine()`
@@ -79,6 +79,25 @@ _ALWAYS_EPERM = """
     init_module finit_module delete_module kexec_load kexec_file_load
     mq_open mq_unlink mq_timedsend mq_timedreceive mq_notify mq_getsetattr
     inotify_init inotify_init1 fanotify_init""".split()     # Landlock has no right for file watches
+# File metadata. Landlock has no right for a file's mode, owner, timestamps or extended attributes,
+# and seccomp can't filter by path, so a worker could otherwise leave bytes in the metadata of any
+# file this user owns, for a later worker to read. Reading xattrs goes too; stat() stays (R5).
+_METADATA = """
+    chmod fchmod fchmodat chown fchown lchown fchownat utime utimes utimensat futimesat
+    setxattr lsetxattr fsetxattr removexattr lremovexattr fremovexattr
+    getxattr lgetxattr fgetxattr listxattr llistxattr flistxattr""".split()
+# Metadata calls newer than some libseccomp releases: denied by name where this libseccomp knows
+# them. Where it doesn't, their numbers are above every number it knows, which return ENOSYS.
+_NEWER_METADATA = "fchmodat2 setxattrat getxattrat listxattrat removexattrat file_getattr file_setattr".split()
+SYSCALL_BOUND = 1024                          # every number from libseccomp's highest + 1 to here: ENOSYS
+# ioctl requests that change an inode's flags (chattr), its fsxattr attributes or its generation
+# number, on any file the worker can open (its allowlist: the venv and perp_lab/ are this user's).
+# Same values on x86_64 and aarch64 (asm-generic ioctl encoding); the request is an unsigned int.
+_SET_INODE_IOCTLS = {"FS_IOC_SETFLAGS": 0x40086602, "FS_IOC32_SETFLAGS": 0x40046602,
+                     "FS_IOC_FSSETXATTR": 0x401C5820, "FS_IOC_SETVERSION": 0x40087602,
+                     "FS_IOC32_SETVERSION": 0x40047602, "EXT4_IOC_SETVERSION": 0x40086604}
+# fcntl commands denied: the inode's write-life hint (owner only, read back by anyone with an fd).
+_FCNTL_EPERM = {"F_SET_RW_HINT": 1036}
 _PID_ARG0 = """
     prlimit64 sched_setaffinity sched_getaffinity sched_setscheduler sched_getscheduler
     sched_setparam sched_getparam sched_rr_get_interval sched_setattr sched_getattr""".split()
@@ -89,7 +108,7 @@ _WHICH_WHO = {"getpriority": 0, "setpriority": 0, "ioprio_get": 1, "ioprio_set":
 # (action, syscall name, conditions (arg, op, datum_a, datum_b) that must all hold); several rules
 # for one syscall deny if any of them matches.
 _RULES = (
-    [(_EPERM, name, ()) for name in _ALWAYS_EPERM]
+    [(_EPERM, name, ()) for name in _ALWAYS_EPERM + _METADATA + _NEWER_METADATA]
     + [(_EPERM, "clone", ((0, _SCMP_CMP_MASKED_EQ, _CLONE_THREAD, 0),)),  # a thread is fine, a process isn't
        (_ENOSYS, "clone3", ())]                                          # so libc falls back to clone
     # The worker sets its parent-death signal before confining itself; plugin code may not clear
@@ -98,6 +117,9 @@ _RULES = (
     + [(_EPERM, name, ((0, _SCMP_CMP_NE, 0, 0),)) for name in _PID_ARG0]  # pid 0: this process only
     + [rule for name, which in _WHICH_WHO.items()                        # this process only
        for rule in ((_EPERM, name, ((0, _SCMP_CMP_NE, which, 0),)), (_EPERM, name, ((1, _SCMP_CMP_NE, 0, 0),)))]
+    # ioctl's request and fcntl's command are unsigned ints: their low 32 bits, as for prctl.
+    + [(_EPERM, "ioctl", ((1, _SCMP_CMP_MASKED_EQ, 0xFFFFFFFF, req),)) for req in _SET_INODE_IOCTLS.values()]
+    + [(_EPERM, "fcntl", ((1, _SCMP_CMP_MASKED_EQ, 0xFFFFFFFF, cmd),)) for cmd in _FCNTL_EPERM.values()]
 )
 
 _libc_dll = None
@@ -110,6 +132,7 @@ def _libc():
         lib = ctypes.CDLL(None, use_errno=True)
         lib.syscall.restype = ctypes.c_long
         lib.prctl.restype = ctypes.c_int
+        lib.free.restype, lib.free.argtypes = None, [ctypes.c_void_p]
         _libc_dll = lib
     return _libc_dll
 
@@ -124,9 +147,12 @@ def _seccomp():
                 ("seccomp_init", ctx, [ctypes.c_uint32]),
                 ("seccomp_attr_set", ctypes.c_int, [ctx, ctypes.c_int, ctypes.c_uint32]),
                 ("seccomp_syscall_resolve_name", ctypes.c_int, [ctypes.c_char_p]),
+                ("seccomp_syscall_resolve_num_arch", ctypes.c_void_p, [ctypes.c_uint32, ctypes.c_int]),
+                ("seccomp_arch_native", ctypes.c_uint32, []),
                 ("seccomp_rule_add_array", ctypes.c_int,
                  [ctx, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint, ctypes.POINTER(_ScmpArgCmp)]),
                 ("seccomp_load", ctypes.c_int, [ctx]),
+                ("seccomp_export_bpf", ctypes.c_int, [ctx, ctypes.c_int]),
                 ("seccomp_release", None, [ctx])):
             fn = getattr(lib, name)
             fn.restype, fn.argtypes = restype, argtypes
@@ -258,6 +284,16 @@ def _landlock(read_paths: list[str]) -> int:
 
 
 def _seccomp_filter(lib) -> None:
+    ctx = _build_filter(lib)
+    try:
+        _check(lib.seccomp_load(ctx), "seccomp_load")
+    finally:
+        lib.seccomp_release(ctx)
+
+
+def _build_filter(lib):
+    """The filter, built but not loaded: a libseccomp context the caller must release. (The tests
+    export it with seccomp_export_bpf and check every rule without confining themselves.)"""
     ctx = lib.seccomp_init(_SCMP_ACT_ALLOW)
     if not ctx:
         raise RuntimeError("seccomp_init failed")
@@ -269,6 +305,8 @@ def _seccomp_filter(lib) -> None:
         _check(lib.seccomp_attr_set(ctx, _SCMP_FLTATR_CTL_TSYNC, 1), "seccomp_attr_set(CTL_TSYNC)")
         for action, name, conditions in _RULES:
             nr = lib.seccomp_syscall_resolve_name(name.encode())
+            if nr == _NR_SCMP_ERROR and name in _NEWER_METADATA:
+                continue                      # newer than this libseccomp: ENOSYS, below
             if nr == _NR_SCMP_ERROR:          # unknown to this libseccomp: fail closed, not a hole
                 raise RuntimeError(f"libseccomp cannot name the syscall {name}")
             if nr < 0:
@@ -276,9 +314,28 @@ def _seccomp_filter(lib) -> None:
             args = (_ScmpArgCmp * len(conditions))(*conditions) if conditions else None
             _check(lib.seccomp_rule_add_array(ctx, action, nr, len(conditions), args),
                    f"seccomp_rule_add_array({name})")
-        _check(lib.seccomp_load(ctx), "seccomp_load")
-    finally:
+        # A call newer than this libseccomp (e.g. setxattrat, file_setattr on a kernel ahead of it)
+        # can't be named here, so none of the rules above can reach it: ENOSYS, as from an older
+        # kernel, which callers already handle.
+        for nr in range(_highest_known(lib) + 1, SYSCALL_BOUND):
+            _check(lib.seccomp_rule_add_array(ctx, _ENOSYS, nr, 0, None), f"seccomp_rule_add_array({nr})")
+    except BaseException:
         lib.seccomp_release(ctx)
+        raise
+    return ctx
+
+
+def _highest_known(lib) -> int:
+    """The highest syscall number this libseccomp can name on the native architecture."""
+    arch, top = lib.seccomp_arch_native(), -1
+    for nr in range(SYSCALL_BOUND):
+        name = lib.seccomp_syscall_resolve_num_arch(arch, nr)
+        if name:
+            top = nr
+            _libc().free(name)              # a copy libseccomp made with malloc
+    if top < 0:
+        raise RuntimeError("libseccomp names no syscall on this architecture")
+    return top
 
 
 def _check(rc: int, what: str) -> None:
