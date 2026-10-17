@@ -89,9 +89,9 @@ Costs come from the engine's fill rules:
   SOL and BNB (look 2). Over a hold of a day or less that is a few bp at most, which is small next
   to taker costs. Over multi-day holds it adds up: the Donchian runs paid 7–9% of their gross.
 
-Medians across the 8 symbols, in bp, over every bar from 2022-01 to 2026-07 (look 1). |move h|
-is the median absolute log move from bar t's close to bar t+h's close, over all bars, with no
-condition.
+The median over the 8 symbols of each symbol's own median, in bp, over every bar from 2022-01 to
+2026-07 (look 1). |move h| is the median absolute log move from bar t's close to bar t+h's close,
+over all bars, with no condition.
 
 | tf | bar range | ATR14 | \|move 1\| | \|move 2\| | \|move 4\| | \|move 8\| | \|move 12\| | \|move 20\| |
 |---|---|---|---|---|---|---|---|---|
@@ -117,8 +117,9 @@ What this says, by timeframe:
   0.14 R gross per trade just to break even. We can't name an intraday timing edge that large on
   ordinary bars. `bb_vwap_reversion` 15m is the worked example.
 - **1h can, narrowly.** A round trip is 0.04–0.06 R with a 2–3 ATR stop, and 13% of a median
-  8-hour move. An edge of roughly 15–30 bp per trade over a 6–24 bar hold would pay. 1h is the
-  shortest timeframe where costs can be paid.
+  8-hour move. An edge of roughly 15–30 bp per trade over a 6–24 bar hold would pay its costs;
+  clearing the Deflated Sharpe bar takes more (section 4 works it out for the chosen plugin). 1h
+  is the shortest timeframe where costs can be paid.
 - **4h is cheap** at 0.02–0.03 R per round trip. The 4h baselines failed on timing, not on costs.
 
 ## 3. Candidates
@@ -286,32 +287,62 @@ time of week (C), or funding as a regime filter rather than a trigger (D).
 | ≥ 30 OOS trades, ≥ 20 per training window, ≥ 10 in a 6-month holdout | yes (600–3,000; at least 46 per 6 months) | yes | yes, if every weekend is traded | yes | yes |
 | beats random p95 with the same exits | only if the reversion is real; the exits are neutral, so the test is fair | must beat a benchmark already lifted by trend capture | fair test | fair test, but trend direction already measured at about random | fair test; its sign is the opposite of A's |
 | no narrow parameter island | two thresholds on one continuous statistic; thousands of trades at the loose corner | moderate | few parameters | few parameters | moderate |
-| Deflated Sharpe ≥ 0.95 (about 1.52 annualised) | possible only with ~25–40 bp gross reversion per trade (below) | ceiling is the Donchian 0.5–0.8 | ceiling around 1, from breadth | ceiling around 1, correlated books | unknown |
+| Deflated Sharpe ≥ 0.95 (about 1.52 annualised) | needs a gross reversion of at least ~28–31 bp per trade at the defaults and ~44–50 bp at `flow_x = 1.0`; floors, not estimates (below) | ceiling is the Donchian 0.5–0.8 | ceiling around 1, from breadth | ceiling around 1, correlated books | unknown |
 | holdout exam | needs exchange-file candles for the window (section 5, harness notes) | — | CME 24/7 risk | — | same data caveat as A |
 
 Why A:
 
 - **It is the only one with a counterparty we can name and a payoff that can reach the bar.** A
-  rough sum, which is arithmetic and not a measurement:
-  - At the default thresholds, about 685 trades a year are spread over 8 books.
-  - The default triggers fall on 2,352 distinct hours out of 3,998 triggers (59%), so treat that
-    as about 400 independent trades a year.
-  - A 12-bar outcome is typically about 0.4–0.5 R in size: the median 12-bar move is about 1.2
-    ATR, against a 3-ATR stop.
-  - Reaching a Sharpe of 1.52 then needs about 0.04 R net per trade. At a typical stop of 330 bp
-    (3 × the 111 bp median ATR on trigger bars), that is about 13 bp net, or 27 bp gross. At the
-    strict threshold, with about 160 trades a year, it needs about 40 bp gross.
-  - Those are plausible sizes for the reversion of a forced move of at least one ATR. They are
-    also exactly zero if the mechanism isn't there.
+  rough sum, which is arithmetic and not a measurement, for `hold_bars` = 12:
+
+  | step | defaults (`flow_x` = 0.5) | strict (`flow_x` = 1.0) |
+  |---|---|---|
+  | trades a year over the 8 books (look 6 lower bound ÷ 4 years) | 685 | 162 |
+  | share of triggers on distinct hours (look 5) | 2,352 of 3,998 = 59% | 535 of 812 = 66% |
+  | independent trades a year, about | 400 | 107 |
+  | Sharpe per trade for 1.52 a year (1.52 ÷ √n) | 0.076 | 0.147 |
+  | net edge per trade (× the 0.61 R spread below) | 0.046 R = 0.14 ATR | 0.090 R = 0.27 ATR |
+  | ATR on trigger bars, pooled median (look 8) | 102 bp | 112 bp |
+  | net edge per trade in bp | 14 bp | 30 bp |
+  | **gross reversion per trade** (net + the 14 bp round trip) | **28 bp** (0.28 ATR) | **44 bp** (0.39 ATR) |
+  | the same at the median symbol's trigger-bar ATR (121 and 134 bp, look 8) | 31 bp | 50 bp |
+
+  - The 0.61 R is the standard deviation of a 12-bar outcome against a 3-ATR stop. The median
+    absolute 12-bar move is 1.23 ATR (134 ÷ 109 bp, look 1). For normal returns the standard
+    deviation is 1.48 times the median absolute value: 1.82 ATR, which is 0.61 R.
+  - **These are floors, not estimates.** Three things the sum leaves out raise the hurdle:
+    - Fat tails. For fat-tailed returns the standard deviation is more than 1.48 times the median
+      absolute move, so the spread is wider than 0.61 R. The 1.52 bar itself assumes normal
+      returns too (section 1, lesson 6).
+    - Correlation across symbols in adjacent hours. The distinct-hour count merges only triggers
+      in the same hour, so a cascade that reaches symbols an hour or two apart still counts as
+      several independent trades.
+    - Post-shock volatility above a lagging ATR. Volatility clusters, so the hours after a shock
+      move more than ordinary hours, while the Wilder ATR at the trigger bar gives the shock bar a
+      weight of only 1/14. In units of the stop's ATR, the spread after a trigger is then wider
+      than the all-bar ratio above.
+  - One simplification cuts the other way: the 3-ATR stop caps a loss near 1 R, but only on the
+    trades that travel that far against the entry. Funding over a 12-hour hold, about 1 bp at
+    most, is left out.
+  - So the reversion after the next open has to be at least about 28–31 bp per trade at the
+    defaults and 44–50 bp at the strict threshold: 0.28 and 0.39 of the trigger bar's ATR, after
+    a trigger move of at least one pre-shock ATR. Those are plausible sizes for the reversion of a
+    forced move. They are also exactly zero if the mechanism isn't there.
 - **Its triggers are spread out.** 31% of the default triggers share their hour with three or
   more other symbols (22% at `flow_x = 1.0`), against 47% for plain volume shocks (looks 3 and 5).
   Weekends (C) and trends (D) are close to one bet across all books.
 - **Its test is clean.** Its exits earn nothing on random entries, so a pass could only come from
   the entry. B must beat a benchmark the lab has already seen lifted by the trailing exit, and D
   repeats a direction signal the Donchian runs already measured at about random.
-- **It trades where the trend baselines lost.** Its triggers sit in high-volatility hours (ATR at
-  the trigger bar is 111 bp at the median and 255 bp at p90, against 103 and 191 bp for all bars),
-  where `donchian_atr` 4h averaged −0.135 R. If it works, it is a different exposure.
+- **It leans toward the hours where the trend baselines lost.** Within each symbol, the median
+  trigger bar's ATR is 0.98–1.19 times that symbol's median ATR at the defaults, and 1.05–1.36
+  times at `flow_x = 1.0` (look 8). Pooled over the symbols, the defaults' lean is all in the
+  tail: the trigger-bar ATR is 102 bp at the median and 211 bp at p90, against 103 and 191 bp
+  for all bars. At `flow_x = 1.0` it is 112 and 261 bp. (Pooled quantiles mix the symbols in
+  proportion to their trigger counts. Section 2's 109 bp for all bars is the median of the
+  per-symbol medians; on that measure trigger bars are at 121 bp at the defaults and 134 bp at
+  `flow_x = 1.0`.) High volatility is where `donchian_atr` 4h averaged −0.135 R. If this plugin
+  works, it is partly a different exposure, more so at the strict threshold.
 
 Said plainly: **we don't expect it to pass the judge.** The most likely result is a gross
 reversion near zero: the shock either kept going or had already reverted inside the hour. That
@@ -558,10 +589,11 @@ Scratch directory: `/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226
 | 2b | `look2b_bnb_funding.py` | Nonzero funding settlements per half-year per symbol, and whether BNB's missing charges are zero rates or missing rows. | A data-coverage check. |
 | 3 | `look3_shock_freq.py` | For 15m and 1h: how often bars with volume ≥ v× their 7-day median and a body ≥ k pre-shock ATRs occur; the taker-buy share on those bars; pooled counts per 6-month window; how many symbols share a shock bar. | How often a condition occurs, and what the flow looks like on the same bar. Nothing after the shock bar is read. |
 | 4 | `look4_other_freq.py` | How often candidates B–E trigger: a compression breakout (4h); the size of the Friday-to-Sunday move against the ATR (that is the weekend move itself, not what follows it); how often funding sits above 2 bp or below 0; the 24-hour net taker imbalance distribution. | Frequencies and distributions of conditions at or before the trigger bar. |
-| 5 | `look5_flow_freq.py` | Quantiles of the net-flow statistic; how often triggers fire for flow_x ∈ {0.25, 0.5, 1, 2} × move_k ∈ {0, 1, 2, 3} at 15m and 1h; pooled 6-month counts, including 2022 H1; the long share; how many symbols share a trigger bar; ATR on trigger bars against all bars; the share of bars beyond each grid threshold; and how often the defaults fire on the harness's synthetic bars. | How often a condition occurs, plus contemporaneous feature values. No forward price is read. The synthetic part isn't market data. |
+| 5 | `look5_flow_freq.py` | Quantiles of the net-flow statistic; how often triggers fire for flow_x ∈ {0.25, 0.5, 1, 2} × move_k ∈ {0, 1, 2, 3} at 15m and 1h; pooled 6-month counts, including 2022 H1; the long share; how many symbols share a trigger bar; ATR on trigger bars against all bars (for flow_x = 1, move_k = 2 only; look 8 redoes it for the spec's triggers); the share of bars beyond each grid threshold; and how often the defaults fire on the harness's synthetic bars. | How often a condition occurs, plus contemporaneous feature values. No forward price is read. The synthetic part isn't market data. |
 | 6 | `look6_trade_bounds.py` | Lower and upper bounds on trades per symbol and in pooled windows for each grid combo over 2022-07 to 2026-07: every trigger, and triggers taken greedily with a `hold_bars` refractory period. | Neither bound needs to know how a trade ended, so no price after a trigger is read. These are counts, not outcomes. |
 | 7 | `look7_synthetic_check.py` (with `flow_shock_fade_draft.py`, a scratch draft of the spec) | On synthetic bars only (`synthetic_bars(seed=1)`, raw and with moving columns): whether the spec parses as plugin metadata, signals at its defaults and grid corners, keeps its time exit, and stays causal at the judge's cut points. | Loads no market data. It checks the spec against the harness, not against markets. |
 | 7b | `look7b_judge_check.py` | The harness's own `causality_failures` (the judge's lookahead check) on the draft, using the in-process worker twin from the test suite: no failures. The same draft with the default `flow_x` raised to 1.0 is reported as `defaults: no signals on synthetic data`. | Synthetic bars only, as for look 7. |
+| 8 | `look8_trigger_atr.py` | At 1h: the ATR14 at bar t, in bp of bar t's close, on the bars where the spec's trigger fires at (flow_x, move_k) = (0.5, 1) and (1.0, 1), with look 5's (1.0, 2) repeated as a cross-check, against all bars. Pooled p10/p50/p90, the median of the per-symbol medians, each symbol's median, and its ratio to that symbol's all-bar median, over the whole span; and the pooled median over 2022-07 to 2026-07 alone (100 and 109 bp for the two spec triggers). This is the ATR the stop is set from, so it converts section 4's hurdle from R into bp. | A same-bar feature distribution: the trigger and the ATR both use bars ≤ t, and nothing after the trigger bar is read. It says how wide the stop is on trigger bars, not what happens after them. |
 
 Findings that the sections above rely on:
 
@@ -584,6 +616,14 @@ Findings that the sections above rely on:
   - at flow_x = 1, move_k = 1: 51%, 22% and 10%;
   - at flow_x = 1, move_k = 2: 54%, 23% and 7%;
   - for 1h volume shocks (v = 4, k = 2): 68%, 47% and 32%.
+- **ATR on trigger bars at 1h** (look 8), in bp of price: p10/p50/p90 pooled over symbols, then
+  the median of the per-symbol medians.
+  - All bars: 54/103/191, and 109.
+  - The defaults (flow_x = 0.5, move_k = 1), 3,998 triggers: 55/102/211, and 121.
+  - flow_x = 1, move_k = 1, 812 triggers: 57/112/261, and 134.
+  - flow_x = 1, move_k = 2 (look 5's trigger), 634 triggers: 57/111/255, and 137.
+  - Per symbol, the median trigger bar's ATR is 0.98–1.19 times the symbol's all-bar median at
+    the defaults, and 1.05–1.36 times at flow_x = 1, move_k = 1.
 - **Synthetic bars.** By construction, volume is uniform on 100–1000 and never exceeds about 1.8×
   its median, so a volume-multiple trigger is unverifiable there. The net-flow statistic peaks at 0.80 in absolute value, so the
   defaults (0.5, 1.0) fire and `flow_x = 1.0` doesn't.
