@@ -158,14 +158,17 @@ def test_manage_exits_at_hold_bars_and_never_moves_the_stop(cls):
         assert s.manage(c) == want
 
 
-def test_time_exit_timing_and_trade_record(cls):
+@pytest.mark.parametrize("hold,bars_held", [(6, 7), (12, 13), (24, 25)])
+def test_time_exit_timing_and_trade_record(cls, hold, bars_held):
+    # Held for exactly hold_bars bars; the trade record counts the exit bar too, so hold + 1.
+    # Each grid value is checked, so a hold hard-coded in manage fails here.
     b = make({SHOCK: (0.0, -3.0)})
-    r, sig = signals(cls, b)
+    r, sig = signals(cls, b, hold_bars=hold)
     assert len(r.trades) == 1
     t = r.trades[0]
-    assert t["exit_reason"] == "signal" and t["bars_held"] == 13
+    assert t["exit_reason"] == "signal" and t["bars_held"] == bars_held
     open_ms = b.open_time.to_numpy()
-    assert t["entry_time"] == open_ms[SHOCK + 1] and t["exit_time"] == open_ms[SHOCK + 1 + 12]
+    assert t["entry_time"] == open_ms[SHOCK + 1] and t["exit_time"] == open_ms[SHOCK + 1 + hold]
 
 
 def test_opposite_trigger_while_in_position_is_ignored(cls):
