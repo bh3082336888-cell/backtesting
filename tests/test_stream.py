@@ -410,6 +410,24 @@ def test_an_honest_plugin_whose_worker_is_lost_once_passes_on_the_rerun(tmp_path
     assert_same_exam(res, ref.daily, ref.portfolio, ref.trades)
 
 
+def test_a_thread_that_cannot_start_stops_the_ones_that_did(tmp_path, spy, monkeypatch):
+    # BTC's thread is up and waits in its first turn for ETH, whose thread never starts: it must
+    # be stopped and joined, its worker closed, not left blocked with a live worker.
+    cfg = market_config(tmp_path)
+    real = threading.Thread.start
+
+    def start(self):
+        if self.name == "stream-ETHUSDT":
+            raise RuntimeError("can't start new thread")
+        return real(self)
+    monkeypatch.setattr(threading.Thread, "start", start)
+    before = threading.active_count()
+    with pytest.raises(RuntimeError, match="can't start new thread"):
+        run_exam(cfg, real_source("donchian_atr"), "4h", cfg.symbols, {}, token(tmp_path), SHORT_END)
+    assert threading.active_count() == before        # BTC's thread was stopped and joined
+    assert spy.spawned == 1 and spy.alive == set()   # after closing its worker
+
+
 def test_symbols_go_in_batches_of_max_workers(tmp_path, spy, monkeypatch):
     cfg = market_config(tmp_path)
     src = real_source("donchian_atr")

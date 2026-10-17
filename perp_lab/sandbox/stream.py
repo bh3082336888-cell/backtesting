@@ -191,15 +191,16 @@ def _streams(cfg, src: PluginSource, tf: str, params: dict, symbols: list[str], 
             lockstep.finish(symbol)
 
     threads = [threading.Thread(target=one, args=(s,), name=f"stream-{s}", daemon=True) for s in symbols]
-    for th in threads:
-        th.start()
     try:
         for th in threads:
-            th.join()
-    except BaseException:                   # e.g. Ctrl-C: the threads stop at their next turn
-        lockstep.abort()
+            th.start()
         for th in threads:
             th.join()
+    except BaseException:                   # e.g. Ctrl-C, or a thread that can't start: the ones
+        lockstep.abort()                    # running stop at their next turn
+        for th in threads:
+            if th.ident is not None:        # started (a thread never started can't be joined)
+                th.join()
         raise
     if errors:
         raise errors[0]
