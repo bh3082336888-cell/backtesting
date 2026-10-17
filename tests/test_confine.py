@@ -386,6 +386,28 @@ def test_the_seal_pins_every_rule():
         assert _run_bpf(seal, arch, 0x40000000 | 2) == KILL_PROCESS       # x32 open
 
 
+# The page cache of files a worker has mapped (its libraries): what it may not see or steer.
+MADV_DENIED = {"MADV_WILLNEED": 3, "MADV_COLD": 20, "MADV_PAGEOUT": 21, "MADV_POPULATE_READ": 22,
+               "MADV_POPULATE_WRITE": 23}
+MADV_ALLOWED = {"MADV_NORMAL": 0, "MADV_RANDOM": 1, "MADV_SEQUENTIAL": 2, "MADV_DONTNEED": 4, "MADV_FREE": 8,
+                "MADV_HUGEPAGE": 14, "MADV_NOHUGEPAGE": 15, "MADV_DONTDUMP": 16, "MADV_DODUMP": 17}
+
+
+def test_the_seal_denies_reading_or_steering_the_page_cache():
+    lib, seal = _scmp(), _filter_bpf(2)
+    arch = lib.seccomp_arch_native()
+    for name in ("mincore", "cachestat"):
+        n = lib.seccomp_syscall_resolve_name(name.encode())
+        assert n >= 0, name
+        assert _run_bpf(seal, arch, n) == EPERM, name
+    madvise = lib.seccomp_syscall_resolve_name(b"madvise")
+    for name, advice in MADV_DENIED.items():
+        assert _run_bpf(seal, arch, madvise, (0x7F0000000000, 4096, advice)) == EPERM, name
+        assert _run_bpf(seal, arch, madvise, (0x7F0000000000, 4096, JUNK | advice)) == EPERM, name
+    for name, advice in MADV_ALLOWED.items():
+        assert _run_bpf(seal, arch, madvise, (0x7F0000000000, 4096, advice)) == ALLOW, name
+
+
 def test_probe_reports_none_here():
     assert confine.probe() is None
 

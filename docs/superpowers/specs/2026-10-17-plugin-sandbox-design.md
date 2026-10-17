@@ -67,6 +67,19 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
   separate processes, or between such a check and an exam (through CPU timing). Two exams never
   run at once on one machine: `attempt_exam` holds a machine-wide lock throughout. File locks,
   leases and directory notifications, a live channel Landlock doesn't restrict, are denied.
+- **R7 Page-cache residency.** Which pages of a file are in the page cache is visible to any
+  process, through `mincore` on a mapping of it or the time a page fault takes. A worker maps its
+  libraries (libarrow alone is about 11,000 pages) and could fault chosen pages in or push them
+  out, for a later worker or process to read the pattern back. The seal narrows this (Confinement,
+  step 8): a worker can't query residency (`mincore`, `cachestat`) or evict or prefetch pages
+  (`madvise` with `MADV_PAGEOUT`, `MADV_COLD`, `MADV_WILLNEED`, `MADV_POPULATE_READ` or
+  `MADV_POPULATE_WRITE`), so all it can do is fault pages in by touching them. After every exam
+  attempt, whatever its outcome and once its workers are gone, the parent evicts every file those
+  workers mapped (`POSIX_FADV_DONTNEED`, files read from `/proc/<pid>/maps`), so nothing carries
+  into the next exam or judgement. What remains: a process running during an exam (a concurrent
+  `lab judge`'s workers) could read residency by fault timing while it runs, which is R6's live
+  overlap; and pages another process keeps mapped (the parent's own numpy and pyarrow, for one)
+  stay resident, which carries nothing from a worker, while other processes add noise.
 
 ## Threat model
 
@@ -255,9 +268,11 @@ library imported. Until step 9 ends, only trusted code has run in it.
    `ENOSYS` from step 5. A Landlock layer would not do: resolving a path follows its symlinks,
    which updates their access times, before Landlock refuses anything. Once sealed the worker
    opens, stats and reads no file, follows no symlink and names no path; it holds its pipes and
-   what it has loaded, and gets the rest through the pipe. `fstat` on a descriptor keeps working
-   where libc makes it with the `fstat` syscall (glibc 2.39 and later); older glibc makes it with
-   `newfstatat`, so step 9 fails there and the sandbox is unavailable.
+   what it has loaded, and gets the rest through the pipe. The same filter denies `mincore`,
+   `cachestat`, and `madvise` with advice that evicts or prefetches pages (R7); other advice, which
+   allocators use (`MADV_DONTNEED`, `MADV_FREE`, `MADV_HUGEPAGE`), keeps working. `fstat` on a
+   descriptor keeps working where libc makes it with the `fstat` syscall (glibc 2.39 and later);
+   older glibc makes it with `newfstatat`, so step 9 fails there and the sandbox is unavailable.
 9. Self-test, stage 2: opening and stat-ing a file on the allowlist (numpy's `__init__.py`) and
    `readlink` on the interpreter's `python3` link (under `/usr` for a system Python) must each
    fail with `EPERM`, which only the seal answers, and `fstat` on a protocol pipe must work. The
@@ -561,7 +576,11 @@ Each test is written first and seen failing. Tests that need the kernel features
   set them after a plugin tries `stat`, `readlink` and `open` through them. A plugin can import
   what the worker preloaded and print a frame, and importing a module it didn't preload is
   `plugin_error: exception: ModuleNotFoundError`; so is `perp_lab.holdout`, so no token can be
-  minted inside a worker. A worker whose seal silently did nothing reports unavailable. In a probe
+  minted inside a worker. A sealed plugin's `mincore` and its eviction and prefetch `madvise`
+  calls get `EPERM`, while `MADV_DONTNEED` and allocation work. The exam evicts every file its
+  workers mapped after each attempt, passed or failed, once they are closed (with the twin and a
+  spy), and does so after a real streamed exam with no worker left running; eviction drops a
+  file's pages from the cache. A worker whose seal silently did nothing reports unavailable. In a probe
   process, every thread, those started before the seal included, is refused an allowlisted file
   once sealed; a test exports the stage-2 filter and runs it over every rule.
 - **Determinism:** two fresh workers give `hash()` of a string the same value.

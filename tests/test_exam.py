@@ -1,3 +1,9 @@
+import ctypes
+import os
+import sys
+import time
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -6,6 +12,7 @@ from perp_lab.holdout import HoldoutViolation, issue_holdout_token
 from perp_lab.judge.exam import cost_hours, run_exam, window_end
 from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client
+from perp_lab.sandbox.errors import PluginError
 from tests.conftest import market_config
 from tests.sandbox_fixtures import InProcessWorker
 
@@ -68,3 +75,93 @@ def test_cost_hours_is_the_median_prepare_time_times_the_window_bars(tmp_path, m
     assert research.index.max() < cfg.holdout_start
     assert seen == [("bars", "BTCUSDT", "4h", len(research), research.index.max()),
                     *[("prepare", params)] * 3, ("close",)]  # one worker of its own
+
+
+def _spied(monkeypatch):
+    """Twins that each report a mapped file of their own, and a spy on the page-cache eviction that
+    notes whether every worker was closed by then."""
+    spawned, calls = [], []
+
+    class Twin(InProcessWorker):
+        def __init__(self, cfg, src):
+            super().__init__(cfg, src)
+            self.mapped_files = frozenset({f"/nonexistent/worker-{len(spawned)}.so"})
+            self.closed = False
+            spawned.append(self)
+
+        def close(self):
+            self.closed = True
+    monkeypatch.setattr(client, "spawn", Twin)
+    monkeypatch.setattr(client, "evict_page_cache",
+                        lambda paths: calls.append((set(paths), all(w.closed for w in spawned))))
+    return spawned, calls
+
+
+def test_an_exam_evicts_the_page_cache_its_workers_mapped(tmp_path, monkeypatch):
+    # A worker can fault in chosen pages of the libraries it maps; a later one could read the
+    # pattern back. After the exam, with its workers gone, those files leave the page cache.
+    cfg = market_config(tmp_path)
+    spawned, calls = _spied(monkeypatch)
+    tok = issue_holdout_token("fam", "exam test", tmp_path / "test_log.jsonl")
+    run_exam(cfg, PluginSource.read("donchian_atr"), "4h", cfg.symbols, {"n": 20}, tok, END)
+    assert len(spawned) == 2                                  # one worker per symbol
+    assert calls == [({p for w in spawned for p in w.mapped_files}, True)]
+
+
+def test_a_failed_exam_evicts_the_page_cache_too(tmp_path, monkeypatch):
+    cfg = market_config(tmp_path)
+    spawned, calls = _spied(monkeypatch)
+    holdout_ms = cfg.holdout_start.value // 10**6
+    src = PluginSource.from_text("fails", f'''"""Fails on its first holdout bar."""
+from perp_lab.strategy import HOLD, Strategy
+
+
+class Fails(Strategy):
+    def prepare(self, bars):
+        return bars[[]]
+
+    def entry(self, ctx):
+        if ctx["open_time"] >= {holdout_ms}:
+            raise RuntimeError("holdout")
+        return HOLD
+'''.encode())
+    tok = issue_holdout_token("fam", "exam test", tmp_path / "test_log.jsonl")
+    with pytest.raises(PluginError):
+        run_exam(cfg, src, "4h", cfg.symbols, {}, tok, END)
+    assert spawned and calls == [({p for w in spawned for p in w.mapped_files}, True)]
+
+
+def test_evicting_drops_a_file_from_the_page_cache(caplog):
+    # On the real disk (.venv), not a tmpfs, whose pages can't be dropped.
+    path = Path(sys.prefix) / f"perp_lab_evict_test_{os.getpid()}_{time.monotonic_ns()}"
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    libc.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p]
+    size = 16 * 4096
+
+    def resident() -> int:
+        """Pages of the file in the page cache (mapped here without touching them)."""
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            addr = libc.mmap(None, size, 1, 2, fd, 0)               # PROT_READ, MAP_PRIVATE
+            vec = ctypes.create_string_buffer(size // 4096)
+            assert libc.mincore(addr, size, vec) == 0, ctypes.get_errno()
+            libc.munmap(addr, size)
+            return sum(b & 1 for b in vec.raw)
+        finally:
+            os.close(fd)
+    try:
+        with open(path, "wb") as f:
+            f.write(os.urandom(size))
+            f.flush()
+            os.fsync(f.fileno())                                   # clean pages are what eviction drops
+        path.read_bytes()
+        assert resident() == 16
+        with caplog.at_level("INFO", logger="perp_lab.sandbox.client"):
+            client.evict_page_cache([str(path), "/nonexistent/lib.so", str(path.parent)])
+        assert resident() == 0
+        assert "/nonexistent/lib.so" in caplog.text               # skipped, not raised
+    finally:
+        path.unlink(missing_ok=True)

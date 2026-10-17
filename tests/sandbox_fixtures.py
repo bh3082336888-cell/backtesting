@@ -58,6 +58,7 @@ class InProcessWorker:
         self.pid = os.getpid()
         self.abi = None
         self.last_cpu_s = 0.0
+        self.mapped_files = frozenset()               # it maps no file of its own
         self._out = io.StringIO()
         self._index = None
         self._s = session.Session()                   # a fresh plugin module per instance

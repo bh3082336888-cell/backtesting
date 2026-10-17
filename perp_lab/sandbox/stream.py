@@ -23,7 +23,8 @@ difference is `PluginError("mismatch")`. Otherwise the rerun would be a second d
 that decides at random on holdout bars, or that changes course once it has seen some of them.
 
 Each thread spawns, uses and closes its own worker (a worker dies with the thread that spawned
-it), and writes the worker's stderr, if any, to `<stderr_dir>/<symbol>-<pid>.txt`.
+it), writes the worker's stderr, if any, to `<stderr_dir>/<symbol>-<pid>.txt`, and adds the files
+the worker mapped to `mapped` (for the exam to evict from the page cache once its workers are gone).
 """
 
 from __future__ import annotations
@@ -135,8 +136,10 @@ class StreamedStrategy(Strategy):
         return sig
 
 
-def _close(w, symbol: str, stderr_dir: Path | None) -> None:
+def _close(w, symbol: str, stderr_dir: Path | None, mapped: list | None) -> None:
     w.close()
+    if mapped is not None:
+        mapped.append(w.mapped_files)       # list.append: safe from the symbols' threads
     err = w.stderr
     if err and stderr_dir is not None:
         stderr_dir.mkdir(parents=True, exist_ok=True)
@@ -146,9 +149,10 @@ def _close(w, symbol: str, stderr_dir: Path | None) -> None:
 
 def stream_symbol(cfg, src: PluginSource, symbol: str, tf: str, bars: pd.DataFrame, k0: int, params: dict,
                   ep: EngineParams, lockstep: Lockstep, stderr_dir: Path | None = None, trace: Trace | None = None,
-                  expect: Trace | None = None) -> BacktestResult:
+                  expect: Trace | None = None, mapped: list | None = None) -> BacktestResult:
     """One symbol's streamed run, in a fresh worker that this thread spawns and closes. Its decisions
-    go into `trace`; with `expect` (a lost run's trace) they must repeat those."""
+    go into `trace`; with `expect` (a lost run's trace) they must repeat those. The files the worker
+    mapped go into `mapped`."""
     trace = Trace() if trace is None else trace
     w = client.spawn(cfg, src)
     try:
@@ -163,12 +167,12 @@ def stream_symbol(cfg, src: PluginSource, symbol: str, tf: str, bars: pd.DataFra
         check_finite(res)                   # NaN days would be dropped from the exam, not counted
         return res
     finally:
-        _close(w, symbol, None if stderr_dir is None else Path(stderr_dir))
+        _close(w, symbol, None if stderr_dir is None else Path(stderr_dir), mapped)
 
 
 def _streams(cfg, src: PluginSource, tf: str, params: dict, symbols: list[str], load: Loader,
              stderr_dir: Path | None, traces: dict[str, Trace],
-             expect: dict[str, Trace] | None = None) -> dict[str, BacktestResult]:
+             expect: dict[str, Trace] | None = None, mapped: list | None = None) -> dict[str, BacktestResult]:
     """One attempt: every symbol in its own thread and worker, all in one lockstep. Each symbol's
     decisions go into `traces[symbol]`; on a rerun they must repeat `expect[symbol]`."""
     lockstep = Lockstep(symbols)
@@ -180,7 +184,7 @@ def _streams(cfg, src: PluginSource, tf: str, params: dict, symbols: list[str], 
         try:
             bars, k0, ep = load(symbol)
             results[symbol] = stream_symbol(cfg, src, symbol, tf, bars, k0, params, ep, lockstep, stderr_dir,
-                                            traces[symbol], None if expect is None else expect[symbol])
+                                            traces[symbol], None if expect is None else expect[symbol], mapped)
         except Aborted:
             pass                            # the error that caused it is recorded
         except BaseException as e:
@@ -208,17 +212,19 @@ def _streams(cfg, src: PluginSource, tf: str, params: dict, symbols: list[str], 
 
 
 def run_batch(cfg, src: PluginSource, tf: str, params: dict, symbols: list[str], load: Loader,
-              stderr_dir: Path | None = None) -> dict[str, BacktestResult]:
+              stderr_dir: Path | None = None, mapped: list | None = None) -> dict[str, BacktestResult]:
     """Each symbol's streamed run, all at once in lockstep; the trusted engine's result per symbol.
     A lost worker restarts the whole batch once, in fresh workers, and that rerun must repeat the
-    lost run's decisions (a mismatch otherwise); a second loss is `PluginError(kind)`."""
+    lost run's decisions (a mismatch otherwise); a second loss is `PluginError(kind)`. Each worker's
+    mapped files (a frozenset per worker, the rerun's included) are appended to `mapped`."""
     symbols = list(symbols)
     first = {s: Trace() for s in symbols}
     try:
-        return _streams(cfg, src, tf, params, symbols, load, stderr_dir, first)
+        return _streams(cfg, src, tf, params, symbols, load, stderr_dir, first, mapped=mapped)
     except WorkerLost:
         pass                                # transient machine trouble gets one rerun, held to the first
     try:
-        return _streams(cfg, src, tf, params, symbols, load, stderr_dir, {s: Trace() for s in symbols}, first)
+        return _streams(cfg, src, tf, params, symbols, load, stderr_dir, {s: Trace() for s in symbols}, first,
+                        mapped)
     except WorkerLost as e:
         raise PluginError(e.kind, "", e.message, e.stderr) from e

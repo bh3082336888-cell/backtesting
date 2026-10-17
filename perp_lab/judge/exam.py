@@ -9,10 +9,15 @@ run starts at history_start); only returns and trades inside [holdout_start, end
 
 `cost_hours` estimates an exam's CPU time per symbol before any read is spent, from research data
 only, so a plugin too slow to stream is blocked without one.
+
+After every attempt, whatever its outcome, the files the exam's workers mapped (their libraries)
+are evicted from the page cache: a worker can fault in chosen pages of them, and a later exam or
+process could read the pattern back (spec R7).
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +34,8 @@ from perp_lab.sandbox import client, stream
 
 DEFAULT_FUNDING_H = 8.0
 COST_PROBES = 3                         # timed `prepare` calls; the estimate uses their median
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -80,10 +87,19 @@ def cost_hours(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict
     return float(np.median(client._retry_once(probe))) * n / 3600
 
 
+def _evict(mapped: list) -> None:
+    """The page cache of every file the exam's workers mapped; never fails the exam."""
+    try:
+        client.evict_page_cache(set().union(*mapped))
+    except Exception:
+        log.exception("evicting the exam workers' files from the page cache failed")
+
+
 def run_exam(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict, token, end: pd.Timestamp,
              stderr_dir: Path | None = None) -> ExamResult:
     """The streamed exam of `src` with frozen `params` on [holdout_start, end). A plugin failure is
-    a PluginError; each worker's stderr goes to `stderr_dir` when it closes."""
+    a PluginError; each worker's stderr goes to `stderr_dir` when it closes. Once the workers are
+    gone, whatever the outcome, the files they mapped are evicted from the page cache."""
     check_token(token)
     start = cfg.holdout_start
     start_ms = start.value // 10**6
@@ -93,10 +109,13 @@ def run_exam(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict, 
         k0 = int(np.searchsorted(bars["open_time"].to_numpy(), start_ms))    # the first holdout bar
         return bars, k0, EngineParams.from_config(cfg, s)
 
-    runs = {}
+    runs, mapped = {}, []
     per = client.max_workers(cfg)
-    for b in range(0, len(symbols), per):
-        runs.update(stream.run_batch(cfg, src, tf, params, symbols[b:b + per], load, stderr_dir))
+    try:
+        for b in range(0, len(symbols), per):
+            runs.update(stream.run_batch(cfg, src, tf, params, symbols[b:b + per], load, stderr_dir, mapped))
+    finally:
+        _evict(mapped)
     daily, parts = {}, []
     for s in symbols:
         res = runs[s]

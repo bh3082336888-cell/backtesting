@@ -427,6 +427,34 @@ def test_a_plugin_can_import_only_what_the_worker_preloaded(cfg):
 
 
 @pytest.mark.sandbox
+def test_a_sealed_plugin_can_neither_see_nor_steer_the_page_cache(cfg):
+    # Which pages of a mapped library are resident is a channel to a later reader (mincore, or
+    # fault timing): no residency query, no eviction or prefetch advice. Freeing memory and plain
+    # allocation still work.
+    src = plugin("pagecache", """
+        import ctypes, errno
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mmap.restype = ctypes.c_void_p
+        libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+        libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        libc.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p]
+        page = 4096
+        lib = ctypes.cast(libc.mmap, ctypes.c_void_p).value & ~(page - 1)    # a page of libc: file-backed
+        anon = libc.mmap(None, 4 * page, 3, 0x22, -1, 0)                     # read-write, private, anonymous
+
+        def call(fn, *args):
+            return "OK" if fn(*args) == 0 else errno.errorcode[ctypes.get_errno()]
+        out = [call(libc.mincore, lib, page, ctypes.create_string_buffer(1))]
+        out += [call(libc.madvise, lib, page, a) for a in (21, 20, 3)]      # PAGEOUT, COLD, WILLNEED
+        out += [call(libc.madvise, anon, page, a) for a in (22, 23)]        # POPULATE_READ, POPULATE_WRITE
+        out += [call(libc.madvise, anon, page, 4)]                          # DONTNEED
+        out.append("OK" if np.ones(1 << 23).sum() == 1 << 23 else "BAD")    # 64 MiB, allocated and freed
+        raise RuntimeError(" ".join(out))""")
+    e = plugin_error(batch_run, cfg, src)
+    assert e.message == "EPERM EPERM EPERM EPERM EPERM EPERM OK OK", e.reason()
+
+
+@pytest.mark.sandbox
 def test_pandas_methods_that_load_code_lazily_work_in_a_sealed_worker(cfg):
     src = plugin("lazy", """
         f = bars[["close", "open"]].head()

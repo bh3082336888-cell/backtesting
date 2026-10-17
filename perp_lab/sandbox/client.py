@@ -23,6 +23,11 @@ retry a `WorkerLost` once in a fresh worker; a second is `PluginError(kind)`. St
 A worker dies with its parent: it is SIGKILLed when the thread that spawned it exits (the
 kernel's parent-death signal belongs to that thread, not to the process). So a worker must be
 closed by the thread that spawned it, never handed to another thread that outlives this one.
+
+Page cache: a worker notes the files it has mapped (`mapped_files`, from /proc/<pid>/maps, when it
+is ready and again before it closes). A sealed worker can still fault in chosen pages of those
+files, which a later process could see; `evict_page_cache` drops them once the workers are gone
+(the exam does, after each attempt).
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ import logging
 import math
 import os
 import queue
+import stat
 import subprocess
 import sys
 import threading
@@ -177,6 +183,7 @@ class Worker:
         self._step_limit = float(sb["stream_step_s"])     # CPU and wall clock, each
         self._index: pd.Index | None = None
         self._dead = self._closed = False
+        self._mapped: set[str] = set()
         self._lock = threading.Lock()
         self._kept, self._tail = bytearray(), bytearray()
         self._frames: queue.Queue = queue.Queue(maxsize=1)
@@ -189,6 +196,24 @@ class Worker:
                                          args=(proc.stderr, self._kept, self._tail, self._lock))
         self._reader.start()
         self._drainer.start()
+
+    @property
+    def mapped_files(self) -> frozenset[str]:
+        """The files this worker has mapped, as far as noted (at ready and before closing)."""
+        return frozenset(self._mapped)
+
+    def _note_mapped(self) -> None:
+        """Add the files the worker maps now (/proc/<pid>/maps, which the parent may read) to
+        `mapped_files`. A sealed worker can map no other file, so at ready this names them all."""
+        try:
+            with open(f"/proc/{self.pid}/maps", "rb") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return
+        for line in lines:
+            fields = line.split(None, 5)                # address perms offset dev inode path
+            if len(fields) == 6 and fields[5].startswith(b"/") and not fields[5].endswith(b" (deleted)"):
+                self._mapped.add(os.fsdecode(fields[5]))
 
     @property
     def stderr(self) -> bytes:
@@ -261,6 +286,8 @@ class Worker:
         if self._closed:
             return
         self._closed = True
+        if not self._dead:
+            self._note_mapped()                         # while it still runs: its maps go when it exits
         if not self._dead and (self._writer is None or not self._writer.is_alive()):
             try:
                 self._proc.stdin.close()
@@ -544,7 +571,28 @@ def _start(cfg) -> Worker:
     except BaseException:
         w.close()
         raise
+    w._note_mapped()
     return w
+
+
+def evict_page_cache(paths) -> None:
+    """Drop each file's pages from the page cache (POSIX_FADV_DONTNEED), for files workers mapped:
+    run it once those workers are gone. Pages a live process still maps stay. A file this process
+    can't open, or that isn't a regular file, is skipped; nothing raises (it is logged), so an
+    eviction never fails an exam."""
+    for path in sorted(paths):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+        except OSError as e:
+            log.info("page cache of %s not evicted: %s", ascii_text(path), e.strerror)
+            continue
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        except OSError as e:
+            log.warning("page cache of %s not evicted: %s", ascii_text(path), e.strerror)
+        finally:
+            os.close(fd)
 
 
 def check(cfg) -> int:

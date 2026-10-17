@@ -11,7 +11,8 @@ libseccomp, with ENOSYS).
 under which no call that resolves a pathname works, so the process opens, stats and reads no
 file and follows no symlink. Reading a file, or following or reading a symlink, updates its access
 time on a relatime mount: without the seal a worker could leave a bit per allowlisted file or
-symlink per day for a later worker to read back with stat().
+symlink per day for a later worker to read back with stat(). Nor can it query or steer the page
+cache of the files it has mapped (mincore, cachestat, eviction and prefetch advice).
 
 Landlock and seccomp confine the calling thread and the threads it starts later; a thread that
 already exists stays unconfined, and plugin code could reach it through ctypes. So `confine()`
@@ -155,8 +156,21 @@ _PATHNAME = """
     chmod fchmodat chown lchown fchownat utime utimes utimensat futimesat
     getxattr lgetxattr setxattr lsetxattr removexattr lremovexattr listxattr llistxattr""".split()
 _NEWER_PATHNAME = _NEWER_METADATA + ["open_tree_attr"]    # every newer metadata call takes a path too
-_SEAL_RULES = [(_EPERM, name, ()) for name in _PATHNAME + _NEWER_PATHNAME]
-_NEWER = set(_NEWER_PATHNAME)
+# Stage 2 also covers the page cache of the files a worker has mapped (its libraries): which of
+# their pages are resident is visible to a later process (mincore, or how long a fault takes), so
+# a sealed worker may not query residency (mincore, cachestat) or evict or prefetch pages:
+# madvise with these advice values. Other advice (DONTNEED, FREE, HUGEPAGE: what allocators use)
+# stays. It can still fault pages in by touching them; after each exam the parent evicts every
+# file the exam's workers mapped (`client.evict_page_cache`), so nothing carries to the next one.
+_PAGE_CACHE = ["mincore", "cachestat"]
+_MADV_DENIED = {"MADV_WILLNEED": 3, "MADV_COLD": 20, "MADV_PAGEOUT": 21, "MADV_POPULATE_READ": 22,
+                "MADV_POPULATE_WRITE": 23}
+_SEAL_RULES = (
+    [(_EPERM, name, ()) for name in _PATHNAME + _NEWER_PATHNAME + _PAGE_CACHE]
+    # madvise's advice is an int: its low 32 bits, as for prctl, ioctl and fcntl.
+    + [(_EPERM, "madvise", ((2, _SCMP_CMP_MASKED_EQ, 0xFFFFFFFF, advice),)) for advice in _MADV_DENIED.values()]
+)
+_NEWER = set(_NEWER_PATHNAME) | {"cachestat"}                # names some libseccomp releases lack
 
 _libc_dll = None
 _seccomp_dll = None
@@ -282,8 +296,9 @@ def confine(*, memory_mb: int, cpu_s: int, read_paths: list[str]) -> int:
 
 
 def seal() -> None:
-    """Stage 2, for good, in every thread: from now on no call that resolves a pathname works
-    (EPERM). Call it once everything the process will need is loaded.
+    """Stage 2, for good, in every thread: from now on no call that resolves a pathname works, and
+    none that queries, evicts or prefetches page cache (EPERM). Call it once everything the
+    process will need is loaded.
 
     Raises RuntimeError if it fails; the process must then not run plugin code.
     """
