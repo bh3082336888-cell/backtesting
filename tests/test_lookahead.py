@@ -9,6 +9,7 @@ import pytest
 
 from perp_lab.engine.backtest import EngineParams, run_backtest
 from perp_lab.indicators import atr
+from perp_lab.plugins import PluginSource
 from perp_lab.strategy import HOLD, RandomEntry, Strategy, enter, list_plugins, load_strategy_class
 from perp_lab.validate.causality import CUTS, assert_causal  # noqa: F401
 from tests.conftest import make_bars
@@ -22,7 +23,7 @@ def test_plugins_discovered():
 
 @pytest.mark.parametrize("name", PLUGINS)
 def test_plugin_has_one_sentence_hypothesis(name):
-    h = load_strategy_class(name).hypothesis()
+    h = PluginSource.read(name).meta.hypothesis
     assert h and len(h) > 20, f"{name}: module docstring must start with a one-sentence hypothesis"
 
 

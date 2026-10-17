@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from perp_lab.plugins import PluginSource
 from perp_lab.runs import new_run_id, repo_commit, verdict, write_run
 from perp_lab.strategy import load_strategy_class, plugin_hash
 from perp_lab.validate.benchmarks import buy_and_hold, random_entry, regime_split
@@ -91,7 +92,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     rid = new_run_id()
     rec = {
         "run_id": rid, "strategy": name, "strategy_hash": h0,
-        "hypothesis": cls.hypothesis(), "repo_commit": repo_commit(),
+        "hypothesis": PluginSource.read(name).meta.hypothesis, "repo_commit": repo_commit(),
         "params": {"grid": cls.grid, "defaults": cls.params},
         "universe": wf.symbols, "timeframes": [tf],
         "date_start": str(wf.folds[0]["train_start"].date()), "date_end": str(ob.date()),

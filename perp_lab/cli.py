@@ -57,10 +57,11 @@ def tail(symbols: Optional[str] = None, tfs: Optional[str] = None, config: Optio
 @app.command()
 def strategies():
     """List strategy plugins and their hypotheses."""
-    from perp_lab.strategy import list_plugins, load_strategy_class, plugin_hash
+    from perp_lab.plugins import PluginSource
+    from perp_lab.strategy import list_plugins
     for n in list_plugins():
-        c = load_strategy_class(n)
-        typer.echo(f"{n} [{plugin_hash(n)[:10]}] tfs={c.timeframes}\n  {c.hypothesis()}")
+        s = PluginSource.read(n)
+        typer.echo(f"{n} [{s.hash[:10]}] tfs={s.meta.timeframes}\n  {s.meta.hypothesis}")
 
 
 @app.command()

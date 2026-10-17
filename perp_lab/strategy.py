@@ -21,7 +21,6 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import math
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -145,22 +144,10 @@ def list_plugins() -> list[str]:
     return sorted(p.stem for p in STRATEGY_DIR.glob("*.py") if not p.stem.startswith("_"))
 
 
-def plugin_parent(name: str) -> str | None:
-    """The PARENT a plugin module declares (a module-level string), or None for a root."""
-    cls = load_strategy_class(name)
-    p = getattr(sys.modules[cls.__module__], "PARENT", None)
-    return str(p) if p else None
-
-
 def plugin_hash(name: str) -> str:
     """Git blob hash of the plugin file content (stable whether or not committed)."""
-    path = plugin_path(name)
-    try:
-        return subprocess.check_output(["git", "hash-object", str(path)], text=True).strip()
-    except (OSError, subprocess.CalledProcessError):
-        import hashlib
-        data = path.read_bytes()
-        return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    from perp_lab.plugins import blob_hash
+    return blob_hash(plugin_path(name).read_bytes())
 
 
 # ---------------------------------------------------------------- random-entry benchmark

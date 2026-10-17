@@ -19,9 +19,10 @@ import pandas as pd
 from perp_lab.engine.metrics import summarize
 from perp_lab.judge import budget, gates
 from perp_lab.judge.exam import run_exam, window_end
+from perp_lab.plugins import PluginMetaError, PluginSource
 from perp_lab.runs import new_run_id, repo_commit, write_run
 from perp_lab.store import db
-from perp_lab.strategy import list_plugins, load_strategy_class, plugin_hash, plugin_parent
+from perp_lab.strategy import list_plugins, load_strategy_class, plugin_hash
 from perp_lab.validate.causality import causality_failures, synthetic_bars
 from perp_lab.validate.pipeline import validate_strategy
 
@@ -68,6 +69,14 @@ def write_verdict(cfg, j: dict) -> Path:
 def finish(cfg, jid: int) -> dict:
     j = db.get_judgement_by_id(cfg, jid)
     return {**j, "verdict_path": str(write_verdict(cfg, j))}
+
+
+def plugin_parent(name: str) -> str | None:
+    """The PARENT a plugin declares, read from its source; computed metadata is a refusal."""
+    try:
+        return PluginSource.read(name).meta.parent
+    except PluginMetaError as e:
+        raise JudgeRefused(f"{name}: {e}") from e
 
 
 def resolve_family(cfg, name: str) -> str:
