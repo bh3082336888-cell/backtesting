@@ -309,24 +309,6 @@ def test_a_failed_supersede_still_writes_the_childs_verdict(cfg, plugins, monkey
     assert verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"]).exists()
 
 
-def test_a_plugin_edited_mid_walk_forward_is_not_recorded(tmp_path, plugins, fresh_wf_caches, monkeypatch):
-    # validate_strategy hashes the plugin at the start and the end; a run that mixed versions is
-    # refused before anything is recorded, so a later `lab judge` can't reuse it as a baseline
-    from perp_lab.validate import pipeline
-    cfg = market_config(tmp_path, validation={"random_seeds": 5, "mc_iterations": 200})
-    real, f = pipeline.walkforward, plugins / "donchian_atr.py"
-
-    def editing(*a, **kw):
-        out = real(*a, **kw)
-        f.write_text(f.read_text() + "\n# edited mid-run\n")
-        return out
-
-    monkeypatch.setattr(pipeline, "walkforward", editing)
-    with pytest.raises(RuntimeError, match="donchian_atr changed during its walk-forward"):
-        pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
-    assert db.read_table(cfg, db.runs).empty
-
-
 class Interrupted(BaseException):
     """Stands in for Ctrl-C / a killed process: not an Exception, so no handler records exam_error."""
 

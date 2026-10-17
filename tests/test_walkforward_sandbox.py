@@ -1,0 +1,167 @@
+"""Walk-forward, sensitivity and the random-entry benchmark run plugins through the sandbox: jobs
+go out in one-symbol chunks, each run in a `client.Batch` and replayed by the trusted engine.
+Unmarked tests run on the in-process twin; the `sandbox` one spawns real workers."""
+
+import pickle
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from perp_lab.data.store import load_bars
+from perp_lab.engine.backtest import EngineParams, run_backtest
+from perp_lab.engine.metrics import daily_returns
+from perp_lab.plugins import PluginSource
+from perp_lab.sandbox.errors import PluginError, ProtocolError
+from perp_lab.store import db
+from perp_lab.strategy import RandomEntry
+from perp_lab.validate import pipeline
+from perp_lab.validate import walkforward as wfm
+from tests.conftest import REPO, market_config
+from tests.judge_fixtures import add_plugin, plugins  # noqa: F401
+from tests.sandbox_fixtures import load_class
+
+DONCHIAN = (REPO / "strategies" / "donchian_atr.py").read_text()
+PREPARE = "    def prepare(self, bars):\n"
+LOUD = DONCHIAN.replace(PREPARE, PREPARE + '        print("hello")\n')
+
+ONE_SYMBOL = '''"""Remembers the first close of every series it prepares, and refuses a second series."""
+from perp_lab.strategy import HOLD, Strategy
+
+FIRST_CLOSES = []
+
+
+class OneSymbol(Strategy):
+    params = {"n": 1}
+    grid = {"n": [1, 2, 3]}
+
+    def prepare(self, bars):
+        FIRST_CLOSES.append(float(bars.close.iloc[0]))
+        print(f"prepared {len(FIRST_CLOSES)}")
+        if len(set(FIRST_CLOSES)) > 1:
+            raise RuntimeError("this worker was sent a second symbol")
+        return bars[[]]
+
+    def entry(self, ctx):
+        return HOLD
+'''
+
+
+def failing(body: str) -> PluginSource:
+    """A plugin whose prepare() prints a line and then runs `body`."""
+    text = f'''"""Fails in prepare."""
+from perp_lab.sandbox.errors import PluginError
+from perp_lab.strategy import HOLD, Strategy
+
+
+class Failing(Strategy):
+    def prepare(self, bars):
+        print("about to fail")
+        {body}
+
+    def entry(self, ctx):
+        return HOLD
+'''
+    return PluginSource.from_text("failing", text)
+
+
+@pytest.fixture(autouse=True)
+def fresh_wf_caches():
+    wfm._cfg.cache_clear()
+    wfm._bars.cache_clear()
+    yield
+    wfm._cfg.cache_clear()
+    wfm._bars.cache_clear()
+
+
+def test_chunks_never_mix_symbols_and_spread_work():
+    jobs = [({"n": k}, s, "4h", None, None, None) for k in range(10) for s in ("A", "B", "C")]
+    cs = wfm.chunks(jobs, 4)
+    assert len(cs) >= 8
+    for symbol, tf, js in cs:
+        assert js and {j[1] for j in js} == {symbol} and {j[2] for j in js} == {tf}
+    for s in "ABC":   # every job exactly once, each symbol's in their original order
+        assert [j for _, _, js in cs for j in js if j[1] == s] == [j for j in jobs if j[1] == s]
+    assert sum(len(js) for _, _, js in cs) == len(jobs)
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_run_many_matches_a_direct_backtest(tmp_path, workers):
+    cfg = market_config(tmp_path)
+    src = PluginSource.from_text("donchian_atr", DONCHIAN)
+    cls = load_class("donchian_atr")
+    jobs = [(c, s, "4h", None, None, None) for c in wfm.grid_combos(src.meta.grid) for s in cfg.symbols]
+    jobs += [({"n": 20}, s, "4h", None, seed, 0.02) for seed in (0, 1) for s in cfg.symbols]
+    res = wfm.run_many(cfg, src, jobs, workers)
+    assert [(r["params"], r["symbol"], r["seed"]) for r in res] == [(j[0], j[1], j[4]) for j in jobs]
+    for (params, s, tf, _, seed, prob), r in zip(jobs, res):
+        bars = load_bars(cfg, s, tf)
+        strat = cls(**params)
+        if seed is not None:
+            strat = RandomEntry(strat, prob, seed)
+        ref = run_backtest(strat, bars, strat.prepare(bars), symbol=s, tf=tf, ep=EngineParams.from_config(cfg, s))
+        assert len(ref.trades) > 0
+        pd.testing.assert_series_equal(r["daily"], daily_returns(ref.equity, ref.time))
+        pd.testing.assert_frame_equal(r["trades"], pd.DataFrame(ref.trades))
+
+
+def test_plugin_output_lands_in_the_run_directory(tmp_path, plugins):
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    add_plugin(plugins, "loud", LOUD)
+    rec, report = pipeline.validate_strategy(cfg, "loud", "4h", workers=2)
+    run_dir = Path(rec["run_dir"])
+    files = sorted((run_dir / "sandbox_stderr").glob("*.txt"))
+    assert files and all(f.name.split("-")[0] in rec["universe"] for f in files)
+    assert all("hello" in f.read_text() for f in files)
+    assert "hello" not in (run_dir / "summary.json").read_text() and "hello" not in report
+
+
+@pytest.mark.sandbox
+def test_a_worker_never_sees_a_second_symbol(tmp_path):
+    cfg = market_config(tmp_path)
+    first = {s: float(load_bars(cfg, s, "4h").close.iloc[0]) for s in cfg.symbols}
+    assert len(set(first.values())) == len(first)          # a second symbol would be noticed
+    src = PluginSource.from_text("one_symbol", ONE_SYMBOL)
+    jobs = [({"n": n}, s, "4h", None, None, None) for n in (1, 2, 3) for s in cfg.symbols]
+    res = wfm.run_many(cfg, src, jobs, workers=2, stderr_dir=tmp_path / "err")
+    assert [(r["params"], r["symbol"]) for r in res] == [(j[0], j[1]) for j in jobs]
+    out = [f.read_text() for f in (tmp_path / "err").glob("*.txt")]
+    assert any("prepared 2" in o for o in out)              # a worker did run several jobs
+
+
+@pytest.mark.parametrize("body, kind, type_, message", [
+    ('raise ValueError("boom")', "exception", "ValueError", "boom"),
+    ('raise PluginError("timeout", "", "retry me")', "protocol", "", "worker reported a timeout error: retry me"),
+])
+def test_a_plugin_error_in_a_pool_worker_reaches_the_caller_intact(tmp_path, body, kind, type_, message):
+    cfg = market_config(tmp_path)
+    jobs = [({}, s, "4h", None, None, None) for s in cfg.symbols]
+    with pytest.raises(PluginError) as e:
+        wfm.run_many(cfg, failing(body), jobs, workers=2)
+    assert (e.value.kind, e.value.type, e.value.message) == (kind, type_, message)
+    assert b"about to fail" in e.value.stderr
+    assert isinstance(e.value, ProtocolError) == (kind == "protocol")
+
+
+@pytest.mark.parametrize("err", [PluginError("exception", "ValueError", "boom", b"tail"),
+                                 ProtocolError("bad frame", b"tail")])
+def test_plugin_errors_pickle_with_every_field(err):
+    back = pickle.loads(pickle.dumps(err))
+    assert type(back) is type(err)
+    assert (back.kind, back.type, back.message, back.stderr) == (err.kind, err.type, err.message, err.stderr)
+
+
+def test_an_edit_during_validation_does_not_change_what_is_recorded(tmp_path, plugins, monkeypatch):
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    f = plugins / "donchian_atr.py"
+    h0 = PluginSource.read("donchian_atr").hash
+    real = wfm.run_many
+
+    def editing(*a, **kw):   # an edit that breaks any run that reads the file again
+        f.write_text(f.read_text() + '\nraise RuntimeError("edited mid-run")\n')
+        return real(*a, **kw)
+
+    monkeypatch.setattr(wfm, "run_many", editing)
+    rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    assert PluginSource.read("donchian_atr").hash != h0
+    assert rec["strategy_hash"] == h0 == db.run_row(cfg, rec["run_id"])["strategy_hash"]

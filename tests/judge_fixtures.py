@@ -71,11 +71,12 @@ class StubValidate:
         self.outcomes, self.calls = outcomes, []
 
     def __call__(self, cfg, name, tf, symbols=None, seeds=None, workers=None, notes="",
-                 parent_run_id=None, lineage_id=None):
+                 parent_run_id=None, lineage_id=None, src=None):
         self.calls.append(name)
         verdict, oos = self.outcomes[name]
         rid = new_run_id()
-        rec = {"run_id": rid, "strategy": name, "strategy_hash": plugin_hash(name), "hypothesis": "h",
+        h = src.hash if src is not None else plugin_hash(name)
+        rec = {"run_id": rid, "strategy": name, "strategy_hash": h, "hypothesis": "h",
                "params": {}, "universe": symbols or cfg.symbols, "timeframes": [tf],
                "validation_mode": "walkforward", "status": verdict,
                "fail_reasons": [] if verdict == "candidate" else ["does not beat random-entry p95 OOS"],

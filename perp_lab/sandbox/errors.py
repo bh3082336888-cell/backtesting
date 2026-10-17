@@ -42,10 +42,16 @@ class PluginError(Exception):
             r += f": {self.type}: {self.message}"
         return r
 
+    def __reduce__(self):               # every field, so it crosses a process pool intact
+        return PluginError, (self.kind, self.type, self.message, self.stderr)
+
 
 class ProtocolError(PluginError):
     def __init__(self, message: str = "", stderr: bytes = b""):
         super().__init__("protocol", "", message, stderr)
+
+    def __reduce__(self):
+        return ProtocolError, (self.message, self.stderr)
 
 
 class WorkerLost(Exception):

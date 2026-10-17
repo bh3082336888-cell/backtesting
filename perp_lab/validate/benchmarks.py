@@ -33,11 +33,11 @@ def random_entry(cfg, wf: WFResult, seeds: int | None = None, workers=None) -> d
     for s in wf.symbols:
         n = int((wf.oos_trades.symbol == s).sum()) if len(wf.oos_trades) else 0
         probs[s] = n / max(wf.oos_flat_bars[s], 1.0)
-    jobs = [(wf.strategy, params, s, wf.tf, None, seed, probs[s])
+    jobs = [(params, s, wf.tf, None, seed, probs[s])
             for seed in range(seeds) for s in wf.symbols if probs[s] > 0]
     if not jobs:
         return {"note": "strategy took no OOS trades; benchmark undefined", "beats_random": False}
-    res = run_many(cfg, jobs, workers)
+    res = run_many(cfg, wf.src, jobs, workers, wf.stderr_dir)
     oa, ob = wf.raw["oos_span"]
     by_seed: dict[int, dict] = {}
     trades_by_seed: dict[int, int] = {}
