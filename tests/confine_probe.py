@@ -94,6 +94,39 @@ def sched_getaffinity_parent(target, pre):
     os.sched_getaffinity(os.getppid())
 
 
+def setpriority_user(target, pre):
+    # PRIO_USER with who 0 means every process of this user. Nice -20 with RLIMIT_NICE 0 can't be
+    # set on any process that isn't there already, so even a filter that let this through changes
+    # nothing; the kernel would answer EACCES, the filter answers EPERM.
+    resource.setrlimit(resource.RLIMIT_NICE, (0, 0))
+    os.setpriority(os.PRIO_USER, 0, -20)
+
+
+def ioprio_get_user(target, pre):
+    nr = {"x86_64": 252, "aarch64": 31}[os.uname().machine]
+    _ok(libc.syscall(ctypes.c_long(nr), ctypes.c_int(3), ctypes.c_int(0)))  # IOPRIO_WHO_USER, who 0
+
+
+def getpriority_self(target, pre):
+    os.getpriority(os.PRIO_PROCESS, 0)
+
+
+def mq_open(target, pre):
+    q = _ok(libc.mq_open(target.encode(), os.O_CREAT | os.O_WRONLY, 0o600, None))
+    libc.mq_close(q)
+
+
+def x32_syscall(target, pre):
+    """getpid through the x32 ABI, from a second thread, so that killing only the calling thread
+    (the kernel kills the whole process when the last thread makes it) leaves a survivor."""
+    libc.prctl(4, 0, 0, 0, 0)                          # PR_SET_DUMPABLE 0: no core, no crash report
+    t = threading.Thread(target=lambda: libc.syscall(ctypes.c_long(0x40000000 | 39)), daemon=True)
+    print("CALLING", flush=True)
+    t.start()
+    t.join(5)
+    print("SURVIVED", flush=True)
+
+
 def read_pre_existing_thread(target, pre):
     pre["go"].set()                                    # only reached if confine() did not refuse
     pre["thread"].join(10)
@@ -185,7 +218,8 @@ def import_numpy_pandas_pyarrow(target, pre):
 PROBES = {f.__name__.rstrip("_"): f for f in (
     read_repo_file, write_tmp, tcp_connect, udp_send, unix_connect, fork, subprocess_, shmget,
     prlimit_parent, kill_parent, sched_getaffinity_parent, read_pre_existing_thread, read_allowlisted,
-    import_numpy_pandas_pyarrow)}
+    import_numpy_pandas_pyarrow, setpriority_user, ioprio_get_user, getpriority_self, mq_open,
+    x32_syscall)}
 
 
 def main(argv):

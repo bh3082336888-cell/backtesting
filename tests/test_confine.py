@@ -4,6 +4,9 @@ Each test runs tests/confine_probe.py in a fresh interpreter launched the way th
 (`-s -P`, the spec's environment, cwd /, a new session), since confinement can't be undone.
 """
 
+import ctypes
+import errno
+import os
 import resource
 import signal
 import site
@@ -26,15 +29,30 @@ pytestmark = [pytest.mark.sandbox,
               pytest.mark.skipif(_UNAVAILABLE is not None, reason=f"sandbox unavailable: {_UNAVAILABLE}")]
 
 
-def run_probe(name, target=""):
+def _run(name, target=""):
     cmd = [sys.executable, "-s", "-P", str(PROBE)]
     for p in confine.allowlist():
         cmd += ["--allow", p]
     cmd += ["--target", str(target), name]
-    r = subprocess.run(cmd, env=ENV, cwd="/", close_fds=True, start_new_session=True,
-                       capture_output=True, text=True, timeout=120)
+    return subprocess.run(cmd, env=ENV, cwd="/", close_fds=True, start_new_session=True,
+                          capture_output=True, text=True, timeout=120)
+
+
+def run_probe(name, target=""):
+    r = _run(name, target)
     assert r.returncode == 0, r.stdout + r.stderr
     return r.stdout.splitlines()
+
+
+def _queue_left(name):
+    """Whether the POSIX message queue `name` exists, seen from this (unconfined) process."""
+    if Path("/dev/mqueue", name[1:]).exists():
+        return True
+    libc = ctypes.CDLL(None, use_errno=True)
+    q = libc.mq_open(name.encode(), os.O_RDONLY, 0, None)
+    if q >= 0:
+        libc.mq_close(q)
+    return q >= 0 or ctypes.get_errno() != errno.ENOENT
 
 
 EXPECTED = {
@@ -49,6 +67,9 @@ EXPECTED = {
     "prlimit_parent": "DENIED EPERM",             # seccomp: prlimit64 aimed at another pid
     "kill_parent": "DENIED EPERM",                # Landlock: signal scope
     "sched_getaffinity_parent": "DENIED EPERM",   # seccomp: sched_* aimed at another pid
+    "setpriority_user": "DENIED EPERM",           # seccomp: PRIO_USER, who 0 is every process of this user
+    "ioprio_get_user": "DENIED EPERM",            # seccomp: IOPRIO_WHO_USER, likewise
+    "mq_open": "DENIED EPERM",                    # seccomp: POSIX message queues
     "read_pre_existing_thread": "REFUSED",        # confine() must be the only thread
 }
 
@@ -70,8 +91,12 @@ def test_each_escape_is_denied(probe, tmp_path):
         listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         listener.bind(("127.0.0.1", 0))
         target = listener.getsockname()[1]
+    elif probe == "mq_open":
+        target = f"/perp_lab_confine_{os.getpid()}"
+        assert not _queue_left(target)
     old_term = signal.signal(signal.SIGTERM, lambda *_: signals.append("SIGTERM"))
-    nofile = resource.getrlimit(resource.RLIMIT_NOFILE)
+    nofile, nice = resource.getrlimit(resource.RLIMIT_NOFILE), os.getpriority(os.PRIO_PROCESS, 0)
+    queue_left = False
     try:
         assert run_probe(probe, target)[-1] == EXPECTED[probe]
     finally:
@@ -79,7 +104,11 @@ def test_each_escape_is_denied(probe, tmp_path):
         now = resource.getrlimit(resource.RLIMIT_NOFILE)
         if now != nofile:
             resource.setrlimit(resource.RLIMIT_NOFILE, (min(nofile[0], now[1]), now[1]))
+        if probe == "mq_open" and (queue_left := _queue_left(target)):
+            ctypes.CDLL(None).mq_unlink(target.encode())
     assert now == nofile                          # prlimit on the parent changed nothing
+    assert os.getpriority(os.PRIO_PROCESS, 0) == nice
+    assert not queue_left                         # a denied mq_open leaves no queue behind
     assert signals == []                          # without the handler, SIGTERM would have ended this run
     assert not (tmp_path / "sentinel").exists()
     if listener is not None:
@@ -104,6 +133,19 @@ def test_numpy_pandas_pyarrow_import_after_confinement():
     assert len(threads) == count >= 2, out
     assert all(line.endswith(" DENIED EACCES") for line in threads), out
     assert out[-1] == "DENIED EACCES"
+
+
+def test_priority_of_this_process_still_works():
+    assert run_probe("getpriority_self")[-1] == "ALLOWED"
+
+
+@pytest.mark.skipif(os.uname().machine != "x86_64", reason="x32 is an x86_64 ABI")
+def test_a_syscall_through_another_abi_kills_the_process():
+    # Made from a second thread: the kernel kills the whole process anyway when the last thread
+    # makes a killed syscall, so only a second thread tells kill-process from kill-thread.
+    r = _run("x32_syscall")
+    assert r.returncode == -signal.SIGSYS, r.stdout + r.stderr
+    assert r.stdout.splitlines() == ["CALLING"]
 
 
 def test_probe_reports_none_here():

@@ -51,7 +51,8 @@ class _PathBeneathAttr(ctypes.Structure):
 
 # seccomp: libseccomp's seccomp.h
 _SCMP_ACT_ALLOW = 0x7FFF0000
-_SCMP_FLTATR_CTL_TSYNC = 4
+_SCMP_ACT_KILL_PROCESS = 0x80000000
+_SCMP_FLTATR_ACT_BADARCH, _SCMP_FLTATR_CTL_TSYNC = 2, 4
 _SCMP_CMP_NE, _SCMP_CMP_MASKED_EQ = 1, 7
 _NR_SCMP_ERROR = -1                           # seccomp_syscall_resolve_name: a name it doesn't know
 _CLONE_THREAD = 0x10000
@@ -73,19 +74,24 @@ _ALWAYS_EPERM = """
     ptrace process_vm_readv process_vm_writev process_madvise kcmp pidfd_open pidfd_getfd
     migrate_pages move_pages mount umount2 pivot_root chroot unshare setns bpf perf_event_open
     userfaultfd io_uring_setup io_uring_enter io_uring_register keyctl add_key request_key
-    init_module finit_module delete_module kexec_load kexec_file_load""".split()
+    init_module finit_module delete_module kexec_load kexec_file_load
+    mq_open mq_unlink mq_timedsend mq_timedreceive mq_notify mq_getsetattr""".split()
 _PID_ARG0 = """
     prlimit64 sched_setaffinity sched_getaffinity sched_setscheduler sched_getscheduler
     sched_setparam sched_getparam sched_rr_get_interval sched_setattr sched_getattr""".split()
-_WHO_ARG1 = "getpriority setpriority ioprio_get ioprio_set".split()
+# (which, who): who 0 is this process only when which is PRIO_PROCESS (0) / IOPRIO_WHO_PROCESS (1);
+# with PRIO_USER or IOPRIO_WHO_USER it is every process of this user, the judge included.
+_WHICH_WHO = {"getpriority": 0, "setpriority": 0, "ioprio_get": 1, "ioprio_set": 1}
 
-# (action, syscall name, conditions (arg, op, datum_a, datum_b) that must all hold)
+# (action, syscall name, conditions (arg, op, datum_a, datum_b) that must all hold); several rules
+# for one syscall deny if any of them matches.
 _RULES = (
     [(_EPERM, name, ()) for name in _ALWAYS_EPERM]
     + [(_EPERM, "clone", ((0, _SCMP_CMP_MASKED_EQ, _CLONE_THREAD, 0),)),  # a thread is fine, a process isn't
        (_ENOSYS, "clone3", ())]                                          # so libc falls back to clone
     + [(_EPERM, name, ((0, _SCMP_CMP_NE, 0, 0),)) for name in _PID_ARG0]  # pid 0: this process only
-    + [(_EPERM, name, ((1, _SCMP_CMP_NE, 0, 0),)) for name in _WHO_ARG1]  # who 0: this process only
+    + [rule for name, which in _WHICH_WHO.items()                        # this process only
+       for rule in ((_EPERM, name, ((0, _SCMP_CMP_NE, which, 0),)), (_EPERM, name, ((1, _SCMP_CMP_NE, 0, 0),)))]
 )
 
 _libc_dll = None
@@ -250,8 +256,10 @@ def _seccomp_filter(lib) -> None:
     if not ctx:
         raise RuntimeError("seccomp_init failed")
     try:
-        # SCMP_FLTATR_ACT_BADARCH keeps its default, kill: a syscall made through another ABI
-        # (i386, x32) never runs.
+        # A syscall made through another ABI (i386, x32) never runs, and the whole process dies
+        # (the default kills only the calling thread).
+        _check(lib.seccomp_attr_set(ctx, _SCMP_FLTATR_ACT_BADARCH, _SCMP_ACT_KILL_PROCESS),
+               "seccomp_attr_set(ACT_BADARCH)")
         _check(lib.seccomp_attr_set(ctx, _SCMP_FLTATR_CTL_TSYNC, 1), "seccomp_attr_set(CTL_TSYNC)")
         for action, name, conditions in _RULES:
             nr = lib.seccomp_syscall_resolve_name(name.encode())
