@@ -11,6 +11,10 @@ declared size (and their total) against `max_bytes` before it reads a single sec
 Arrow: `table_bytes` encodes a DataFrame to Arrow IPC; the parent uses it to send bars to the
 worker. `table_frame` decodes one and is called only inside the worker. The parent never parses
 Arrow from a worker, and `read_frame` refuses an "arrow" section from one.
+
+Streams: a step request carries the engine's position (`position_json`, rebuilt in the worker by
+`position_view`); its reply carries one signal as JSON (`signal_json`), which the parent checks as
+strictly as a decision log entry (`signal_from`).
 """
 
 from __future__ import annotations
@@ -21,13 +25,17 @@ import struct
 import numpy as np
 import pandas as pd
 
-from perp_lab.sandbox.decisions import Decisions
+from perp_lab.sandbox.decisions import ACTIONS, Decisions
 from perp_lab.sandbox.errors import ProtocolError
+from perp_lab.strategy import PositionView, Signal
 
 MAX_HEADER = 65536
 WORKER_DTYPES = {"<i8", "<i1", "<f8"}
 _ITEMSIZE = {"<i8": 8, "<i1": 1, "<f8": 8, "bytes": 1, "arrow": 1}
 _DECISION_KEYS = ("i", "action", "stop", "target", "has_stop", "has_target")
+_SIGNAL_KEYS = {"action", "stop", "target", "has_stop", "has_target"}
+_POSITION_INTS = ("side", "entry_i", "bars_held")
+_POSITION_FLOATS = ("entry_price", "stop", "target", "qty", "best_close")
 
 
 class Arrow(bytes):
@@ -142,3 +150,68 @@ def decisions_from(sections: dict, n_bars: int) -> Decisions:
     dec = Decisions(*(sections[k] for k in _DECISION_KEYS))
     dec.validate(n_bars)
     return dec
+
+
+# ---------------------------------------------------------------- streams
+
+def warmup_decisions(sections: dict, warmup_k: int) -> Decisions:
+    """A `stream_open` reply's decisions, checked. The engine decides on no run's last bar, so a
+    warm-up over k bars can only decide on bars [0, k - 1)."""
+    if set(sections) != set(_DECISION_KEYS):
+        raise ProtocolError("reply sections are not the ones expected")
+    return decisions_from(sections, max(warmup_k - 1, 0))
+
+
+def position_json(pv: PositionView | None) -> dict | None:
+    """The engine's position, as a step request carries it (parent side)."""
+    if pv is None:
+        return None
+    return {**{k: int(getattr(pv, k)) for k in _POSITION_INTS}, **{k: float(getattr(pv, k)) for k in _POSITION_FLOATS}}
+
+
+def position_view(d: dict | None) -> PositionView | None:
+    """A step request's position, as the plugin sees it (worker side)."""
+    if d is None:
+        return None
+    if not isinstance(d, dict) or set(d) != set(_POSITION_INTS + _POSITION_FLOATS):
+        raise ProtocolError("malformed position")
+    pv = PositionView()
+    for k, v in d.items():
+        setattr(pv, k, v)
+    return pv
+
+
+def signal_json(sig: Signal) -> dict:
+    """A checked Signal (`decisions.check_signal`) as a step reply carries it (worker side)."""
+    return {"action": sig.action, "stop": None if sig.stop is None else float(sig.stop),
+            "target": None if sig.target is None else float(sig.target),
+            "has_stop": sig.stop is not None, "has_target": sig.target is not None}
+
+
+def _level(sig: dict, key: str) -> float | None:
+    has, v = sig[f"has_{key}"], sig[key]
+    if type(has) is not bool:
+        raise ProtocolError(f"signal has_{key} must be a boolean")
+    if not has:
+        if v is not None:
+            raise ProtocolError(f"signal {key} sent with has_{key} false")
+        return None
+    if type(v) not in (int, float):
+        raise ProtocolError(f"signal {key} must be a number")
+    try:
+        return float(v)
+    except OverflowError:
+        raise ProtocolError(f"signal {key} is out of range") from None
+
+
+def signal_from(reply: dict, sections: dict) -> Signal:
+    """A `step` reply's signal, checked as strictly as a decision log entry (parent side): an action
+    in ACTIONS, and a stop and a target that are each a number exactly when their flag is set."""
+    if sections:
+        raise ProtocolError("a step reply has no sections")
+    sig = reply.get("signal")
+    if not isinstance(sig, dict) or set(sig) != _SIGNAL_KEYS:
+        raise ProtocolError("malformed signal")
+    if type(sig["action"]) is not str or sig["action"] not in ACTIONS:
+        raise ProtocolError("signal action is not one of hold, long, short, exit")
+    return Signal(sig["action"], _level(sig, "stop"), _level(sig, "target"))

@@ -326,8 +326,8 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     syms, tf = s["universe"], j["timeframe"]
     end = end_fn(cfg, syms, tf)
     days = max(0, (end - cfg.holdout_start).days)
-    if dated_lookahead_failures(cfg, PluginSource.read(j["strategy"]), end,
-                                params=s["sensitivity"]["base_params"]):
+    src = PluginSource.read(j["strategy"])                  # these bytes are checked and examined
+    if dated_lookahead_failures(cfg, src, end, params=s["sensitivity"]["base_params"]):
         db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
         return finish(cfg, jid)
     chk, token = budget.mint(cfg, j["lineage_id"], jid, days)
@@ -335,7 +335,7 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
         db.update_holdout(cfg, jid, chk.status, chk.code)
         return finish(cfg, jid)
     try:
-        res = run(cfg, j["strategy"], tf, syms, s["sensitivity"]["base_params"], token, end)
+        res = run(cfg, src, tf, syms, s["sensitivity"]["base_params"], token, end)
         jc = cfg["judge"]
         ok, reasons, detail = gates.holdout_consistent(
             res.portfolio, len(res.trades), oos_portfolio(child["run_dir"]),

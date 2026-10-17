@@ -28,7 +28,7 @@ def stub_run(mu, n_trades=30, seed=11, fail=False):
                            "pnl": 1.0, "r_multiple": 0.5, "bars_held": 3, "exit_reason": "stop",
                            "fees": 0.1, "funding": 0.0})
 
-    def run(cfg, name, tf, symbols, params, token, end):
+    def run(cfg, src, tf, symbols, params, token, end):
         if fail:
             raise RuntimeError("exam crashed")
         return ExamResult(HOLDOUT_DAYS[0], end, dict(params), {"BTCUSDT": port}, port, trades)
@@ -149,10 +149,10 @@ def test_one_crashing_exam_does_not_block_the_others(cfg, plugins):
         judged(cfg, name, outcomes, stub_run(0.003), days=100)
     good = stub_run(0.003)
 
-    def run(cfg, name, tf, symbols, params, token, end):
-        if name == "donchian_atr":
+    def run(cfg, src, tf, symbols, params, token, end):
+        if src.name == "donchian_atr":
             raise RuntimeError("exam crashed")
-        return good(cfg, name, tf, symbols, params, token, end)
+        return good(cfg, src, tf, symbols, params, token, end)
     a, b = exam_pending(cfg, run=run, end_fn=end_after(200))
     assert a["strategy"] == "donchian_atr" and "error" in a
     assert (a["holdout_status"], a["holdout_reason"]) == ("pending", "exam_error")

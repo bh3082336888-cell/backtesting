@@ -11,10 +11,12 @@ arrays sized against `sandbox.max_output_mb`. Every string kept from a worker (a
 and message, its stderr) is cut to printable ASCII here, whatever the worker says it did.
 
 Limits: each request may use `sandbox.task_cpu_s` of the worker's CPU time (read from
-/proc/<pid>/stat) and `task_cpu_s * wall_factor` of wall-clock time. Over the CPU limit the
-worker is killed and the request is `PluginError("cpu_limit")`; over the wall-clock limit it is
-killed and `WorkerLost("timeout")`; a worker that goes away is `WorkerLost("died")`. `Batch` and
-`fresh_run` retry a `WorkerLost` once in a fresh worker; a second is `PluginError(kind)`.
+/proc/<pid>/stat) and `task_cpu_s * wall_factor` of wall-clock time; a stream step (one `prepare`
+and one decision) may use `sandbox.stream_step_s` of each. Over the CPU limit the worker is killed
+and the request is `PluginError("cpu_limit")`; over the wall-clock limit it is killed and
+`WorkerLost("timeout")`; a worker that goes away is `WorkerLost("died")`. `Batch` and `fresh_run`
+retry a `WorkerLost` once in a fresh worker; a second is `PluginError(kind)`. Streams are run by
+`stream.py`.
 
 A worker dies with its parent: it is SIGKILLed when the thread that spawned it exits (the
 kernel's parent-death signal belongs to that thread, not to the process). So a worker must be
@@ -45,8 +47,10 @@ from perp_lab.sandbox import confine
 from perp_lab.sandbox.decisions import Decisions
 from perp_lab.sandbox.errors import (PluginError, ProtocolError, SandboxUnavailable, WorkerLost, ascii_bytes,
                                      ascii_text)
-from perp_lab.sandbox.protocol import Arrow, decisions_from, read_frame, table_bytes, write_frame
+from perp_lab.sandbox.protocol import (Arrow, decisions_from, position_json, read_frame, signal_from, table_bytes,
+                                       warmup_decisions, write_frame)
 from perp_lab.sandbox.replay import check_fingerprint, random_draw, replay
+from perp_lab.strategy import PositionView, Signal
 
 # Exactly this environment, nothing inherited (no secrets). PYTHONHASHSEED makes hash() of a
 # string agree across workers, which is why the worker is started with -s -P and not -I.
@@ -162,6 +166,7 @@ class Worker:
         self._proc = proc
         self._cpu_limit = float(sb["task_cpu_s"])
         self._wall_limit = float(sb["task_cpu_s"]) * float(sb["wall_factor"])
+        self._step_limit = float(sb["stream_step_s"])     # CPU and wall clock, each
         self._index: pd.Index | None = None
         self._dead = self._closed = False
         self._lock = threading.Lock()
@@ -287,7 +292,10 @@ class Worker:
         fields = stat[stat.rfind(b")") + 2:].split()    # after the name, which the plugin can set
         return (int(fields[11]) + int(fields[12])) / _CLK_TCK
 
-    def _request(self, header: dict, sections: dict | None = None) -> tuple[dict, dict]:
+    def _request(self, header: dict, sections: dict | None = None, *,
+                 limits: tuple[float, float] | None = None) -> tuple[dict, dict]:
+        """One request and its reply. `limits` is (CPU s, wall-clock s); the batch limits by default."""
+        cpu_limit, wall_limit = limits or (self._cpu_limit, self._wall_limit)
         if self._closed or self._dead:
             raise RuntimeError(f"worker {self.pid} is {'closed' if self._closed else 'dead'}")
         try:                            # nothing may arrive between requests
@@ -315,14 +323,14 @@ class Worker:
                 now = self._cpu()
                 if now is not None:
                     used = now - cpu0
-                if used > self._cpu_limit:  # finished or not: the limit is on CPU used
-                    raise self._fail(PluginError("cpu_limit", "", f"over {self._cpu_limit:g} s of CPU"))
+                if used > cpu_limit:        # finished or not: the limit is on CPU used
+                    raise self._fail(PluginError("cpu_limit", "", f"over {cpu_limit:g} s of CPU"))
                 if item is not None:
                     break
                 if box and not isinstance(box[0], OSError):
                     raise box[0]        # our request could not be framed
-                if time.monotonic() - t0 > self._wall_limit:
-                    raise self._fail(WorkerLost("timeout", f"over {self._wall_limit:g} s of wall-clock time"))
+                if time.monotonic() - t0 > wall_limit:
+                    raise self._fail(WorkerLost("timeout", f"over {wall_limit:g} s of wall-clock time"))
         except BaseException:
             self._kill()
             raise
@@ -361,12 +369,45 @@ class Worker:
         if self._index is None:
             raise RuntimeError("send the bars before a run")
         reply, secs = self._request(run_request(params, ep, k=k, start_i=start_i, random=random, features=features))
+        return self._parsed("run", lambda: run_output(reply, secs, self._index if k is None else self._index[:k],
+                                                      features))
+
+    def stream_open(self, params: dict, ep: EngineParams, warmup_k: int) -> Decisions:
+        """Start a stream on the held bars: the worker keeps a new strategy instance and returns its
+        decisions from a batch run over the first warmup_k bars (none when warmup_k is 0)."""
+        if self._index is None:
+            raise RuntimeError("send the bars before a stream")
+        if not 0 <= warmup_k <= len(self._index):
+            raise ValueError(f"warmup_k {warmup_k} is outside the {len(self._index)} bars held")
+        reply, secs = self._request(stream_open_request(params, ep, warmup_k))
+        return self._parsed("stream_open", lambda: warmup_decisions(secs, warmup_k))
+
+    def step(self, position: PositionView | None, *, append: pd.DataFrame | None = None,
+             window: pd.DataFrame | None = None) -> Signal:
+        """The stream's signal on the last bar held, after adding `append`'s rows to the held bars
+        or replacing them with `window`; `position` is the trusted engine's. Limited to
+        `stream_step_s` of CPU and of wall-clock time."""
+        if append is not None and window is not None:
+            raise ValueError("a step either appends or replaces the bars, not both")
+        if self._index is None:
+            raise RuntimeError("send the bars before a stream")
+        mode, table = ("append", append) if append is not None else ("window", window) if window is not None \
+            else ("none", None)
+        sections = None if table is None else {"table": Arrow(table_bytes(table))}
+        reply, secs = self._request(step_request(position, mode), sections, limits=(self._step_limit,) * 2)
+        sig = self._parsed("step", lambda: signal_from(reply, secs))
+        self._index = self._index.append(table.index) if mode == "append" else table.index if mode == "window" \
+            else self._index
+        return sig
+
+    def _parsed(self, what: str, parse):
+        """`parse()` of a reply; whatever it raises is the worker's doing: a protocol violation."""
         try:
-            return run_output(reply, secs, self._index if k is None else self._index[:k], features)
+            return parse()
         except ProtocolError as e:
             raise self._fail(ProtocolError(ascii_text(e.message))) from None
-        except Exception as e:          # whatever the reply made us raise, it is the worker's doing
-            raise self._fail(ProtocolError(f"malformed run reply ({type(e).__name__})")) from None
+        except Exception as e:
+            raise self._fail(ProtocolError(f"malformed {what} reply ({type(e).__name__})")) from None
 
 
 # ---------------------------------------------------------------- what crosses the pipe
@@ -376,6 +417,14 @@ def run_request(params: dict, ep: EngineParams, *, k=None, start_i=0, random=Non
             "k": None if k is None else int(k), "start_i": int(start_i),
             "random": None if random is None else {"seed": int(random[0]), "prob": float(random[1])},
             "features": bool(features)}
+
+
+def stream_open_request(params: dict, ep: EngineParams, warmup_k: int) -> dict:
+    return {"op": "stream_open", "params": dict(params), "ep": dataclasses.asdict(ep), "warmup_k": int(warmup_k)}
+
+
+def step_request(position: PositionView | None, mode: str) -> dict:
+    return {"op": "step", "position": position_json(position), "mode": mode}
 
 
 def run_output(reply: dict, sections: dict, index: pd.Index, features: bool) -> RunOutput:

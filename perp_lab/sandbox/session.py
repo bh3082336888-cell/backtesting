@@ -2,8 +2,10 @@
 
 `worker.py` imports this module only after `confine()`, so the threads numpy and pyarrow start
 inherit the confinement. One `Session` per worker: it holds the plugin class (`load`), one
-symbol's bars (`bars`) and runs the plugin over them (`run`). Its results are plain values the
-worker encodes for the parent; an exception becomes `error_reply`.
+symbol's bars (`bars`) and runs the plugin over them (`run`). A stream (`stream_open`, then
+`step`) keeps one strategy instance and decides on the last bar held, after adding the bar the
+step brings. Its results are plain values the worker encodes for the parent; an exception becomes
+`error_reply`.
 """
 
 from __future__ import annotations
@@ -18,9 +20,9 @@ import pyarrow  # noqa: F401  (imported now, so its threads start under confinem
 
 import perp_lab.indicators  # noqa: F401  (plugins import it)
 from perp_lab.engine.backtest import EngineParams, run_backtest
-from perp_lab.sandbox.decisions import Decisions, Recorder
+from perp_lab.sandbox.decisions import Decisions, Recorder, decide_last
 from perp_lab.sandbox.errors import PluginError, ProtocolError, ascii_text
-from perp_lab.sandbox.protocol import decisions_sections
+from perp_lab.sandbox.protocol import decisions_sections, position_view, signal_json
 from perp_lab.strategy import RandomEntry, Strategy
 
 _META = ("params", "grid", "timeframes")
@@ -71,6 +73,7 @@ class Session:
         self.cls: type[Strategy] | None = None
         self.symbol = self.tf = None
         self._bars: pd.DataFrame | None = None
+        self._stream: Strategy | None = None
 
     def load(self, name: str, text: bytes) -> dict:
         """Load the plugin; its params, grid and timeframes at runtime, for the parent to compare."""
@@ -99,12 +102,51 @@ class Session:
         names, arrays = _features(feats, bars.index) if features else ([], [])
         return Decisions.from_log(rec.log), fp, names, arrays
 
+    def stream_open(self, params: dict, ep: dict, warmup_k: int) -> Decisions:
+        """A new strategy instance, kept for the steps that follow; the decisions of a batch run of
+        it over the first warmup_k held bars (none when warmup_k is 0)."""
+        if self.cls is None or self._bars is None:
+            raise ProtocolError("stream_open before load and bars")
+        if type(warmup_k) is not int or not 0 <= warmup_k <= len(self._bars):
+            raise ProtocolError("warmup_k must be an int within the held bars")
+        self._stream = None
+        strat = self.cls(**params)
+        dec = Decisions.empty()
+        if warmup_k:
+            bars = self._bars.iloc[:warmup_k]
+            rec = Recorder(strat)
+            run_backtest(rec, bars, rec.prepare(bars), symbol=self.symbol, tf=self.tf, ep=EngineParams(**ep))
+            dec = Decisions.from_log(rec.log)
+        self._stream = strat
+        return dec
+
+    def step(self, position: dict | None, mode: str, table: pd.DataFrame | None) -> dict:
+        """Add the step's bars ("append") or replace the held ones ("window"), then the stream's
+        signal on the last bar held, given the engine's position."""
+        if self._stream is None:
+            raise ProtocolError("step before stream_open")
+        if mode not in ("none", "append", "window") or (table is None) != (mode == "none"):
+            raise ProtocolError("a step's mode and its table do not agree")
+        if mode == "append":
+            self._bars = pd.concat([self._bars, table])
+        elif mode == "window":
+            self._bars = table
+        return signal_json(decide_last(self._stream, self.symbol, self._bars, position_view(position)))
+
 
 def run_reply(result, features: bool) -> tuple[dict, dict]:
     """`Session.run`'s result as a reply frame: header and raw sections."""
     dec, fp, names, arrays = result
     header = {"ok": True, "fingerprint": [fp[0], fp[1]], "features": names if features else None}
     return header, {**decisions_sections(dec), **{f"f{j}": a for j, a in enumerate(arrays)}}
+
+
+def stream_open_reply(dec: Decisions) -> tuple[dict, dict]:
+    return {"ok": True}, decisions_sections(dec)
+
+
+def step_reply(signal: dict) -> tuple[dict, dict]:
+    return {"ok": True, "signal": signal}, {}
 
 
 def error_reply(exc: BaseException) -> dict:

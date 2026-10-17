@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from perp_lab import strategy as _strategy
-from perp_lab.sandbox import client
+from perp_lab.sandbox import client, protocol
 from perp_lab.sandbox.errors import ascii_bytes
 from perp_lab.sandbox.protocol import table_bytes, table_frame
 from tests.conftest import REPO
@@ -43,8 +43,10 @@ class InProcessWorker:
     """`client.Worker`'s interface, served by a `session.Session` in this process.
 
     Same metadata check, same error conversion (`session.error_reply`), and the same `RunOutput`
-    (built by `client.run_output` from the reply a real worker would send); bars go through Arrow
-    and the request through JSON, as they do on the pipe. `stderr` is what the plugin printed.
+    (built by `client.run_output` from the reply a real worker would send); stream replies are
+    checked by the same `protocol.warmup_decisions` and `protocol.signal_from`. Bars go through
+    Arrow and requests through JSON, as they do on the pipe. `stderr` is what the plugin printed.
+    No limits are enforced.
     """
 
     def __init__(self, cfg, src):
@@ -86,6 +88,32 @@ class InProcessWorker:
         reply, sections = self._session.run_reply(result, req["features"])
         reply = json.loads(json.dumps(reply, allow_nan=True))
         return client.run_output(reply, sections, self._index if k is None else self._index[:k], features)
+
+    def stream_open(self, params, ep, warmup_k):
+        if self._index is None:
+            raise RuntimeError("send the bars before a stream")
+        if not 0 <= warmup_k <= len(self._index):
+            raise ValueError(f"warmup_k {warmup_k} is outside the {len(self._index)} bars held")
+        req = json.loads(json.dumps(client.stream_open_request(params, ep, warmup_k), allow_nan=True))
+        dec = self._call(self._s.stream_open, req["params"], req["ep"], req["warmup_k"])
+        _, sections = self._session.stream_open_reply(dec)
+        return protocol.warmup_decisions(sections, warmup_k)
+
+    def step(self, position, *, append=None, window=None):
+        if append is not None and window is not None:
+            raise ValueError("a step either appends or replaces the bars, not both")
+        if self._index is None:
+            raise RuntimeError("send the bars before a stream")
+        mode, table = ("append", append) if append is not None else ("window", window) if window is not None \
+            else ("none", None)
+        req = json.loads(json.dumps(client.step_request(position, mode), allow_nan=True))
+        sent = None if table is None else table_frame(table_bytes(table))
+        signal = self._call(self._s.step, req["position"], req["mode"], sent)
+        reply, sections = self._session.step_reply(signal)
+        sig = protocol.signal_from(json.loads(json.dumps(reply, allow_nan=True)), sections)
+        self._index = self._index.append(table.index) if mode == "append" else table.index if mode == "window" \
+            else self._index
+        return sig
 
     def close(self):
         pass
