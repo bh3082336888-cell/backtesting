@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import math
 import os
 import queue
@@ -36,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +62,7 @@ ENV = {"LANG": "C.UTF-8", "PYTHONHASHSEED": "0", "OMP_NUM_THREADS": "1", "OPENBL
        "MKL_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1"}
 STDERR_CAP = 64 << 10                   # kept per worker, for humans
 STDERR_TAIL = 2 << 10                   # carried on PluginError.stderr, for the judge's log
+LOGGED_TB = 8 << 10                     # of a parse failure's traceback, in the parent's log
 READY_S = 120                           # interpreter start, confinement and the numpy/pandas/pyarrow imports
 CLOSE_S = 2                             # after stdin closes, before the kill
 SLICE_S = 0.25                          # how often a waiting request checks the limits
@@ -71,6 +74,8 @@ WORKER_KINDS = ("exception", "features")
 _DECISION_KEYS = ("i", "action", "stop", "target", "has_stop", "has_target")
 _META = ("params", "grid", "timeframes")
 _CLK_TCK = os.sysconf("SC_CLK_TCK")
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, eq=False)
@@ -417,12 +422,18 @@ class Worker:
         return sig
 
     def _parsed(self, what: str, parse):
-        """`parse()` of a reply; whatever it raises is the worker's doing: a protocol violation."""
+        """`parse()` of a reply; whatever it raises is the worker's doing: a protocol violation. An
+        exception other than ProtocolError may also be a bug on this side, so it goes to the log,
+        with its traceback, before it is charged to the plugin."""
         try:
             return parse()
         except ProtocolError as e:
             raise self._fail(ProtocolError(ascii_text(e.message))) from None
         except Exception as e:
+            tb = "".join(traceback.format_exception(e))[-LOGGED_TB:]     # it may quote the worker: printable only
+            log.warning("worker %s: its %s reply could not be parsed; charged to the plugin as a protocol "
+                        "error. If this is a bug on this side:\n%s", self.pid, what,
+                        ascii_bytes(tb.encode("utf-8", "replace")).decode())
             raise self._fail(ProtocolError(f"malformed {what} reply ({type(e).__name__})")) from None
 
 

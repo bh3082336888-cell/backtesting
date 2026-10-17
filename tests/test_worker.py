@@ -564,6 +564,27 @@ def test_a_forged_error_reply_is_sanitised(cfg):
     assert all(c in b"\t\n" or 0x20 <= c < 0x7F for c in e.stderr)
 
 
+def test_a_reply_that_fails_to_parse_is_logged_with_its_traceback(caplog):
+    # A parent-side bug in a parser must not be charged to the plugin unseen: the plugin gets a
+    # protocol error, and the original exception and traceback go to the parent's log.
+    class Fake:
+        pid = 4242
+
+        def _fail(self, exc):
+            return exc
+
+    def parse():
+        raise ValueError("a parser bug near \x1b[2J\u00e9")      # it may quote what the worker sent
+    with caplog.at_level("WARNING", logger="perp_lab.sandbox.client"):
+        with pytest.raises(PluginError) as e:
+            client.Worker._parsed(Fake(), "run", parse)
+    assert e.value.kind == "protocol" and e.value.message == "malformed run reply (ValueError)"
+    [rec] = [r for r in caplog.records if r.name == "perp_lab.sandbox.client"]
+    text = rec.getMessage()
+    assert "4242" in text and "Traceback" in text and "in parse" in text
+    assert "ValueError: a parser bug near ?[2J??" in text           # printable only
+
+
 def test_error_reply_is_printable_and_capped():
     r = session.error_reply(ValueError("é\x1b\n" + "x" * 500))["error"]
     assert r == {"kind": "exception", "type": "ValueError", "message": "?? " + "x" * 197}
