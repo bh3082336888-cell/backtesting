@@ -27,7 +27,7 @@ closed by the thread that spawned it, never handed to another thread that outliv
 Page cache: a worker notes the files it has mapped (`mapped_files`, from /proc/<pid>/maps, when it
 is ready and again before it closes). A sealed worker can still fault in chosen pages of those
 files, which a later process could see; `evict_page_cache` drops them once the workers are gone
-(the exam does, after each attempt).
+(the exam does, after each batch of workers and before a rerun).
 """
 
 from __future__ import annotations

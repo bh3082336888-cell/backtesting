@@ -1,6 +1,7 @@
 import ctypes
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from perp_lab.holdout import HoldoutViolation, issue_holdout_token
 from perp_lab.judge.exam import cost_hours, run_exam, window_end
 from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client
-from perp_lab.sandbox.errors import PluginError
+from perp_lab.sandbox.errors import PluginError, WorkerLost
 from tests.conftest import market_config
 from tests.sandbox_fixtures import InProcessWorker
 
@@ -77,31 +78,45 @@ def test_cost_hours_is_the_median_prepare_time_times_the_window_bars(tmp_path, m
                     *[("prepare", params)] * 3, ("close",)]  # one worker of its own
 
 
-def _spied(monkeypatch):
+def _spied(monkeypatch, lose: int | None = None):
     """Twins that each report a mapped file of their own, and a spy on the page-cache eviction that
-    notes whether every worker was closed by then."""
-    spawned, calls = [], []
+    notes whether every worker was closed by then. `events` is the order of both: ("spawn", file)
+    and ("evict", files, all closed). With `lose`, that worker's first step is a lost worker."""
+    spawned, calls, events = [], [], []
+    lock = threading.Lock()
 
     class Twin(InProcessWorker):
         def __init__(self, cfg, src):
             super().__init__(cfg, src)
-            self.mapped_files = frozenset({f"/nonexistent/worker-{len(spawned)}.so"})
             self.closed = False
-            spawned.append(self)
+            with lock:
+                self.n = len(spawned)
+                self.mapped_files = frozenset({f"/nonexistent/worker-{self.n}.so"})
+                spawned.append(self)
+                events.append(("spawn", f"/nonexistent/worker-{self.n}.so"))
+
+        def step(self, position, **kw):
+            if self.n == lose:
+                raise WorkerLost("died", "worker exited with code -9")
+            return super().step(position, **kw)
 
         def close(self):
             self.closed = True
+
+    def evict(paths):
+        with lock:
+            calls.append((set(paths), all(w.closed for w in spawned)))
+            events.append(("evict", set(paths), all(w.closed for w in spawned)))
     monkeypatch.setattr(client, "spawn", Twin)
-    monkeypatch.setattr(client, "evict_page_cache",
-                        lambda paths: calls.append((set(paths), all(w.closed for w in spawned))))
-    return spawned, calls
+    monkeypatch.setattr(client, "evict_page_cache", evict)
+    return spawned, calls, events
 
 
 def test_an_exam_evicts_the_page_cache_its_workers_mapped(tmp_path, monkeypatch):
     # A worker can fault in chosen pages of the libraries it maps; a later one could read the
     # pattern back. After the exam, with its workers gone, those files leave the page cache.
     cfg = market_config(tmp_path)
-    spawned, calls = _spied(monkeypatch)
+    spawned, calls, _ = _spied(monkeypatch)
     tok = issue_holdout_token("fam", "exam test", tmp_path / "test_log.jsonl")
     run_exam(cfg, PluginSource.read("donchian_atr"), "4h", cfg.symbols, {"n": 20}, tok, END)
     assert len(spawned) == 2                                  # one worker per symbol
@@ -110,7 +125,7 @@ def test_an_exam_evicts_the_page_cache_its_workers_mapped(tmp_path, monkeypatch)
 
 def test_a_failed_exam_evicts_the_page_cache_too(tmp_path, monkeypatch):
     cfg = market_config(tmp_path)
-    spawned, calls = _spied(monkeypatch)
+    spawned, calls, _ = _spied(monkeypatch)
     holdout_ms = cfg.holdout_start.value // 10**6
     src = PluginSource.from_text("fails", f'''"""Fails on its first holdout bar."""
 from perp_lab.strategy import HOLD, Strategy
@@ -129,6 +144,30 @@ class Fails(Strategy):
     with pytest.raises(PluginError):
         run_exam(cfg, src, "4h", cfg.symbols, {}, tok, END)
     assert spawned and calls == [({p for w in spawned for p in w.mapped_files}, True)]
+
+
+def test_an_exam_in_batches_evicts_each_batch_before_the_next_starts(tmp_path, monkeypatch):
+    # Batch 1's workers stream the whole holdout before batch 2's start: marks they left in the
+    # page cache would hand batch 2's symbols other symbols' future bars.
+    cfg = market_config(tmp_path)
+    _, _, events = _spied(monkeypatch)
+    monkeypatch.setattr(client, "max_workers", lambda cfg: 1)          # a batch per symbol
+    tok = issue_holdout_token("fam", "exam test", tmp_path / "test_log.jsonl")
+    run_exam(cfg, PluginSource.read("donchian_atr"), "4h", cfg.symbols, {"n": 20}, tok, END)
+    w0, w1 = "/nonexistent/worker-0.so", "/nonexistent/worker-1.so"
+    assert events == [("spawn", w0), ("evict", {w0}, True), ("spawn", w1), ("evict", {w1}, True)]
+
+
+def test_a_rerun_starts_once_the_lost_attempts_files_are_evicted(tmp_path, monkeypatch):
+    # The rerun's workers start again from the warm-up, while the lost attempt's had reached later
+    # bars: what those left in the page cache goes first.
+    cfg = market_config(tmp_path)
+    _, _, events = _spied(monkeypatch, lose=0)
+    tok = issue_holdout_token("fam", "exam test", tmp_path / "test_log.jsonl")
+    run_exam(cfg, PluginSource.read("donchian_atr"), "4h", cfg.symbols, {"n": 20}, tok, END)
+    assert [e[0] for e in events] == ["spawn", "spawn", "evict", "spawn", "spawn", "evict"], events
+    first, rerun = {e[1] for e in events[:2]}, {e[1] for e in events[3:5]}
+    assert events[2] == ("evict", first, True) and events[5] == ("evict", first | rerun, True)   # the batch's
 
 
 def test_evicting_drops_a_file_from_the_page_cache(caplog):

@@ -73,10 +73,12 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
   out, for a later worker or process to read the pattern back. The seal narrows this (Confinement,
   step 8): a worker can't query residency (`mincore`, `cachestat`) or evict or prefetch pages
   (`madvise` with `MADV_PAGEOUT`, `MADV_COLD`, `MADV_WILLNEED`, `MADV_POPULATE_READ` or
-  `MADV_POPULATE_WRITE`), so all it can do is fault pages in by touching them. After every exam
-  attempt, whatever its outcome and once its workers are gone, the parent evicts every file those
-  workers mapped (`POSIX_FADV_DONTNEED`, files read from `/proc/<pid>/maps`), so nothing carries
-  into the next exam or judgement. What remains: a process running during an exam (a concurrent
+  `MADV_POPULATE_WRITE`), so all it can do is fault pages in by touching them. After each batch
+  of an exam, whatever its outcome and once its workers are gone, and before the next batch's
+  workers start, the parent evicts every file those workers mapped (`POSIX_FADV_DONTNEED`, files
+  read from `/proc/<pid>/maps`); so does a batch's rerun before it starts. Batch 1's workers have
+  streamed the whole holdout before batch 2's start, so without this batch 2's symbols could read
+  other symbols' later bars. What remains: a process running during an exam (a concurrent
   `lab judge`'s workers) could read residency by fault timing while it runs, which is R6's live
   overlap; and pages another process keeps mapped (the parent's own numpy and pyarrow, for one)
   stay resident, which carries nothing from a worker, while other processes add noise.
@@ -587,10 +589,11 @@ Each test is written first and seen failing. Tests that need the kernel features
   what the worker preloaded and print a frame, and importing a module it didn't preload is
   `plugin_error: exception: ModuleNotFoundError`; so is `perp_lab.holdout`, so no token can be
   minted inside a worker. A sealed plugin's `mincore` and its eviction and prefetch `madvise`
-  calls get `EPERM`, while `MADV_DONTNEED` and allocation work. The exam evicts every file its
-  workers mapped after each attempt, passed or failed, once they are closed (with the twin and a
-  spy), and does so after a real streamed exam with no worker left running; eviction drops a
-  file's pages from the cache. A worker whose seal silently did nothing reports unavailable. In a probe
+  calls get `EPERM`, while `MADV_DONTNEED` and allocation work. The exam evicts every file a batch's
+  workers mapped once they are closed, passed or failed, before the next batch's first spawn, and
+  a rerun starts only once the lost attempt's files are evicted (with the twin and a spy); it does
+  so after a real streamed exam with no worker left running; eviction drops a file's pages from
+  the cache. A worker whose seal silently did nothing reports unavailable. In a probe
   process, every thread, those started before the seal included, is refused an allowlisted file
   once sealed; a test exports the stage-2 filter and runs it over every rule.
 - **Determinism:** two fresh workers give `hash()` of a string the same value.

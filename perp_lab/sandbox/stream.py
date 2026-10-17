@@ -24,11 +24,14 @@ that decides at random on holdout bars, or that changes course once it has seen 
 
 Each thread spawns, uses and closes its own worker (a worker dies with the thread that spawned
 it), writes the worker's stderr, if any, to `<stderr_dir>/<symbol>-<pid>.txt`, and adds the files
-the worker mapped to `mapped` (for the exam to evict from the page cache once its workers are gone).
+the worker mapped to `mapped`. `evict` drops those from the page cache once their workers are gone:
+`run_batch` does before a rerun, and the exam after each batch, so no worker starts while pages
+touched by workers that held later bars are still cached (spec R7).
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +49,8 @@ from perp_lab.strategy import HOLD, Ctx, Signal, Strategy
 
 # load(symbol) -> (bars: research then holdout, k0: index of the first holdout bar, engine params)
 Loader = Callable[[str], tuple[pd.DataFrame, int, EngineParams]]
+
+log = logging.getLogger(__name__)
 
 
 class Aborted(Exception):
@@ -136,6 +141,17 @@ class StreamedStrategy(Strategy):
         return sig
 
 
+def evict(mapped: list | None) -> None:
+    """Evict from the page cache every file in `mapped` (the frozensets workers appended), whose
+    workers must be gone by now; never raises, so an eviction never fails an exam."""
+    if not mapped:
+        return
+    try:
+        client.evict_page_cache(set().union(*mapped))
+    except Exception:
+        log.exception("evicting the stream workers' files from the page cache failed")
+
+
 def _close(w, symbol: str, stderr_dir: Path | None, mapped: list | None) -> None:
     w.close()
     if mapped is not None:
@@ -216,13 +232,16 @@ def run_batch(cfg, src: PluginSource, tf: str, params: dict, symbols: list[str],
     """Each symbol's streamed run, all at once in lockstep; the trusted engine's result per symbol.
     A lost worker restarts the whole batch once, in fresh workers, and that rerun must repeat the
     lost run's decisions (a mismatch otherwise); a second loss is `PluginError(kind)`. Each worker's
-    mapped files (a frozenset per worker, the rerun's included) are appended to `mapped`."""
+    mapped files (a frozenset per worker, the rerun's included) are appended to `mapped`; before a
+    rerun, the lost attempt's are evicted from the page cache (its workers may have held later bars
+    than the rerun's first ones). The caller evicts the rest once this returns."""
     symbols = list(symbols)
     first = {s: Trace() for s in symbols}
     try:
         return _streams(cfg, src, tf, params, symbols, load, stderr_dir, first, mapped=mapped)
     except WorkerLost:
         pass                                # transient machine trouble gets one rerun, held to the first
+    evict(mapped)                           # the lost attempt's workers are all closed by now
     try:
         return _streams(cfg, src, tf, params, symbols, load, stderr_dir, {s: Trace() for s in symbols}, first,
                         mapped)
