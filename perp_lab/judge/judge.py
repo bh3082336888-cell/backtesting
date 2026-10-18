@@ -25,7 +25,7 @@ from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, wind
 from perp_lab.plugins import PluginMetaError, PluginSource, UndeclaredTimeframe, require_timeframe
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
-from perp_lab.runs import new_run_id, per_coin_min, repo_commit, write_run
+from perp_lab.runs import data_id, data_identity, new_run_id, per_coin_min, repo_commit, write_run
 from perp_lab.store import db
 from perp_lab.strategy import list_plugins, plugin_hash
 from perp_lab.validate.causality import causality_failures, synthetic_bars
@@ -230,7 +230,8 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     universe = symbols or cfg.symbols
     parent_row = None
     if parent is not None:
-        parent_row = db.latest_wf_run(cfg, parent, tf, psrc.hash, universe, lineage_id=family)
+        parent_row = db.latest_wf_run(cfg, parent, tf, psrc.hash, universe,
+                                     data_id=data_id(data_identity(cfg, universe)), lineage_id=family)
         if parent_row is None:
             try:
                 prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family, src=psrc)

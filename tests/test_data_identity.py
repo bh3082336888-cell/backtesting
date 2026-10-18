@@ -54,6 +54,13 @@ def test_an_existing_store_gains_the_data_id_column(cfg):
     assert db.run_row(cfg, "new")["data_id"] == data_id(data_identity(cfg, U))
 
 
+def test_a_parent_run_on_other_data_is_not_matched(cfg):
+    fake_run(other(cfg, history_start="2019-01-01"), "elsewhere", strategy="p", strategy_hash="hp")
+    assert db.latest_wf_run(cfg, "p", "4h", "hp", U, data_id=data_id(data_identity(cfg, U))) is None
+    fake_run(cfg, "here", strategy="p", strategy_hash="hp")
+    assert db.latest_wf_run(cfg, "p", "4h", "hp", U, data_id=data_id(data_identity(cfg, U)))["run_id"] == "here"
+
+
 def test_n_counts_a_plugin_version_once_across_data(cfg):
     fake_run(other(cfg, history_start="2019-01-01"), "a", strategy="p", strategy_hash="hp")
     fake_run(cfg, "b", strategy="p", strategy_hash="hp")

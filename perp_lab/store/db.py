@@ -392,15 +392,17 @@ def run_row(cfg, run_id: str) -> dict | None:
 
 
 def latest_wf_run(cfg, strategy: str, timeframe: str, strategy_hash: str, universe: list[str], *,
-                  lineage_id: str | None = None) -> dict | None:
-    """Most recent walk-forward run of exactly this plugin version, timeframe and symbol universe
-    (and, when given, family)."""
+                  data_id: str, lineage_id: str | None = None) -> dict | None:
+    """Most recent walk-forward run of exactly this plugin version, timeframe, symbol universe and
+    data identity (and, when given, family). Runs from before data ids (NULL) never match."""
     with engine(cfg).connect() as c:
         rows = c.execute(sa.select(runs).where(sa.and_(
             runs.c.strategy == strategy, runs.c.timeframe == timeframe,
             runs.c.strategy_hash == strategy_hash, runs.c.validation_mode == "walkforward"))
             .order_by(runs.c.created_at.desc())).all()
     for r in rows:
+        if r.data_id != data_id:
+            continue
         if lineage_id is not None and r.lineage_id != lineage_id:
             continue
         if list(r.universe or []) == list(universe):

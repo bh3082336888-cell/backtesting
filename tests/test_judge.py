@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from perp_lab.cli import app
+from perp_lab.config import Config
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, judge, lookahead_failures
@@ -486,3 +487,11 @@ def test_end_to_end_judge_through_the_real_sandbox(tmp_path, plugins, fresh_wf_c
     child = db.run_row(cfg, j["child_run_id"])
     assert child["validation_mode"] == "walkforward" and len(db.read_table(cfg, db.run_folds)) == 6
     assert set(json.loads(Path(j["verdict_path"]).read_text())) == VERDICT_KEYS
+
+
+def test_the_parent_is_re_run_when_its_run_used_other_data(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)})
+    elsewhere = Config(raw={**cfg.raw, "history_start": "2019-01-01"}, path=cfg.path)
+    old, _ = v(elsewhere, "donchian_atr", "4h", lineage_id="family:donchian_atr")
+    j = judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    assert v.calls == ["donchian_atr", "donchian_atr", "donchian_atr_wide"] and j["parent_run_id"] != old["run_id"]

@@ -69,16 +69,20 @@ def test_family_of_is_the_family_of_the_first_judgement_only(cfg):
 
 
 def test_latest_wf_run_matches_hash_and_universe(cfg):
+    from perp_lab.runs import data_id, data_identity
+
+    def did(u):
+        return data_id(data_identity(cfg, u))
     fake_run(cfg, "old", strategy="p", strategy_hash="hp", created_at="2026-10-01T00:00:00+00:00")
     fake_run(cfg, "new", strategy="p", strategy_hash="hp", created_at="2026-10-02T00:00:00+00:00")
     fake_run(cfg, "edited", strategy="p", strategy_hash="hp2", created_at="2026-10-03T00:00:00+00:00")
     fake_run(cfg, "btc_only", strategy="p", strategy_hash="hp", universe=["BTCUSDT"],
              created_at="2026-10-04T00:00:00+00:00")
-    assert db.latest_wf_run(cfg, "p", "4h", "hp", ["BTCUSDT", "ETHUSDT"])["run_id"] == "new"
-    assert db.latest_wf_run(cfg, "p", "4h", "hp", ["BTCUSDT"])["run_id"] == "btc_only"
-    assert db.latest_wf_run(cfg, "p", "1h", "hp", ["BTCUSDT", "ETHUSDT"]) is None
+    assert db.latest_wf_run(cfg, "p", "4h", "hp", ["BTCUSDT", "ETHUSDT"], data_id=did(["BTCUSDT", "ETHUSDT"]))["run_id"] == "new"
+    assert db.latest_wf_run(cfg, "p", "4h", "hp", ["BTCUSDT"], data_id=did(["BTCUSDT"]))["run_id"] == "btc_only"
+    assert db.latest_wf_run(cfg, "p", "1h", "hp", ["BTCUSDT", "ETHUSDT"], data_id=did(["BTCUSDT", "ETHUSDT"])) is None
     fake_run(cfg, "fam", strategy="q", strategy_hash="hq", lineage_id="family:q")
-    assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"], lineage_id="family:q")["run_id"] == "fam"
-    assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"], lineage_id="family:z") is None
-    assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"])["run_id"] == "fam"
+    assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"], data_id=did(["BTCUSDT", "ETHUSDT"]), lineage_id="family:q")["run_id"] == "fam"
+    assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"], data_id=did(["BTCUSDT", "ETHUSDT"]), lineage_id="family:z") is None
+    assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"], data_id=did(["BTCUSDT", "ETHUSDT"]))["run_id"] == "fam"
     assert db.run_row(cfg, "new")["strategy_hash"] == "hp" and db.run_row(cfg, "nope") is None
