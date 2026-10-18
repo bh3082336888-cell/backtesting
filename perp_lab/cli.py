@@ -247,34 +247,46 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
 
 
 @app.command()
-def withdraw(strategy: str, tf: str = typer.Option(..., "--tf", help="the timeframe it was judged at"),
+def withdraw(strategy: Optional[str] = typer.Argument(None, help="the plugin, by the name it was judged under"),
+             tf: Optional[str] = typer.Option(None, "--tf", help="the timeframe it was judged at"),
              reason: str = typer.Option(..., help="why: recorded in withdrawals.jsonl next to the holdout log"),
-             judgement: Optional[int] = typer.Option(None, "--id",
-                                                     help="judgement id, if several versions are pending"),
+             judgement: Optional[int] = typer.Option(None, "--id", help="the judgement id: picks it alone (several "
+                                                     "versions pending, or a plugin file renamed since)"),
              config: Optional[str] = CfgOpt):
     """Withdraw a pending promotion before its holdout read: it is never examined, and its family
-    keeps its one read. A human's decision on the walk-forward record; the proposer never runs it."""
+    keeps its one read. A human's decision on the walk-forward record; the proposer never runs it.
+    Name it by PLUGIN and --tf, or by --id (a name or --tf given with it must match)."""
     from perp_lab.judge.budget import WithdrawRefused
     from perp_lab.judge.judge import withdraw as run_withdraw
-    from perp_lab.store.db import pending_judgements
+    from perp_lab.store.db import get_judgement_by_id, pending_judgements
     cfg = load_config(config)
-    mine = [j for j in pending_judgements(cfg) if j["strategy"] == strategy and j["timeframe"] == tf
-            and judgement in (None, j["id"])]
-    if not mine:
-        typer.secho(f"refused: no pending promotion of {strategy} @ {tf}"
-                    f"{'' if judgement is None else f' with id {judgement}'}", fg="red")
+
+    def refuse(msg: str):
+        typer.secho(f"refused: {msg}", fg="red")
         raise typer.Exit(2)
-    if len(mine) > 1:
-        ids = ", ".join(f"{j['id']} ({j['strategy_hash'][:10]})" for j in mine)
-        typer.secho(f"refused: several versions of {strategy} @ {tf} are pending: {ids}; pass --id", fg="red")
-        raise typer.Exit(2)
+    if judgement is not None:
+        j = get_judgement_by_id(cfg, judgement)
+        if j is None:
+            refuse(f"no judgement {judgement}")
+        if strategy not in (None, j["strategy"]) or tf not in (None, j["timeframe"]):
+            refuse(f"judgement {judgement} is {j['strategy']} @ {j['timeframe']}")
+    elif strategy is None or tf is None:
+        refuse("name the plugin and --tf, or pass --id")
+    else:
+        mine = [j for j in pending_judgements(cfg) if j["strategy"] == strategy and j["timeframe"] == tf]
+        if not mine:
+            refuse(f"no pending promotion of {strategy} @ {tf}")
+        if len(mine) > 1:
+            ids = ", ".join(f"{j['id']} ({j['strategy_hash'][:10]})" for j in mine)
+            refuse(f"several versions of {strategy} @ {tf} are pending: {ids}; pass --id")
+        j = mine[0]
     try:
-        j = run_withdraw(cfg, mine[0]["id"], reason)
+        w = run_withdraw(cfg, j["id"], reason)
     except WithdrawRefused as e:
-        typer.secho(f"refused: {e}", fg="red")
-        raise typer.Exit(2)
-    typer.echo(f"{strategy} @ {tf}: withdrawn (judgement {j['id']}); family {j['lineage_id']} keeps its holdout read")
-    typer.echo(f"verdict: {j['verdict_path']}")
+        refuse(str(e))
+    typer.echo(f"{w['strategy']} @ {w['timeframe']}: withdrawn (judgement {w['id']}); family {w['lineage_id']} keeps "
+               "its holdout read")
+    typer.echo(f"verdict: {w['verdict_path']}")
 
 
 @app.command()

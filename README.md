@@ -94,7 +94,8 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 - `lab withdraw PLUGIN --tf TF --reason "..."` withdraws a pending promotion before its read is minted (a
   human's decision on the walk-forward record, e.g. a pre-registered check that failed): status and code
   `withdrawn`, one line in `withdrawals.jsonl` next to the holdout log, and the verdict rewritten. Its family
-  keeps its one read for a later promotion. Refused (exit 2) without a reason, for anything not pending, while
+  keeps its one read for a later promotion. `--id N` picks the judgement by id alone (several versions pending,
+  or its plugin file renamed since). Refused (exit 2) without a reason, for anything not pending, while
   `lab exam` examines it, and once its read is minted. The 3b-2 proposer must not be able to run it.
 - **Paper approval needs a passed exam**, for every strategy.
 - Public verdicts in `runs/verdicts/` carry the holdout outcome as status and code only, never numbers.

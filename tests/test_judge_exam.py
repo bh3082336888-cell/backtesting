@@ -919,6 +919,28 @@ def test_cli_withdraw(cfg, plugins):
     assert r.exit_code == 2 and "no pending promotion" in r.output and len(withdrawals(cfg)) == 1
 
 
+def test_cli_withdraw_by_id_alone(cfg, plugins):
+    # By id, without the name it was judged under: e.g. after its plugin file was renamed (its exam
+    # waits as plugin_changed meanwhile). A name or timeframe given alongside must match.
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    run = lambda *args: CliRunner().invoke(app, ["withdraw", *args, "--reason", WHY, "--config", str(cfg.path)])
+    r = run()
+    assert r.exit_code == 2 and "name the plugin and --tf, or pass --id" in r.output
+    r = run("donchian_atr_wide", "--id", str(j["id"]))
+    assert r.exit_code == 2 and f"judgement {j['id']} is donchian_atr @ 4h" in r.output
+    r = run("--id", str(j["id"]), "--tf", "1h")
+    assert r.exit_code == 2 and f"judgement {j['id']} is donchian_atr @ 4h" in r.output
+    r = run("--id", "999")
+    assert r.exit_code == 2 and "no judgement 999" in r.output
+    assert withdrawals(cfg) == [] and db.get_judgement_by_id(cfg, j["id"])["holdout_status"] == "pending"
+    r = run("--id", str(j["id"]))
+    assert r.exit_code == 0, r.output
+    assert f"donchian_atr @ 4h: withdrawn (judgement {j['id']})" in r.output and len(withdrawals(cfg)) == 1
+    r = run("--id", str(j["id"]))                                  # not pending any more
+    assert r.exit_code == 2 and "not pending" in r.output
+
+
 def test_cli_withdraw_refuses_a_read_already_minted(cfg, plugins):
     budget.init_log(cfg)
     j = promoted(cfg)
