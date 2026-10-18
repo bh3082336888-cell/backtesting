@@ -17,8 +17,8 @@ import io
 import json
 import logging
 import random
-import threading
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
@@ -181,16 +181,20 @@ def first_archive_month(symbol: str, dataset: str, tf: str | None, max_retries: 
     except (FetchError, ET.ParseError) as e:
         log.warning("archive listing unreadable for %s %s %s: %s", symbol, dataset, tf or "", e)
         return None
-    months = []
-    for el in root.iter():
-        if el.tag.rsplit("}", 1)[-1] == "Key" and el.text and el.text.endswith(".zip"):
-            m = re.search(r"(\d{4}-\d{2})(?:-\d{2})?\.zip$", el.text)
-            if m:
-                months.append(m.group(1))
+    try:
+        months = []
+        for el in root.iter():
+            if el.tag.rsplit("}", 1)[-1] == "Key" and el.text and el.text.endswith(".zip"):
+                m = re.search(r"(\d{4}-\d{2})(?:-\d{2})?\.zip$", el.text)
+                if m:
+                    months.append(pd.Period(m.group(1), "M"))
+    except ValueError as e:      # a key with an impossible month
+        log.warning("archive listing for %s %s %s has a bad key: %s", symbol, dataset, tf or "", e)
+        return None
     if not months:
         log.warning("archive listing for %s %s %s holds no file", symbol, dataset, tf or "")
         return None
-    return pd.Period(min(months), "M")
+    return min(months)
 
 
 def _months(start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Period]:
@@ -318,19 +322,28 @@ def backfill(cfg, symbols: list[str], tfs: list[str], datasets: list[str],
     workers = workers or cfg["backfill"]["workers"]
     retries = cfg["backfill"]["max_retries"]
     # One listing per (symbol, dataset, tf) group that still has work; a complete group needs none.
-    firsts: dict[tuple, pd.Period | None] = {}
+    # Lookups run on the pool with a small retry budget of their own: a slow or down listing
+    # must not stall the jobs, and a failed one just leaves the group as it was before.
     mans: dict[tuple, Manifest] = {}
+    todo: list[tuple] = []
     for j in jobs:
         g = (j.symbol, j.dataset, j.tf)
         if g not in mans:
             mans[g] = Manifest(dataset_dir(cfg.data_dir, j.symbol, j.dataset, j.tf))
-        if g not in firsts and not mans[g].is_complete(j.month.strftime("%Y-%m")):
-            firsts[g] = first_archive_month(j.symbol, j.dataset, j.tf, retries)
-    for j in jobs:
-        j.first = firsts.get((j.symbol, j.dataset, j.tf))
+        if g not in todo and not mans[g].is_complete(j.month.strftime("%Y-%m")):
+            todo.append(g)
     stats = {"absent": 0, "ok": 0, "partial": 0, "skip": 0, "missing": 0, "error": 0}
     log.info("backfill: %d jobs, %d workers", len(jobs), workers)
     with ThreadPoolExecutor(workers) as ex:
+        looks = {g: ex.submit(first_archive_month, *g, min(2, retries)) for g in todo}
+        firsts = {}
+        for g, f in looks.items():
+            try:
+                firsts[g] = f.result()
+            except Exception as e:  # a lookup never aborts the backfill
+                log.warning("archive listing failed for %s: %s", g, e)
+        for j in jobs:
+            j.first = firsts.get((j.symbol, j.dataset, j.tf))
         futs = {ex.submit(run_job, j, cfg.data_dir, retries, today): j for j in jobs}
         for f in as_completed(futs):
             j = futs[f]

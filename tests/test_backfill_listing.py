@@ -55,6 +55,16 @@ def test_metrics_months_before_the_first_daily_file_are_absent(tmp_path, monkeyp
     assert s["absent"] == 1 and not [u for u in urls if "2025-01-" in u]
 
 
+def test_listing_lookups_use_a_small_retry_budget_of_their_own(tmp_path, monkeypatch):
+    cfg = market_config(tmp_path)
+    seen = []
+    monkeypatch.setattr(vision, "first_archive_month", lambda *a, **kw: seen.append(a[3]) or None)
+    monkeypatch.setattr(vision, "_fetch_zip_csv", lambda url, *a, **kw: None)
+    vision.backfill(cfg, ["SOLUSDT", "ETHUSDT"], ["1h"], ["klines"], start=T("2025-01-01"),
+                    end=T("2025-01-31"), workers=2)
+    assert len(seen) == 2 and max(seen) <= 2
+
+
 def test_an_unreadable_listing_marks_nothing_absent(tmp_path, monkeypatch):
     cfg = market_config(tmp_path)
     _, urls = stub(monkeypatch, None)
@@ -75,6 +85,10 @@ def test_first_archive_month_is_none_when_the_listing_cant_be_read(monkeypatch):
     for body in (None, b"<ListBucketResult></ListBucketResult>", b"not xml"):
         monkeypatch.setattr(vision, "_get", lambda url, r=6, b=body: b)
         assert vision.first_archive_month("SOLUSDT", "klines", "1h", 1) is None
+
+    bad = XML.replace("2020-09", "2020-13").replace("2020-10", "2020-13")
+    monkeypatch.setattr(vision, "_get", lambda url, r=6: bad.encode())
+    assert vision.first_archive_month("SOLUSDT", "klines", "1h", 1) is None   # no ValueError
 
     def down(url, r=6):
         raise vision.FetchError("HTTP 503")
