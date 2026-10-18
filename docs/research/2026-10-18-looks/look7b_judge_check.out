@@ -1,0 +1,2 @@
+judge-style causality_failures (default synthetic bars): none
+same check with default flow_x = 1.0: ['defaults: no signals on synthetic data; causality cannot be verified']

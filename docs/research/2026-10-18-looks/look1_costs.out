@@ -1,0 +1,44 @@
+2026-10-18 02:07:34,608 WARNING perp_lab.data.store: SOLUSDT 15m: 2 gaps in candle series (first at 2022-02-25 23:45:00+00:00)
+2026-10-18 02:07:34,766 WARNING perp_lab.data.store: SOLUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-18 02:07:35,330 WARNING perp_lab.data.store: XRPUSDT 15m: 2 gaps in candle series (first at 2022-02-25 23:45:00+00:00)
+2026-10-18 02:07:35,493 WARNING perp_lab.data.store: XRPUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-18 02:07:37,238 WARNING perp_lab.data.store: SOLUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-18 02:07:37,729 WARNING perp_lab.data.store: XRPUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+Per symbol medians (bp):
+ tf  sym   bars  range_med  atr_med  mv1   mv2   mv4   mv8  mv12  mv20
+15m  BTC 157632       27.0     31.0 11.0  15.0  21.0  29.0  36.0  47.0
+15m  ETH 157632       37.0     43.0 15.0  20.0  28.0  39.0  48.0  65.0
+15m  SOL 157152       56.0     62.0 23.0  32.0  44.0  62.0  78.0 103.0
+15m  BNB 157632       31.0     36.0 13.0  18.0  25.0  36.0  44.0  59.0
+15m  XRP 157152       42.0     47.0 17.0  24.0  33.0  46.0  57.0  75.0
+15m DOGE 157632       50.0     56.0 20.0  28.0  39.0  54.0  67.0  89.0
+15m AVAX 157632       55.0     61.0 23.0  32.0  44.0  62.0  77.0 103.0
+15m LINK 157632       53.0     59.0 23.0  31.0  43.0  60.0  74.0  98.0
+ 1h  BTC  39408       57.0     67.0 21.0  29.0  41.0  61.0  80.0 111.0
+ 1h  ETH  39408       77.0     90.0 28.0  40.0  57.0  85.0 110.0 152.0
+ 1h  SOL  39288      115.0    128.0 45.0  63.0  92.0 134.0 172.0 234.0
+ 1h  BNB  39408       65.0     77.0 26.0  37.0  52.0  76.0  94.0 125.0
+ 1h  XRP  39288       86.0     99.0 33.0  47.0  66.0  95.0 120.0 160.0
+ 1h DOGE  39408      103.0    119.0 39.0  54.0  79.0 117.0 149.0 201.0
+ 1h AVAX  39408      113.0    128.0 45.0  63.0  91.0 134.0 171.0 232.0
+ 1h LINK  39408      109.0    123.0 44.0  61.0  87.0 128.0 163.0 217.0
+ 4h  BTC   9852      122.0    142.0 42.0  62.0  96.0 144.0 186.0 247.0
+ 4h  ETH   9852      167.0    191.0 57.0  85.0 131.0 195.0 248.0 347.0
+ 4h  SOL   9822      242.0    265.0 93.0 136.0 204.0 296.0 372.0 497.0
+ 4h  BNB   9852      139.0    161.0 52.0  75.0 109.0 159.0 201.0 268.0
+ 4h  XRP   9822      181.0    208.0 67.0  97.0 141.0 209.0 250.0 334.0
+ 4h DOGE   9852      218.0    255.0 80.0 116.0 176.0 252.0 309.0 410.0
+ 4h AVAX   9852      240.0    268.0 92.0 133.0 201.0 298.0 379.0 507.0
+ 4h LINK   9852      229.0    255.0 89.0 129.0 189.0 278.0 355.0 464.0
+
+Median across the 8 symbols (bp):
+     range_med  atr_med   mv1    mv2    mv4    mv8   mv12   mv20
+tf                                                              
+15m       46.0     52.0  19.0   26.0   36.0   50.0   62.0   82.0
+1h        95.0    109.0  36.0   51.0   73.0  106.0  134.0  181.0
+4h       199.0    232.0  74.0  107.0  158.0  230.0  279.0  378.0
+
+round trip: stop exit 14 bp, target exit 9 bp
+15m: cost/range 0.31; cost as R for stops of 1/2/3 ATR: 0.271 / 0.135 / 0.090; cost/mv1 0.74; cost/mv2 0.54; cost/mv4 0.39; cost/mv8 0.28; cost/mv12 0.23; cost/mv20 0.17
+1h: cost/range 0.15; cost as R for stops of 1/2/3 ATR: 0.128 / 0.064 / 0.043; cost/mv1 0.39; cost/mv2 0.28; cost/mv4 0.19; cost/mv8 0.13; cost/mv12 0.10; cost/mv20 0.08
+4h: cost/range 0.07; cost as R for stops of 1/2/3 ATR: 0.060 / 0.030 / 0.020; cost/mv1 0.19; cost/mv2 0.13; cost/mv4 0.09; cost/mv8 0.06; cost/mv12 0.05; cost/mv20 0.04
