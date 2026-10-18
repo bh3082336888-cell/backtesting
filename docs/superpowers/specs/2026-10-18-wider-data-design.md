@@ -166,7 +166,7 @@ test in the same PR (org rule), one concern per commit.
 
 The values live in `config/lab.yaml` `costs.slippage_model` (`adv_days: 30`, `spread_bps_at_100m: 2.05`, `alpha: 0.63`, `max_bps: 50.0`). The code is `perp_lab/engine/slippage.py`; the calibration is `docs/research/slippage-calibration/` (`calibrate.py`, `calibration.csv`).
 
-**`adv` and the cap.** `adv` is the mean daily quote volume (USDT) over the 30 full UTC days before the bar's day, skipping days with no volume data. The cap `max_bps = 50` applies in two cases: the formula exceeds 50 (`adv` below about 1.3 million USDT a day), and `adv` is unknown or not above zero (a coin's first bars), where the bar pays 50 outright.
+**`adv` and the cap.** `adv` is the mean daily quote volume (USDT) over the 30 full UTC days before the bar's day, skipping days with no volume data. The cap `max_bps = 50` applies in two cases: the formula exceeds 50 (`adv` below about 0.7 million USDT a day), and `adv` is unknown or not above zero (a coin's first bars), where the bar pays 50 outright.
 
 **Why the floor is additive.** The 2 bp floor is today's latency-and-impact buffer. BTC's quoted half-spread is about 0.02 bp, so the 2 bp was never spread. Adding each coin's quoted half-spread on top of the floor keeps BTC and ETH near 2 bp, makes thinner coins and thinner years pay more, and means no coin or date ever pays less than today.
 
@@ -216,7 +216,7 @@ Median measured half-spread per coin (four days) against the model's spread term
 
 **Limits.**
 - 2020 is extrapolated by volume alone: the data starts in 2023, and a 2020 bar with a given `adv` pays what a 2023 coin of that volume paid.
-- A spread in bp also depends on tick size relative to price, which the model ignores (ADA and XRP sit above the curve for that reason).
+- A spread in bp also depends on tick size relative to price, which the model ignores (ADA and XRP measure above the curve, which may be that).
 - The model applies to taker fills only (market entries and exits, stop-market). Targets stay maker and pay no slippage.
 - The model is fixed before any trial on the new data. Changing any of its values changes the `costs` section and so every run's data identity (Task 8), and no run on the old model is paired with one on a new model.
 
