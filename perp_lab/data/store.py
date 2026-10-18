@@ -17,6 +17,7 @@ from perp_lab.holdout import HoldoutViolation, check_token
 
 log = logging.getLogger(__name__)
 _gap_warned: set[tuple[str, str]] = set()
+_tail_warned: set[tuple[str, str]] = set()
 
 
 def _read_dir(d: Path) -> pd.DataFrame | None:
@@ -38,6 +39,25 @@ def _resolve_end(cfg: Config, end: pd.Timestamp | None, holdout) -> pd.Timestamp
     return end
 
 
+def _drop_dead_tail(df: pd.DataFrame, symbol: str, tf: str) -> pd.DataFrame:
+    """Drop the run after the last traded candle when all of it has no trades and no volume.
+
+    A delisted coin's archive keeps flat zero-trade candles; they are absent, not data.
+    Zero-trade candles between real trades stay, and NaN trades (ccxt-stitched) never drop.
+    """
+    traded = np.flatnonzero((df.trades > 0).values)
+    if not len(traded):
+        return df
+    tail = df.iloc[traded[-1] + 1:]
+    if len(tail) and (tail.trades == 0).all() and (tail.volume == 0).all():
+        if (symbol, tf) not in _tail_warned:
+            _tail_warned.add((symbol, tf))
+            log.warning("%s %s: dropped %d zero-trade candles after the last trade (%s)", symbol, tf,
+                        len(tail), pd.to_datetime(tail.open_time.iloc[0], unit="ms", utc=True))
+        return df.iloc[: traded[-1] + 1].reset_index(drop=True)
+    return df
+
+
 def load_candles(cfg: Config, symbol: str, tf: str, start: pd.Timestamp | None = None,
                  end: pd.Timestamp | None = None, holdout=None) -> pd.DataFrame:
     """Closed candles with open_time in [start, end). end defaults to holdout_start."""
@@ -49,6 +69,7 @@ def load_candles(cfg: Config, symbol: str, tf: str, start: pd.Timestamp | None =
     df = df.drop_duplicates("open_time").sort_values("open_time")
     s_ms, e_ms = int(start.value // 10**6), int(end.value // 10**6)
     df = df[(df.open_time >= s_ms) & (df.open_time < e_ms)].reset_index(drop=True)
+    df = _drop_dead_tail(df, symbol, tf)
     step = TF_MS[tf]
     gaps = np.flatnonzero(np.diff(df.open_time.values) != step)
     if len(gaps) and (symbol, tf) not in _gap_warned:

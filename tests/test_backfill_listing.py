@@ -1,8 +1,10 @@
 import json
 
+import numpy as np
 import pandas as pd
 
 from perp_lab.data import vision
+from perp_lab.data.store import load_candles
 from tests.conftest import market_config
 
 T = lambda s: pd.Timestamp(s, tz="UTC")  # noqa: E731
@@ -78,3 +80,27 @@ def test_first_archive_month_is_none_when_the_listing_cant_be_read(monkeypatch):
         raise vision.FetchError("HTTP 503")
     monkeypatch.setattr(vision, "_get", down)
     assert vision.first_archive_month("SOLUSDT", "klines", "1h", 1) is None
+
+
+def write_1h(cfg, trades):
+    t0 = T("2025-01-01").value // 10**6
+    ot = t0 + np.arange(len(trades)) * 3_600_000
+    tr = np.array(trades, dtype=float)
+    d = cfg.data_dir / "BTCUSDT" / "1h"
+    d.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"open_time": ot, "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0,
+                  "volume": np.where(tr == 0, 0.0, 1.0), "quote_volume": np.where(tr == 0, 0.0, 100.0),
+                  "trades": tr, "taker_buy_volume": 0.0, "taker_buy_quote_volume": 0.0,
+                  "close_time": ot + 3_599_999}).to_parquet(d / "all.parquet")
+
+
+def test_zero_trade_candles_after_the_last_trade_load_as_absent(tmp_path):
+    cfg = market_config(tmp_path)
+    write_1h(cfg, [5, 5, 0, 0, 5, 5, 0, 0, 0])
+    assert load_candles(cfg, "BTCUSDT", "1h").trades.tolist() == [5, 5, 0, 0, 5, 5]   # the halt stays
+
+
+def test_candles_without_a_trade_count_are_never_dropped(tmp_path):
+    cfg = market_config(tmp_path)
+    write_1h(cfg, [5, 5, np.nan, np.nan])                  # ccxt-stitched
+    assert len(load_candles(cfg, "BTCUSDT", "1h")) == 4
