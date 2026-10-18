@@ -1,11 +1,13 @@
 import pandas as pd
 import pytest
 
+from perp_lab.judge.judge import holdout_min_trades
 from perp_lab.plugins import PluginSource
 from perp_lab.runs import per_coin_min, verdict
 from perp_lab.validate import walkforward as wfm
 from tests.conftest import market_config
 from tests.test_late_listing import keep_from
+from tests.test_store import cfg  # noqa: F401
 from tests.test_walkforward_sandbox import DONCHIAN
 
 
@@ -46,3 +48,7 @@ def test_the_oos_trade_minimum_scales_with_coins():
     status, fails = verdict({"sharpe": 1.0, "trades": 63}, OK_RND, OK_SENS, 17)
     assert status == "noise" and fails == ["only 63 OOS trades (< 64: 3.75 per coin × 17 coins)"]
     assert verdict({"sharpe": 1.0, "trades": 64}, OK_RND, OK_SENS, 17)[0] == "candidate"
+
+
+def test_the_exam_minimum_scales_but_never_below_the_floor(cfg):
+    assert [holdout_min_trades(cfg, n) for n in (2, 8, 17)] == [10, 10, 22]

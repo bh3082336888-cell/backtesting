@@ -93,7 +93,8 @@ judge:
   bootstrap_block_days: 10
   holdout_max_reads: 10       # global cap on holdout reads
   min_holdout_days: 180       # no exam until the holdout has this many days of complete data
-  holdout_min_trades: 10
+  holdout_min_trades: 10      # the floor
+  holdout_min_trades_per_coin: 1.25   # × coins in the exam, never below holdout_min_trades
   holdout_floor_pct: 5        # holdout return must reach this percentile of the walk-forward record
   holdout_log: runs/holdout_log.jsonl
   verdicts_dir: runs/verdicts # public verdicts: the proposer's only input; never holdout numbers

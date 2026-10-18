@@ -25,7 +25,7 @@ from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, wind
 from perp_lab.plugins import PluginMetaError, PluginSource, UndeclaredTimeframe, require_timeframe
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
-from perp_lab.runs import new_run_id, repo_commit, write_run
+from perp_lab.runs import new_run_id, per_coin_min, repo_commit, write_run
 from perp_lab.store import db
 from perp_lab.strategy import list_plugins, plugin_hash
 from perp_lab.validate.causality import causality_failures, synthetic_bars
@@ -69,6 +69,12 @@ def write_verdict(cfg, j: dict) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(out, indent=1, default=str))
     return p
+
+
+def holdout_min_trades(cfg, n_coins: int) -> int:
+    """The exam's trade minimum: 1.25 per coin in the exam, never below the configured floor."""
+    jc = cfg["judge"]
+    return max(jc["holdout_min_trades"], per_coin_min(jc["holdout_min_trades_per_coin"], n_coins))
 
 
 def finish(cfg, jid: int) -> dict:
@@ -491,9 +497,10 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable, d
             log.warning("exam of judgement %s: the plugin failed; see holdout run %s", jid, hrid)
             db.update_holdout(cfg, jid, "failed", "plugin_error", hrid)
         else:
+            n_coins = sum(len(d) > 0 for d in res.daily.values())
             ok, reasons, detail = gates.holdout_consistent(
                 res.portfolio, len(res.trades), oos_portfolio(child["run_dir"]),
-                min_trades=jc["holdout_min_trades"], floor_pct=jc["holdout_floor_pct"],
+                min_trades=holdout_min_trades(cfg, n_coins), floor_pct=jc["holdout_floor_pct"],
                 block=jc["bootstrap_block_days"], n_boot=HOLDOUT_BOOT, seed=gates.seed_from(child["run_id"]))
             hrid = _record_holdout_run(cfg, j, s, res, ok, reasons, detail)
             db.update_holdout(cfg, jid, "passed" if ok else "failed", "passed" if ok else "failed", hrid)
