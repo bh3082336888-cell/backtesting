@@ -67,6 +67,27 @@ def test_paper_fills_at_book_and_stops_on_bid():
     assert t["exit_reason"] == "stop" and t["exit_price"] == 94.9 and t["source"] == "paper"
 
 
+def test_paper_records_the_level_path():
+    b = flat_bars(12)
+    H = 3_600_000
+    decide = scripted_decide({9: Signal("long", stop=95.0),
+                              10: Signal("hold", stop=97.0),      # raised at the close of bar 10
+                              11: Signal("hold", stop=96.0)})     # lower: ignored, so not a change
+    book = PaperBook(decide, "X", "1h", EP)
+    book.on_closed_bar(b.iloc[:10])
+    entry_ts = int(b.open_time.iloc[9]) + H + 250
+    book.on_quote(99.9, 100.1, entry_ts)
+    book.on_closed_bar(b.iloc[:11])
+    book.on_closed_bar(b)
+    book.on_quote(96.9, 97.1, entry_ts + 2 * H)       # the bid reaches the raised stop
+    t = book.trades[0]
+    assert t["exit_reason"] == "stop" and t["exit_price"] == 96.9
+    assert t["level_time"] == [entry_ts, int(b.open_time.iloc[10]) + H]     # bar 10's close
+    assert t["level_time"][0] == t["entry_time"]
+    assert t["level_stop"] == [95.0, 97.0]
+    np.testing.assert_array_equal(t["level_target"], [math.nan, math.nan])
+
+
 def test_paper_trade_schema_matches_backtest():
     from perp_lab.engine.backtest import run_backtest
     b = flat_bars(20)

@@ -27,7 +27,7 @@ import pandas as pd
 
 from perp_lab.config import TF_MS, ccxt_symbol
 from perp_lab.data.live import acall_with_backoff, ohlcv_to_candles, watch_closed
-from perp_lab.engine.backtest import EngineParams, liq_price
+from perp_lab.engine.backtest import EngineParams, liq_price, same_level
 from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError
@@ -78,6 +78,12 @@ class PaperBook:
                     p["stop"] = sig.stop
             if p and sig.target is not None:
                 p["target"] = sig.target
+            if p and not (same_level(p["stop"], p["level_stop"][-1])
+                          and same_level(p["target"], p["level_target"][-1])):
+                # decided at this bar's close, in force from then on
+                p["level_time"].append(int(bars.open_time.iloc[-1]) + TF_MS[self.tf])
+                p["level_stop"].append(p["stop"])
+                p["level_target"].append(p["target"])
         else:
             self.pending = sig
             self.pending_meta = {"signal_time": int(bars.open_time.iloc[-1]), "close": c,
@@ -139,12 +145,13 @@ class PaperBook:
             return
         fee = ep.taker * q * px
         self.W = _finite(self.W - fee)
+        target_init = sig.target if sig.target is not None else np.nan
         self.pos = {"side": side, "qty": q, "entry_price": px, "stop": sig.stop,
-                    "target": sig.target if sig.target is not None else np.nan, "margin": mg, "liq": lq,
+                    "target": target_init, "margin": mg, "liq": lq,
                     "entry_i": meta["i"] + 1, "entry_time": ts, "signal_time": meta["signal_time"],
                     "best": px, "fees": fee, "funding": 0.0, "risk_amt": risk_amt, "W_before": self.W + fee,
-                    "stop_init": sig.stop, "target_init": sig.target if sig.target is not None else np.nan,
-                    "regime": meta["regime"]}
+                    "stop_init": sig.stop, "target_init": target_init, "regime": meta["regime"],
+                    "level_time": [ts], "level_stop": [sig.stop], "level_target": [target_init]}
         log.info("%s paper OPEN %s qty=%.6f @ %.6f stop=%.6f", self.symbol, side, q, px, sig.stop)
 
     def _close(self, px, ts, reason, fee_rate):
@@ -168,6 +175,7 @@ class PaperBook:
             "fees": fees, "funding": p["funding"], "pnl_gross": pnl, "pnl": net,
             "equity_before": p["W_before"], "pnl_pct": net / p["W_before"],
             "r_multiple": net / p["risk_amt"], "bars_held": nb, "regime": p["regime"],
+            "level_time": p["level_time"], "level_stop": p["level_stop"], "level_target": p["level_target"],
             "source": "paper",
         })
         log.info("%s paper CLOSE %s @ %.6f net=%.2f", self.symbol, reason, px, net)

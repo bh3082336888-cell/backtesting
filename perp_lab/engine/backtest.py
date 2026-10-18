@@ -65,6 +65,11 @@ def liq_price(side: int, entry: float, qty: float, margin: float, mmr: float, cu
     return (qty * entry + margin + cum) / (qty * (1.0 + mmr))
 
 
+def same_level(a: float, b: float) -> bool:
+    """Whether two stop or target levels are the same; NaN (no target) equals NaN."""
+    return a == b or (a != a and b != b)
+
+
 @dataclass
 class BacktestResult:
     trades: list[dict]
@@ -107,6 +112,10 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
     fees_acc = fund_acc = 0.0
     stop_init = NAN
     tgt_init = NAN
+    # the levels the position carried: each in force from its time (ms) on; [0] is the entry's
+    lv_time: list[int] = []
+    lv_stop: list[float] = []
+    lv_target: list[float] = []
 
     pend_exit = False
     pend_entry = None  # (side, stop, target, signal_i)
@@ -143,6 +152,10 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
             "r_multiple": net / risk_amt if risk_amt else NAN,
             "bars_held": i - entry_i + 1,
             "regime": str(REG[sig_i]) if REG is not None else "unknown",
+            "level_time": list(lv_time), "level_stop": list(lv_stop),
+            # A list compares NaN by identity, so "no target" is always written as the one NAN: a
+            # replay's record of a trade then equals the reference run's. The stop is never NaN.
+            "level_target": [g if g == g else NAN for g in lv_target],
         })
         side = 0
         qty = margin = 0.0
@@ -196,6 +209,7 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
                     side, qty, entry_px, margin, liq = s, q, fill, mg, lq
                     stop, target = st, (tg if tg is not None else NAN)
                     stop_init, tgt_init = stop, target
+                    lv_time, lv_stop, lv_target = [int(T[i])], [stop], [target]
                     entry_i, sig_i = i, si
                     fee = taker * q * fill
                     W -= fee
@@ -260,6 +274,11 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
                         stop = ns
                 if sig.target is not None:
                     target = sig.target
+                # A hold with neither a stop nor a target changes nothing; the stop is never NaN.
+                if (ns is not None or sig.target is not None) and not (
+                        stop == lv_stop[-1] and same_level(target, lv_target[-1])):
+                    # decided at this close, in force from the next open
+                    lv_time.append(int(T[i + 1])); lv_stop.append(stop); lv_target.append(target)
             continue
         if record_signals:
             signals.append((i, a, sig.stop, sig.target))
