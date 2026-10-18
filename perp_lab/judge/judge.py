@@ -21,8 +21,8 @@ import pandas as pd
 
 from perp_lab.engine.metrics import summarize
 from perp_lab.judge import budget, gates
-from perp_lab.judge.exam import cost_hours, run_exam, window_end
-from perp_lab.plugins import PluginMetaError, PluginSource
+from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, window_end
+from perp_lab.plugins import PluginMetaError, PluginSource, UndeclaredTimeframe, require_timeframe
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.runs import new_run_id, repo_commit, write_run
@@ -82,6 +82,15 @@ def read_plugin(name: str) -> PluginSource:
         return PluginSource.read(name)
     except PluginMetaError as e:
         raise JudgeRefused(f"{name}: {e}") from e
+
+
+def _require_timeframe(src: PluginSource, tf: str, role: str = "") -> None:
+    """A timeframe the plugin doesn't declare is refused before anything runs or is recorded: the
+    walk-forward would be a trial that can't be taken back."""
+    try:
+        require_timeframe(src, tf, role)
+    except UndeclaredTimeframe as e:
+        raise JudgeRefused(str(e)) from e
 
 
 def plugin_parent(name: str, src: PluginSource | None = None) -> str | None:
@@ -179,9 +188,9 @@ def supersede(cfg, parent: str, tf: str, family: str) -> None:
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
           validate: Callable = validate_strategy) -> dict:
     jc = cfg["judge"]
-    client.check(cfg)                    # no sandbox, no judging: SandboxUnavailable propagates
     src = read_plugin(name)              # read once: this src and h are what is checked, run and recorded
     h = src.hash
+    _require_timeframe(src, tf)
     parent = src.meta.parent
     psrc = None
     if parent is not None:
@@ -192,6 +201,9 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         psrc = read_plugin(parent)
         if psrc.hash == h:
             raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
+        _require_timeframe(psrc, tf, "parent ")   # its walk-forward runs at tf too, and is a trial
+    # The refusals above read only plugin source (no code runs), so they come first, on any machine.
+    client.check(cfg)                    # no sandbox, no judging: SandboxUnavailable propagates
 
     existing = db.get_judgement(cfg, h, tf)
     if existing:   # (re)write its verdict under the judged strategy's name, even for a renamed copy
@@ -273,6 +285,9 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
 
 
 HOLDOUT_BOOT = 10_000
+BACKFILL_HINT = ("run `lab backfill --tfs {tf}` (it rebuilds every incomplete month from data.binance.vision, a "
+                 "closed one from its monthly file and the current one from daily files up to yesterday), then "
+                 "`lab exam` again")
 
 
 def holdout_report(j: dict, res, ok: bool, reasons: list[str], m: dict, floor_pct: float) -> str:
@@ -370,18 +385,22 @@ def _record_failed_holdout_run(cfg, j: dict, s: dict, end: pd.Timestamp, err: Pl
 
 
 def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = window_end,
-                 cost_fn: Callable = cost_hours) -> dict:
+                 cost_fn: Callable = cost_hours, data_fn: Callable = window_data_problems) -> dict:
     """Try the holdout exam for a pending judgement, under the budget rules. Run by `lab exam`
     only. In order (the sandbox spec's "Streamed exam"):
 
     1. read the plugin once; an edit since it was judged waits as plugin_changed;
     2. a judgement already holding its read: failed / exam_error after exam_max_attempts, else the
-       window end stored at the mint, and on to 6 (the read is spent and the window fixed);
+       window end stored at the mint, and on to 3b, then 6 (the read is spent and the window fixed);
     3. the window end (shorter than min_holdout_days: pending / too_short, before any worker
-       starts); 4. the dated lookahead check over it; 5. the cost probe (too_slow, or
-       plugin_error if the plugin fails it); 6. the sandbox check; 7. the judgement read again (no
-       longer pending, e.g. superseded meanwhile: stop, no read), then mint, storing the window end
-       (refused, failed / exam_error, once the read's attempts are used up); 8. the streamed exam.
+       starts); 3b. where the window's candles came from, from the manifests only: a month not
+       from exchange files (stitched from ccxt, incomplete, unknown) waits as pending /
+       incomplete_data, with the months under `detail`, so no read is spent and no attempt used
+       on candles a plugin may not be able to trade on; 4. the dated lookahead check over it;
+       5. the cost probe (too_slow, or plugin_error if the plugin fails it); 6. the sandbox
+       check; 7. the judgement read again (no longer pending, e.g. superseded meanwhile: stop,
+       no read), then mint, storing the window end (refused, failed / exam_error, once the
+       read's attempts are used up); 8. the streamed exam.
 
     SandboxUnavailable at any step before the mint is pending / exam_error, re-raised: nothing is
     minted and no attempt used. A plugin error in the exam itself is failed / plugin_error (the read
@@ -398,10 +417,10 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
             return j
         if not (mine and alone):
             return {**j, "in_progress": True}
-        return _attempt(cfg, j, run, end_fn, cost_fn)
+        return _attempt(cfg, j, run, end_fn, cost_fn, data_fn)
 
 
-def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -> dict:
+def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable, data_fn: Callable) -> dict:
     """attempt_exam's steps, under the judgement's exam lock."""
     jid = j["id"]
     try:                                                     # 1. these bytes are checked and examined
@@ -416,7 +435,8 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -
     syms, tf, params, fam = s["universe"], j["timeframe"], s["sensitivity"]["base_params"], j["lineage_id"]
     jc = cfg["judge"]
     try:                                    # the sandbox down at any step before the mint: no read, no attempt
-        if budget.holds_read(cfg, jid, fam):                 # 2. a retry on the same read
+        retry = budget.holds_read(cfg, jid, fam)
+        if retry:                                            # 2. a retry on the same read
             if budget.attempts(cfg, jid, fam) >= jc["exam_max_attempts"]:   # (the mint re-checks, locked)
                 db.update_holdout(cfg, jid, "failed", "exam_error")
                 return finish(cfg, jid)
@@ -428,6 +448,12 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -
             if (end - cfg.holdout_start).days < jc["min_holdout_days"]:   # too short: no worker started
                 db.update_holdout(cfg, jid, "pending", "too_short")       # (the mint checks again, locked)
                 return finish(cfg, jid)
+        problems = data_fn(cfg, syms, tf, end)               # 3b. manifests only: no candle is read
+        if problems:
+            log.warning("exam of judgement %s waits for exchange data:\n  %s", jid, "\n  ".join(problems))
+            db.update_holdout(cfg, jid, "pending", "incomplete_data")
+            return {**finish(cfg, jid), "detail": [*problems, BACKFILL_HINT.format(tf=tf)]}
+        if not retry:
             if dated_lookahead_failures(cfg, src, end, params=params):     # 4
                 db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
                 return finish(cfg, jid)
@@ -475,6 +501,36 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -
         db.update_holdout(cfg, jid, "pending", "exam_error")   # same judgement may retry on the same read
         finish(cfg, jid)                                        # the verdict file must still exist
         raise
+    return finish(cfg, jid)
+
+
+def withdraw(cfg, jid: int, reason: str) -> dict:
+    """Withdraw a pending promotion before its read is minted (`lab withdraw`): it is never examined,
+    and its family keeps its one read for a later promotion. A human's decision on the walk-forward
+    record (a pre-registered check that failed, for one); the 3b-2 proposer must not be able to run
+    it. Refused (budget.WithdrawRefused, nothing changed) without a reason, for a judgement that
+    isn't pending, while `lab exam` examines it (its exam lock, taken without waiting) and once its
+    read is minted or when the log can't tell (`budget.no_read_held`, under the mint's lock). One
+    line goes to `budget.withdrawals_path` before the judgement changes; its verdict is rewritten,
+    status and code only (`withdrawn`)."""
+    reason = (reason or "").strip()
+    if not reason:
+        raise budget.WithdrawRefused("a reason is required")
+    with budget.exam_lock(cfg, jid) as mine:
+        if not mine:
+            raise budget.WithdrawRefused(f"judgement {jid} is being examined (or superseded) right now")
+        j = db.get_judgement_by_id(cfg, jid)       # read under the lock: only its holder changes its status
+        if j is None:
+            raise budget.WithdrawRefused(f"no judgement {jid}")
+        if j["holdout_status"] != "pending":
+            raise budget.WithdrawRefused(f"judgement {jid} is {j['holdout_status']} ({j['holdout_reason']}), "
+                                         "not pending")
+        with budget.no_read_held(cfg, jid):
+            budget.record_withdrawal(cfg, {
+                "time": datetime.now(timezone.utc).isoformat(), "judgement_id": jid, "strategy": j["strategy"],
+                "timeframe": j["timeframe"], "strategy_hash": j["strategy_hash"], "lineage_id": j["lineage_id"],
+                "reason": reason})
+            db.update_holdout(cfg, jid, "withdrawn", "withdrawn")
     return finish(cfg, jid)
 
 

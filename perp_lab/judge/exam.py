@@ -18,6 +18,7 @@ read back (spec R7). `stream.run_batch` does it, and before a rerun too.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,19 +55,113 @@ def _files(d: Path) -> list[Path]:
 
 
 def window_end(cfg, symbols: list[str], tf: str) -> pd.Timestamp:
-    """The last 00:00 UTC up to which every symbol has closed candles and funding.
+    """The last 00:00 UTC up to which every symbol has closed candles, at `tf` and at the regime
+    timeframe (`load_bars` builds `regime` from those: past their last one it would carry a single
+    label forward), and funding.
 
     Reads timestamps only (open_time, funding_time, interval_hours), never prices."""
     ends = []
     for s in symbols:
-        last_open = max(int(pd.read_parquet(f, columns=["open_time"]).open_time.max())
-                        for f in _files(cfg.data_dir / s / tf))
+        closes = [max(int(pd.read_parquet(f, columns=["open_time"]).open_time.max())
+                      for f in _files(cfg.data_dir / s / t)) + TF_MS[t]
+                  for t in dict.fromkeys((tf, cfg["regime"]["timeframe"]))]
         fund = (pd.concat([pd.read_parquet(f, columns=["funding_time", "interval_hours"])
                            for f in _files(cfg.data_dir / s / "funding")])
                 .sort_values("funding_time").iloc[-1])
         ih = fund.interval_hours if pd.notna(fund.interval_hours) else DEFAULT_FUNDING_H
-        ends.append(min(last_open + TF_MS[tf], int(fund.funding_time) + int(ih * 3_600_000)))
+        ends.append(min(*closes, int(fund.funding_time) + int(ih * 3_600_000)))
     return pd.Timestamp(min(ends), unit="ms", tz="UTC").floor("D")
+
+
+EXCHANGE_SOURCES = ("monthly", "daily")    # data.binance.vision files: every column, taker flow included
+REGIME_SOURCES = (*EXCHANGE_SOURCES, "ccxt")  # the regime labels need OHLC only, which ccxt candles have
+CCXT = "stitched from ccxt (no taker, trade-count or quote-volume columns)"
+
+
+def window_data_problems(cfg, symbols: list[str], tf: str, end: pd.Timestamp) -> list[str]:
+    """Where the exam window's candles didn't come from exchange files, as "SYMBOL tf YYYY-MM: why",
+    from the klines manifests (`lab backfill` and `lab tail` write them); no candle is read.
+
+    For every month overlapping [holdout_start, end), each symbol's manifest must name a
+    data.binance.vision source (`monthly`, or `daily` for a month rebuilt from daily files). A month
+    `lab tail` stitched is `ccxt`: its candles carry no taker, trade-count or quote-volume columns,
+    so a plugin that reads them sits flat through the exam and spends its family's one read on a
+    data gap. A month the window covers to its end must also be complete (otherwise days of it are
+    missing); the month the window ends in may still be open, since `window_end` stops at the last
+    candle. A missing or unreadable manifest, a month without an entry or an unknown source counts
+    too: what isn't known to be exchange data is refused.
+
+    The exam also reads the regime timeframe's candles (`regime`, built from them by `load_bars`),
+    so its months are checked as well, ccxt allowed there: the labels need OHLC only.
+
+    Last, at both timeframes, every UTC day of the window must hold at least one candle (from
+    `open_time` alone, as `window_end` reads it; never a price). That catches a day missing from
+    the open month, which `complete` can't show, while a short exchange outage, which monthly files
+    carry too, doesn't hold an exam back for good."""
+    start = cfg.holdout_start
+    if end <= start:
+        return []
+    months = pd.period_range(start.tz_localize(None), (end - pd.Timedelta(milliseconds=1)).tz_localize(None),
+                             freq="M")
+    rtf = cfg["regime"]["timeframe"]
+    out = []
+    for s in symbols:
+        out += _month_problems(cfg, s, tf, months, end, EXCHANGE_SOURCES, "")
+        if rtf != tf:
+            out += _month_problems(cfg, s, rtf, months, end, REGIME_SOURCES, " (for the regime labels)")
+        for t in dict.fromkeys((tf, rtf)):
+            out += _missing_days(cfg, s, t, start, end)
+    return out
+
+
+def _month_problems(cfg, s: str, tf: str, months, end: pd.Timestamp, sources: tuple, note: str) -> list[str]:
+    """`window_data_problems` for one symbol at one timeframe, each line ending in `note`."""
+    p = cfg.data_dir / s / tf / "_manifest.json"
+    try:
+        man = json.loads(p.read_text())
+        if not isinstance(man, dict):
+            raise ValueError("not an object")
+    except FileNotFoundError:
+        return [f"{s} {tf} {m}: no manifest{note}" for m in months]
+    except (OSError, ValueError):
+        return [f"{s} {tf} {m}: manifest unreadable{note}" for m in months]
+    out = []
+    for m in months:
+        e = man.get(str(m))
+        covered = (m + 1).start_time.tz_localize("UTC") <= end     # the window runs to its end
+        if not isinstance(e, dict):
+            why = "no manifest entry"
+        elif e.get("source") not in sources:
+            why = CCXT if e.get("source") == "ccxt" else f"unknown source {e.get('source')!r}"
+        elif covered and e.get("source") != "ccxt" and e.get("complete") is not True:
+            why = "incomplete (days missing from data.binance.vision)"
+        else:
+            continue
+        out.append(f"{s} {tf} {m}: {why}{note}")
+    return out
+
+
+DAY_MS = 86_400_000
+
+
+def _missing_days(cfg, s: str, tf: str, start: pd.Timestamp, end: pd.Timestamp) -> list[str]:
+    """The UTC days in [start, end) without a single `tf` candle of `s`, as runs ("SYMBOL tf
+    2026-09-10 to 2026-09-12: no candles (3 days)"); reads open_time only, never a price."""
+    lo, hi = start.value // 10**6, end.value // 10**6
+    try:
+        files = _files(cfg.data_dir / s / tf)
+    except FileNotFoundError:
+        t = np.empty(0, dtype="int64")
+    else:
+        t = np.concatenate([pd.read_parquet(f, columns=["open_time"]).open_time.to_numpy("int64") for f in files])
+    t = t[(t >= lo) & (t < hi)]
+    missing = np.setdiff1d(np.arange(lo // DAY_MS, -(-hi // DAY_MS)), t // DAY_MS)
+    out = []
+    for run in (np.split(missing, np.flatnonzero(np.diff(missing) != 1) + 1) if len(missing) else []):
+        a, b = (pd.Timestamp(int(d) * DAY_MS, unit="ms").strftime("%Y-%m-%d") for d in (run[0], run[-1]))
+        out.append(f"{s} {tf} {a}: no candles" if len(run) == 1
+                   else f"{s} {tf} {a} to {b}: no candles ({len(run)} days)")
+    return out
 
 
 def cost_hours(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict, end: pd.Timestamp) -> float:

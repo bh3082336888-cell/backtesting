@@ -122,11 +122,16 @@ def walkforward(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
                 parent_run: Optional[str] = typer.Option(None, help="parent run_id (lineage)"),
                 config: Optional[str] = CfgOpt):
     """Walk-forward + sensitivity + random-entry + MC + regime split. OOS headline only."""
+    from perp_lab.plugins import UndeclaredTimeframe
     from perp_lab.validate.pipeline import validate_strategy
     cfg = load_config(config)
-    with _sandbox_required():
-        rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
-                                        parent_run_id=parent_run)
+    try:
+        with _sandbox_required():
+            rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
+                                            parent_run_id=parent_run)
+    except UndeclaredTimeframe as e:            # a trial at a timeframe it doesn't declare: nothing ran
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(2)
     o, i = rec["metrics"], rec["is_metrics"]
     typer.secho(f"{strategy} @ {tf}  →  {rec['status'].upper()}", bold=True,
                 fg="red" if rec["status"] == "noise" else "green")
@@ -242,6 +247,49 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
 
 
 @app.command()
+def withdraw(strategy: Optional[str] = typer.Argument(None, help="the plugin, by the name it was judged under"),
+             tf: Optional[str] = typer.Option(None, "--tf", help="the timeframe it was judged at"),
+             reason: str = typer.Option(..., help="why: recorded in withdrawals.jsonl next to the holdout log"),
+             judgement: Optional[int] = typer.Option(None, "--id", help="the judgement id: picks it alone (several "
+                                                     "versions pending, or a plugin file renamed since)"),
+             config: Optional[str] = CfgOpt):
+    """Withdraw a pending promotion before its holdout read: it is never examined, and its family
+    keeps its one read. A human's decision on the walk-forward record; the proposer never runs it.
+    Name it by PLUGIN and --tf, or by --id (a name or --tf given with it must match)."""
+    from perp_lab.judge.budget import WithdrawRefused
+    from perp_lab.judge.judge import withdraw as run_withdraw
+    from perp_lab.store.db import get_judgement_by_id, pending_judgements
+    cfg = load_config(config)
+
+    def refuse(msg: str):
+        typer.secho(f"refused: {msg}", fg="red")
+        raise typer.Exit(2)
+    if judgement is not None:
+        j = get_judgement_by_id(cfg, judgement)
+        if j is None:
+            refuse(f"no judgement {judgement}")
+        if strategy not in (None, j["strategy"]) or tf not in (None, j["timeframe"]):
+            refuse(f"judgement {judgement} is {j['strategy']} @ {j['timeframe']}")
+    elif strategy is None or tf is None:
+        refuse("name the plugin and --tf, or pass --id")
+    else:
+        mine = [j for j in pending_judgements(cfg) if j["strategy"] == strategy and j["timeframe"] == tf]
+        if not mine:
+            refuse(f"no pending promotion of {strategy} @ {tf}")
+        if len(mine) > 1:
+            ids = ", ".join(f"{j['id']} ({j['strategy_hash'][:10]})" for j in mine)
+            refuse(f"several versions of {strategy} @ {tf} are pending: {ids}; pass --id")
+        j = mine[0]
+    try:
+        w = run_withdraw(cfg, j["id"], reason)
+    except WithdrawRefused as e:
+        refuse(str(e))
+    typer.echo(f"{w['strategy']} @ {w['timeframe']}: withdrawn (judgement {w['id']}); family {w['lineage_id']} keeps "
+               "its holdout read")
+    typer.echo(f"verdict: {w['verdict_path']}")
+
+
+@app.command()
 def exam(config: Optional[str] = CfgOpt):
     """Attempt the holdout exam for every pending promotion (budget rules apply). The only command
     that runs exams; the proposer never runs it."""
@@ -255,6 +303,8 @@ def exam(config: Optional[str] = CfgOpt):
             continue
         err = f" ERROR: {j['error']}" if "error" in j else ""
         typer.echo(f"{j['strategy']} @ {j['timeframe']}: {j['holdout_status']} ({j['holdout_reason']}){err}")
+        for line in j.get("detail", []):          # e.g. the months of an incomplete_data wait
+            typer.echo(f"  {line}")
     if any("error" in j for j in done):
         raise typer.Exit(1)
 

@@ -151,6 +151,22 @@ def test_plugin_errors_pickle_with_every_field(err):
     assert (back.kind, back.type, back.message, back.stderr) == (err.kind, err.type, err.message, err.stderr)
 
 
+def test_a_walk_forward_at_an_undeclared_timeframe_is_refused_before_anything_runs(tmp_path, plugins, monkeypatch):
+    # It would be a trial (N counts (version, timeframe) pairs): donchian_atr_wide declares 4h only.
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    from perp_lab.plugins import UndeclaredTimeframe
+    cfg = market_config(tmp_path)
+    monkeypatch.setattr(pipeline, "walkforward", lambda *a, **k: pytest.fail("walked forward"))
+    with pytest.raises(UndeclaredTimeframe, match=r"donchian_atr_wide declares timeframes 4h, not 1h"):
+        pipeline.validate_strategy(cfg, "donchian_atr_wide", "1h", workers=1)
+    r = CliRunner().invoke(app, ["walkforward", "donchian_atr_wide", "--config", str(cfg.path)])   # default 1h
+    assert r.exit_code == 2 and "refused: donchian_atr_wide declares timeframes 4h, not 1h" in r.output
+    assert not cfg.runs_dir.exists() or not any(cfg.runs_dir.iterdir())
+    assert db.read_table(cfg, db.runs).empty
+
+
 def test_an_edit_during_validation_does_not_change_what_is_recorded(tmp_path, plugins, monkeypatch):
     cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
     f = plugins / "donchian_atr.py"

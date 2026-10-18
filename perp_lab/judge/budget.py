@@ -12,12 +12,17 @@ Each mint logs the end of the window it unlocks. A read's window is fixed at its
 retry examines the same window (`stored_window_end`), however much data has arrived since. A read
 gets `judge.exam_max_attempts` attempts, one log entry each; past that, a retry is refused under the
 same lock as the mint (`failed: exam_error`), so two exams can't both take the last attempt.
+
+A pending promotion can be withdrawn only while it holds no read (`no_read_held`, under the same
+lock as the mint); each withdrawal is one line in `withdrawals.jsonl` next to the log. It adds no
+entry to the log, so its family keeps its read.
 """
 
 from __future__ import annotations
 
 import fcntl
 import json
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +34,10 @@ from perp_lab.holdout import HoldoutToken, issue_holdout_token
 
 class BudgetLogError(RuntimeError):
     pass
+
+
+class WithdrawRefused(Exception):
+    """A promotion that can't be withdrawn; nothing was changed."""
 
 
 @dataclass(frozen=True)
@@ -182,6 +191,41 @@ def exams_lock(cfg):
     it."""
     with _try_locked(Path(f"{log_path(cfg)}.exams.lock")) as mine:
         yield mine
+
+
+def withdrawals_path(cfg) -> Path:
+    """The append-only record of withdrawn promotions, next to the holdout log."""
+    return log_path(cfg).with_name("withdrawals.jsonl")
+
+
+@contextmanager
+def no_read_held(cfg, judgement_id: int):
+    """Under the lock every mint takes, for the caller to withdraw a promotion: WithdrawRefused if
+    the log has any entry for `judgement_id`, under whatever lineage (its read was minted: the
+    holdout was unlocked, so the exam must finish or fail), or can't be read (whether it holds a
+    read is unknown). No mint happens until this exits."""
+    if not isinstance(judgement_id, int) or isinstance(judgement_id, bool):
+        raise TypeError(f"judgement_id must be an int, got {judgement_id!r}")
+    p = log_path(cfg)
+    with _locked(p):
+        try:
+            entries = read_log(p)
+        except BudgetLogError as e:
+            raise WithdrawRefused(f"{e}; whether it holds a read is unknown") from e
+        if _of(entries, judgement_id, None):
+            raise WithdrawRefused(f"judgement {judgement_id} holds its family's read already (minted); its exam "
+                                  "must finish or fail")
+        yield
+
+
+def record_withdrawal(cfg, entry: dict) -> None:
+    """Append one withdrawal to `withdrawals_path` (call it inside `no_read_held`)."""
+    p = withdrawals_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a") as f:
+        f.write(json.dumps(entry, sort_keys=True) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def mint(cfg, lineage_id: str, judgement_id: int, window_days: int,

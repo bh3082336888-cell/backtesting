@@ -35,6 +35,7 @@ PARENT = "donchian_atr"
 
 class Cheater(Strategy):
     params = {}
+    timeframes = ["4h"]
 
     def prepare(self, bars):
         return bars[[]].assign(nxt=bars.close.shift(-1), atr=atr(bars, 14))

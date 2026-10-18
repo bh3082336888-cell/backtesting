@@ -465,6 +465,19 @@ as in 3a); after that the judgement is `failed` with `exam_error`.
 2. If the judgement already holds a read (`budget.holds_read`): the stored window end, and on to
    step 6. The read is spent and the window fixed, so the checks in between can only strand it.
 3. Window end.
+   3b. (Added 2026-10-18.) Where the window's candles came from, from the klines manifests only:
+   every month overlapping the window must name a data.binance.vision source (`monthly`, or
+   `daily` for a month rebuilt from daily files), and a month the window covers to its end must
+   be complete. Otherwise (a month `lab tail` stitched from ccxt, whose candles have no taker,
+   trade-count or quote-volume columns; an incomplete month; a missing entry, manifest or unknown
+   source) the judgement stays `pending` with `incomplete_data` and nothing is minted. This step
+   also runs on a retry (with the stored window end), where it uses no attempt. `load_bars` also
+   reads the regime timeframe's candles (`cfg.regime.timeframe`, 4h) to build `regime`, so their
+   months are checked as well, with ccxt allowed (the labels need OHLC only), and the window end
+   (step 3) stops at their last candle too: past it, every bar would carry the last label. Last,
+   at both timeframes, every UTC day of the window must hold at least one candle (`open_time` only,
+   as `window_end` reads it): a day missing from the open month, which its manifest entry can't
+   show, waits too, while a short exchange outage inside a day doesn't.
 4. The dated lookahead check (as in 3a, now sandboxed). It still matters: it stops a plugin whose
    promotion came from peeking from spending a read.
 5. **Cost probe:** time `prepare` on the full research bars in a separate worker and multiply by
@@ -681,6 +694,8 @@ Each test is written first and seen failing. Tests that need the kernel features
 - It learns of exam failures only as reason codes.
 - It never runs `lab exam`, and it gets verdicts as their contents only: no file timestamps, and
   nothing else that tells it when an exam ran or how long it took (R2).
+- It never runs `lab withdraw` (nor calls `judge.withdraw` or writes `withdrawals.jsonl`): choosing
+  which of its promotions reach the holdout is not its decision.
 - It can read the harness source, so assume it knows exactly how the lookahead check works (R1).
 - R5 applies to the proposer's own process too: it must not be able to `stat()` `data/` (the sizes
   and modification times of holdout files).

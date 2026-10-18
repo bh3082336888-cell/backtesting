@@ -128,7 +128,7 @@ judgements = sa.Table(
     sa.Column("reasons", sa.JSON, nullable=False),
     sa.Column("dsr", sa.Float), sa.Column("n_trials", sa.Integer), sa.Column("sr0", sa.Float),
     sa.Column("parent_passed", sa.Boolean), sa.Column("beats_parent_frac", sa.Float),
-    sa.Column("holdout_status", sa.String(16), nullable=False),    # n/a | pending | passed | failed | blocked
+    sa.Column("holdout_status", sa.String(16), nullable=False),    # n/a | pending | passed | failed | blocked | withdrawn
     sa.Column("holdout_reason", sa.String(32), nullable=False),    # fixed code, never a number
     sa.Column("holdout_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True)),
@@ -137,7 +137,7 @@ judgements = sa.Table(
 )
 
 DECISIONS = {"promote", "kill"}
-HOLDOUT_STATUSES = {"n/a", "pending", "passed", "failed", "blocked"}
+HOLDOUT_STATUSES = {"n/a", "pending", "passed", "failed", "blocked", "withdrawn"}
 
 APPROVABLE_STATUSES = {"paper", "retired"}   # "live" deliberately absent
 

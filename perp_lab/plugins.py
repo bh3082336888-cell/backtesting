@@ -24,6 +24,18 @@ class PluginMetaError(ValueError):
         self.name, self.hash = name, hash
 
 
+class UndeclaredTimeframe(ValueError):
+    """A walk-forward asked for at a timeframe the plugin's `timeframes` literal doesn't list."""
+
+
+def require_timeframe(src: PluginSource, tf: str, role: str = "") -> None:
+    """Refuse `tf` unless `src` declares it. A walk-forward is a trial (N counts distinct (plugin
+    version, timeframe) pairs) and can't be taken back, so a mistyped or defaulted `--tf` must not
+    spend one. `role` prefixes the plugin's name in the message (e.g. "parent ")."""
+    if tf not in src.meta.timeframes:
+        raise UndeclaredTimeframe(f"{role}{src.name} declares timeframes {', '.join(src.meta.timeframes)}, not {tf}")
+
+
 @dataclass(frozen=True, slots=True)
 class PluginMeta:
     parent: str | None

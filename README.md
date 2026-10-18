@@ -67,6 +67,9 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 `lab judge PLUGIN --tf TF` decides **promote** or **kill** with no human involved
 (spec: `docs/superpowers/specs/2026-10-16-judge-design.md`).
 
+- `--tf` must be one of the plugin's declared `timeframes` (and its parent's); anything else is refused (exit
+  2) before the sandbox check, the lookahead check or anything is recorded, since the walk-forward would be a
+  trial that can't be taken back. `lab walkforward` refuses the same way; `lab backtest` (in-sample, not a trial) doesn't.
 - A plugin names its parent with a module-level `PARENT = "name"`; without one it starts a family.
 - A family is `"family:<root plugin name>"`, found by walking PARENT links, so a whole PARENT chain
   (e.g. `donchian_atr` and `donchian_atr_wide`) shares one family and therefore one holdout read. A plugin
@@ -92,7 +95,22 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 - If a plugin file is edited after it was judged, its pending exam waits with holdout status `pending` and
   reason `plugin_changed` (no new read is spent; one already spent by a crashed exam stays with it) until the
   judged version is restored; an edited plugin is a new version and is judged separately.
+- Before any read, the exam checks where its window's candles came from (the klines manifests, no candle read):
+  every month must come from data.binance.vision files, and a month the window covers to its end must be
+  complete. A month `lab tail` stitched from ccxt has no taker, trade-count or quote-volume columns, so a
+  plugin reading them would trade nothing; the exam waits as `pending` / `incomplete_data` (a retry on a
+  spent read too, using no attempt), and `lab exam` lists the months and says to run `lab backfill`. The
+  regime timeframe's months (4h: `regime` is built from them) are checked too, ccxt allowed there, and the
+  window ends where those candles do, so no exam bar carries a stale regime label. And every UTC day of the
+  window must hold at least one candle at both timeframes (timestamps only): that catches a day missing from
+  the still-open month, while a short exchange outage doesn't hold an exam back.
 - `lab exam` reports each failing exam with ` ERROR: ...`, continues with the rest, and exits 1 if any failed.
+- `lab withdraw PLUGIN --tf TF --reason "..."` withdraws a pending promotion before its read is minted (a
+  human's decision on the walk-forward record, e.g. a pre-registered check that failed): status and code
+  `withdrawn`, one line in `withdrawals.jsonl` next to the holdout log, and the verdict rewritten. Its family
+  keeps its one read for a later promotion. `--id N` picks the judgement by id alone (several versions pending,
+  or its plugin file renamed since). Refused (exit 2) without a reason, for anything not pending, while
+  `lab exam` examines it, and once its read is minted. The 3b-2 proposer must not be able to run it.
 - **Paper approval needs a passed exam**, for every strategy.
 - Public verdicts in `runs/verdicts/` carry the holdout outcome as status and code only, never numbers.
 
@@ -122,6 +140,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | Entry rejected if liquidation price sits inside the stop | engine step 4 |
 | OOS is the headline; IS is shown greyed and labelled | `validate/pipeline.py` report |
 | A strategy must beat random-entry (same exits, matched frequency) p95 OOS | `validate/benchmarks.py` |
+| A walk-forward (`lab walkforward`, `lab judge`, a judge's parent run) runs only at a timeframe the plugin declares; any other is refused before it can count as a trial | `plugins.py::require_timeframe`, `tests/test_judge.py`, `tests/test_walkforward_sandbox.py` |
 | Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days | `judge/budget.py`, `tests/test_budget.py` |
 | Plugin code runs only in a confined, sealed worker: Landlock, seccomp and rlimits, then a seal under which no path resolves; it reads no file (no data, store, log or verdict, and once sealed not even its own modules' files), writes no file or file metadata (access times included), opens no socket | `sandbox/confine.py`, `sandbox/worker.py`, `tests/test_confine.py`, `tests/test_worker.py` |
 | Scores come from the trusted engine replaying the plugin's decisions, never from numbers the plugin reports | `sandbox/replay.py`, `tests/test_replay.py` |
@@ -131,6 +150,8 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | Harness lineage edges can't be overwritten by hand, nor a harness-judged run re-parented | `store/db.py::add_edge` |
 | Verdicts never carry holdout numbers | `judge/judge.py::write_verdict`, `tests/test_judge_exam.py` |
 | Trade charts read research candles only before `holdout_start`, without a token; holdout exams are never charted | `dashboard/trade_chart.py`, `tests/test_trade_chart.py` |
+| A promotion can be withdrawn only while pending and holding no read (checked under the mint's lock), with a reason recorded in `withdrawals.jsonl`; its family keeps its read | `judge/judge.py::withdraw`, `judge/budget.py::no_read_held`, `tests/test_judge_exam.py` |
+| No holdout read over candles that didn't come from exchange files (ccxt-stitched, incomplete or unknown months wait as `incomplete_data`) | `judge/exam.py::window_data_problems`, `tests/test_exam.py`, `tests/test_judge_exam.py` |
 
 ## Modelling choices (and their bias)
 

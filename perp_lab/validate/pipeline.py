@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from perp_lab.plugins import PluginSource
+from perp_lab.plugins import PluginSource, require_timeframe
 from perp_lab.runs import new_run_id, repo_commit, verdict, write_run
 from perp_lab.validate.benchmarks import buy_and_hold, random_entry, regime_split
 from perp_lab.validate.montecarlo import mc_drawdown
@@ -80,6 +80,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     src = PluginSource.read(name) if src is None else src
     if src.name != name:
         raise ValueError(f"source of {src.name} given to validate {name}")
+    require_timeframe(src, tf)                  # a trial at a timeframe it doesn't declare: nothing runs
     rid = new_run_id()
     wf = walkforward(cfg, src, tf, symbols, workers, cfg.runs_dir / rid / "sandbox_stderr")
     log.info("walkforward done; OOS Sharpe %.2f", wf.oos_summary["sharpe"])
