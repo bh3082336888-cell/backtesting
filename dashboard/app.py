@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dashboard import trade_chart as tc  # noqa: E402
 from perp_lab.config import load_config  # noqa: E402
 from perp_lab.store import db  # noqa: E402
 
@@ -48,6 +49,12 @@ C = {
     "muted": "#898781",                              # IS / reference ink
     "grid": "#2c2c2a" if DARK else "#e1e0d9",
     "band": "rgba(255,255,255,0.04)" if DARK else "rgba(11,11,11,0.035)",
+    # trade charts: neutral candles so the trades stand out
+    "train": "rgba(255,255,255,0.08)" if DARK else "rgba(11,11,11,0.07)",
+    "ink": "#e8e6e1" if DARK else "#1f1f1d",
+    "candle": "#6b6a66" if DARK else "#a9a7a0",
+    "liq": "#a35cff" if DARK else "#8e2dff",
+    "eow": "#2bb39a" if DARK else "#1f9e89",
 }
 DIVERGING = [[0.0, C["neg"]], [0.5, C["mid"]], [1.0, C["s1"]]]
 
@@ -95,6 +102,21 @@ def artifact(run_dir: str, name: str) -> pd.DataFrame | None:
 def summary(run_dir: str) -> dict:
     p = Path(run_dir) / "summary.json"
     return json.loads(p.read_text()) if p.exists() else {}
+
+
+@st.cache_data(ttl=60)
+def chart_trades(mode: str, run_dir: str) -> pd.DataFrame:
+    return tc.load_trades(mode, run_dir)
+
+
+@st.cache_data(ttl=60)
+def chart_span(mode: str, run_dir: str, symbol: str, tf: str, date_start, date_end):
+    return tc.chart_span(CFG, mode, run_dir, symbol, tf, date_start, date_end)
+
+
+@st.cache_data(ttl=60)
+def chart_candles(mode: str, run_dir: str, symbol: str, tf: str, start, end) -> pd.DataFrame:
+    return tc.run_candles(CFG, mode, run_dir, symbol, tf, start, end)
 
 
 def status_of(r) -> str:
@@ -154,6 +176,97 @@ def _fold_bands(fig, folds: pd.DataFrame):
     for i, f in folds.reset_index(drop=True).iterrows():
         if i % 2 == 0:
             fig.add_vrect(x0=f.test_start, x1=f.test_end, fillcolor=C["band"], line_width=0, layer="below")
+
+
+def _trade_label(t) -> str:
+    return (f"{pd.to_datetime(t.entry_time, unit='ms', utc=True):%Y-%m-%d %H:%M} · "
+            f"{'long' if t.side > 0 else 'short'} · {t.exit_reason} · R {t.r_multiple:+.2f}")
+
+
+def _picked(dk, wk):
+    st.session_state[wk] = st.session_state[dk]
+
+
+def _jump(jk, wk, vk, trades, tf, span):
+    i = st.session_state.get(jk)
+    if i is not None:
+        st.session_state[wk] = tc.trade_window(trades.iloc[i], tf, span)
+        st.session_state[vk] += 1      # a new date picker, showing the trade's dates
+
+
+def trades_chart_section(r, rid, folds=None):
+    """One symbol's candles over a date range with this run's trades on them. Walk-forward and paper only."""
+    mode = r.validation_mode
+    if mode not in tc.CHARTABLE:
+        st.caption(f"Trade charts cover walk-forward and paper runs; this run is '{mode}'.")
+        return
+    trades = chart_trades(mode, r.run_dir)
+    symbols = tc.chart_symbols(mode, r.run_dir, r.universe)
+    if not symbols:
+        st.caption("This run saved no bars to chart.")
+        return
+    n = trades.symbol.value_counts() if len(trades) else pd.Series(dtype=int)
+    c = st.columns([2, 3, 4])
+    sym = c[0].selectbox("Symbol", symbols, key=f"tc_sym_{rid}",
+                         format_func=lambda s: f"{s} · {int(n.get(s, 0))} trades")
+    try:
+        span = chart_span(mode, r.run_dir, sym, r.timeframe, r.date_start, r.date_end)
+    except FileNotFoundError as e:
+        st.warning(str(e))
+        return
+    lo, hi = tc.as_dates(*span)
+    wk, vk = f"tc_win_{rid}", f"tc_ver_{rid}"
+    if wk not in st.session_state:
+        st.session_state[wk], st.session_state[vk] = tc.default_window(mode, span, folds), 0
+    held = tuple(st.session_state[wk])
+    fit = tuple(min(max(d, lo), hi) for d in held)
+    if fit != held:                    # another symbol's span (paper): show the part that fits
+        st.session_state[wk], st.session_state[vk] = fit, st.session_state[vk] + 1
+    dk = f"tc_dates_{rid}_{st.session_state[vk]}"
+    c[1].date_input("Dates (UTC)", value=st.session_state[wk], min_value=lo, max_value=hi, key=dk,
+                    on_change=_picked, args=(dk, wk))
+    mine = (trades[trades.symbol == sym].sort_values("entry_time").reset_index(drop=True)
+            if len(trades) else trades)
+    jk = f"tc_jump_{rid}_{sym}"
+    c[2].selectbox("Jump to trade", [None, *range(len(mine))], key=jk,
+                   format_func=lambda i: "—" if i is None else _trade_label(mine.iloc[i]),
+                   on_change=_jump, args=(jk, wk, vk, mine, r.timeframe, span))
+    start, end = tc.picked_window(st.session_state[wk], span)
+    try:
+        candles = chart_candles(mode, r.run_dir, sym, r.timeframe, start, end)
+    except FileNotFoundError as e:
+        st.warning(str(e))
+        return
+    if candles.empty:
+        st.caption("No candles in this range.")
+        return
+    fig = tc.trade_figure(candles, mine, r.timeframe, palette=C, folds=folds if mode == "walkforward" else None)
+    last = end - pd.Timedelta(1, "ns")
+    show(style(fig, h=560, title=f"{sym} {r.timeframe} · {start:%Y-%m-%d} → {last:%Y-%m-%d} UTC"))
+    shown = tc.display_tf(r.timeframe, len(candles))
+    here = tc.trades_in(mine, start, end)
+    src = ("the research store, the bars this walk-forward read" if mode == "walkforward"
+           else "the bars this paper run saved")
+    coarse = (f" Drawn as {shown} candles to stay readable; narrow the dates to see {r.timeframe}."
+              if shown != r.timeframe else "")
+    shade = (" Shaded: every other test fold (hover a fold label for its train window and params); "
+             "every trade here is out-of-sample." if mode == "walkforward"
+             else " Shaded: warmup bars from before the run started.")
+    st.caption(f"{len(here)} trade{'' if len(here) == 1 else 's'} in range · candles from {src}.{coarse} "
+               "▲ long / ▼ short entry at the fill · ○ close of the signal bar · ✕ exit, coloured by reason · "
+               f"dotted: initial stop (red) and initial target (blue).{shade}")
+    if len(here):
+        with st.expander(f"Trades in range ({len(here)})"):
+            cols = [x for x in ["side", "signal_time", "entry_time", "entry_price", "exit_time", "exit_price",
+                                "exit_reason", "pnl", "r_multiple", "regime", "fees", "funding", "fold"] if x in here]
+            tbl = here[cols].copy()
+            for x in ("signal_time", "entry_time", "exit_time"):
+                tbl[x] = pd.to_datetime(tbl[x], unit="ms", utc=True).dt.strftime("%Y-%m-%d %H:%M")
+            tbl["side"] = np.where(tbl.side > 0, "long", "short")
+            st.dataframe(tbl.style.format({"entry_price": "{:,.6g}", "exit_price": "{:,.6g}", "pnl": "{:+,.2f}",
+                                           "r_multiple": "{:+.2f}", "fees": "{:,.2f}", "funding": "{:,.2f}"},
+                                          na_rep="—"),
+                         hide_index=True, width="stretch")
 
 
 def page_detail():
@@ -232,6 +345,9 @@ def page_detail():
         with st.expander("Param selection per fold"):
             st.dataframe(folds[["fold", "test_start", "test_end", "combo", "is_score", "oos_sharpe", "oos_return"]],
                          hide_index=True, width="stretch")
+
+    st.subheader("Trades on the chart")
+    trades_chart_section(r, rid, folds)
 
     sy = table("run_symbols", rid)
     if len(sy):
@@ -401,6 +517,8 @@ def paper_section(r, rid, status):
                                            name="paper − replay"))
                 show(style(fig, title="Divergence (paper − replay)", yaxis_tickformat=".2%",
                            hovermode="x unified", showlegend=False))
+        st.markdown(f"**Paper trades on the chart** · run `{p.run_id}`")
+        trades_chart_section(p, p.run_id)
 
 
 def page_pairs():

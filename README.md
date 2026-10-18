@@ -51,6 +51,16 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
   the daily dominant 4h regime that persists ≥ `regime_change_min_days` (raw 4h labels flip ~24×/60d,
   which would make the gate meaningless), counted per pair, min across pairs.
 - Backtest-vs-paper divergence replays the engine on exactly the bars the paper runner saw.
+- Trade charts (run detail page, `dashboard/trade_chart.py`): one symbol's candles over a date range with
+  every trade on them: the entry at the fill (▲ long, ▼ short), the signal bar's close, the exit coloured by
+  `exit_reason`, the initial stop and initial target as dotted lines, and a hover with P&L, R, regime at signal,
+  fees, funding, fold and params. Walk-forward runs shade every other test fold and label each (hover: its train
+  window and params); paper runs shade the warmup. "Jump to trade" zooms to one trade; a window over 6000 bars
+  is drawn at the next coarser timeframe. Walk-forward and paper runs only.
+- Chart candles come from where the run got them, so nothing new is stored: a walk-forward reads the research
+  parquet store through `load_candles` (no token, window cut at `holdout_start`), so any machine that can re-run
+  it can chart it; a paper run reads its own `bars_<symbol>.parquet`. Holdout exams and IS runs aren't charted.
+  Only the initial stop and target are logged, so a trailing stop or a moved target exits off its dotted line.
 
 ## The judge (Phase 3a)
 
@@ -118,6 +128,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | Paper approval needs a passed holdout exam | `store/db.py::approve_paper`, `tests/test_store.py` |
 | Harness lineage edges can't be overwritten by hand, nor a harness-judged run re-parented | `store/db.py::add_edge` |
 | Verdicts never carry holdout numbers | `judge/judge.py::write_verdict`, `tests/test_judge_exam.py` |
+| Trade charts read research candles only before `holdout_start`, without a token; holdout exams are never charted | `dashboard/trade_chart.py`, `tests/test_trade_chart.py` |
 
 ## Modelling choices (and their bias)
 
