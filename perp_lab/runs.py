@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-MIN_OOS_TRADES = 30
+MIN_OOS_TRADES_PER_COIN = 30 / 8        # today's 30 at 8 coins
 
 
 def per_coin_min(per_coin: float, n_coins: int) -> int:
@@ -50,7 +50,7 @@ def _clean(o):
     return o
 
 
-def verdict(oos: dict, rnd: dict, sens: dict) -> tuple[str, list[str]]:
+def verdict(oos: dict, rnd: dict, sens: dict, n_coins: int) -> tuple[str, list[str]]:
     """noise | candidate. Every failed check is listed — no single headline number decides."""
     fails = []
     if oos.get("sharpe", 0) <= 0:
@@ -59,8 +59,9 @@ def verdict(oos: dict, rnd: dict, sens: dict) -> tuple[str, list[str]]:
         fails.append(f"does not beat random-entry p{rnd.get('percentile', '?')} OOS")
     if sens.get("narrow_island"):
         fails.append(f"narrow parameter island (worst drop {sens.get('worst_drop_at_20pct', 0):.0%} at ±20%)")
-    if oos.get("trades", 0) < MIN_OOS_TRADES:
-        fails.append(f"only {oos.get('trades', 0)} OOS trades (< {MIN_OOS_TRADES})")
+    t, m = oos.get("trades", 0), per_coin_min(MIN_OOS_TRADES_PER_COIN, n_coins)
+    if t < m:
+        fails.append(f"only {t} OOS trades (< {m}: {MIN_OOS_TRADES_PER_COIN:g} per coin × {n_coins} coins)")
     return ("noise" if fails else "candidate"), fails
 
 

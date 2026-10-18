@@ -12,7 +12,7 @@ from perp_lab.runs import new_run_id, repo_commit, verdict, write_run
 from perp_lab.validate.benchmarks import buy_and_hold, random_entry, regime_split
 from perp_lab.validate.montecarlo import mc_drawdown
 from perp_lab.validate.sensitivity import sensitivity
-from perp_lab.validate.walkforward import walkforward
+from perp_lab.validate.walkforward import listed_coins, walkforward
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     bh = buy_and_hold(cfg, wf.symbols, tf, oa, ob)
     reg = regime_split(wf.oos_trades)
     monthly = monthly_table(wf.oos_portfolio)
-    status, fails = verdict(wf.oos_summary, rnd, sens)
+    status, fails = verdict(wf.oos_summary, rnd, sens, listed_coins(wf.oos_daily, oa, ob))
 
     rec = {
         "run_id": rid, "strategy": name, "strategy_hash": src.hash,

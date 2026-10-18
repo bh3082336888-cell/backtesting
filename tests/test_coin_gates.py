@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from perp_lab.plugins import PluginSource
-from perp_lab.runs import per_coin_min
+from perp_lab.runs import per_coin_min, verdict
 from perp_lab.validate import walkforward as wfm
 from tests.conftest import market_config
 from tests.test_late_listing import keep_from
@@ -37,3 +37,12 @@ def test_the_train_gate_counts_only_coins_listed_in_each_fold(tmp_path, monkeypa
     monkeypatch.setattr(wfm, "per_coin_min", lambda r, n: seen.append(n) or real(r, n))
     wf = wfm.walkforward(cfg, PluginSource.from_text("donchian_atr", DONCHIAN), "4h", workers=1)
     assert seen[0] == 1 and seen[-1] == 2 and len(seen) == len(wf.folds)
+
+
+OK_RND, OK_SENS = {"beats_random": True}, {"narrow_island": False}
+
+
+def test_the_oos_trade_minimum_scales_with_coins():
+    status, fails = verdict({"sharpe": 1.0, "trades": 63}, OK_RND, OK_SENS, 17)
+    assert status == "noise" and fails == ["only 63 OOS trades (< 64: 3.75 per coin × 17 coins)"]
+    assert verdict({"sharpe": 1.0, "trades": 64}, OK_RND, OK_SENS, 17)[0] == "candidate"
