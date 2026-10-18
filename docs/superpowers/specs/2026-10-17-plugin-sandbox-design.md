@@ -67,6 +67,12 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
   separate processes, or between such a check and an exam (through CPU timing). Two exams never
   run at once on one machine: `attempt_exam` holds a machine-wide lock throughout. File locks,
   leases and directory notifications, a live channel Landlock doesn't restrict, are denied.
+  Nor does it hold between an exam and a `lab paper` run, which is the stronger case: a paper
+  worker streams live bars, every one inside the holdout window a later exam reads; it runs for
+  days, doesn't take the exams lock, and so can run during an exam while it already holds the bars
+  after an exam worker's current step. This is accepted: paper runs only a plugin that passed its
+  exam and was approved by hand (`approve_paper`). Making exams wait for paper runs would close
+  it, at the price of no exam for as long as a paper run lasts (60 days and more).
 - **R7 Page-cache residency.** Which pages of a file are in the page cache is visible to any
   process, through `mincore` on a mapping of it or the time a page fault takes. A worker maps its
   libraries (libarrow alone is about 11,000 pages) and could fault chosen pages in or push them
@@ -93,6 +99,8 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
     that page resident past the eviction for a later reader to find.
   - A process running during an exam (a concurrent `lab judge`'s workers) could read residency by
     fault timing while it runs, which is R6's live overlap.
+  - A `lab paper` worker's files are never evicted, and it can run during an exam while holding
+    holdout-window bars (R6). Accepted for the reason given there.
   - Other processes' use of the same files adds noise, which a reader would have to beat.
 
 ## Threat model
