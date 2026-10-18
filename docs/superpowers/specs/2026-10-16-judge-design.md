@@ -245,7 +245,7 @@ New table `judgements` (created by `md.create_all`; no changes to existing colum
 | `reasons` | JSON list |
 | `dsr`, `n_trials`, `sr0` | floats / int |
 | `parent_passed`, `beats_parent_frac` | null when no parent |
-| `holdout_status`, `holdout_reason` | `n/a` for kills; the reason is a fixed code (`awaiting_exam`, `too_short`, `budget_spent`, `family_examined`, `superseded`, `exam_error`, `plugin_changed`, `lookahead`, `passed`, `failed`; 3b adds `too_slow`, `plugin_error` and `incomplete_data`), never a number |
+| `holdout_status`, `holdout_reason` | `n/a` for kills; the reason is a fixed code (`awaiting_exam`, `too_short`, `budget_spent`, `family_examined`, `superseded`, `exam_error`, `plugin_changed`, `lookahead`, `passed`, `failed`; 3b adds `too_slow`, `plugin_error` and `incomplete_data`, and status and code `withdrawn` for a promotion withdrawn before its read by `lab withdraw`), never a number |
 | `holdout_run_id` | FK runs, null until examined |
 | `created_at`, `updated_at` | |
 
@@ -334,6 +334,9 @@ Each test is written first and seen failing.
 - The proposer has no read access to `data/` (it holds the holdout prices).
 - The proposer sees only `lab judge`'s exit code and the verdict file, never its stdout or
   stderr.
+- The proposer can't run `lab withdraw` (added 2026-10-18), nor call `judge.withdraw` or write
+  `withdrawals.jsonl`: withdrawing its own promotions before their reads would let it pick which
+  ones reach the holdout. Withdrawal is a human's decision on the walk-forward record.
 - Until that sandbox exists, the "nothing a strategy does can influence scoring" guarantee
   holds only for honest plugins: a plugin running in the judge's process could read `data/`
   directly or forge an unlogged token via `_MINT_KEY`.

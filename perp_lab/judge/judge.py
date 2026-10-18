@@ -502,6 +502,36 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable, d
     return finish(cfg, jid)
 
 
+def withdraw(cfg, jid: int, reason: str) -> dict:
+    """Withdraw a pending promotion before its read is minted (`lab withdraw`): it is never examined,
+    and its family keeps its one read for a later promotion. A human's decision on the walk-forward
+    record (a pre-registered check that failed, for one); the 3b-2 proposer must not be able to run
+    it. Refused (budget.WithdrawRefused, nothing changed) without a reason, for a judgement that
+    isn't pending, while `lab exam` examines it (its exam lock, taken without waiting) and once its
+    read is minted or when the log can't tell (`budget.no_read_held`, under the mint's lock). One
+    line goes to `budget.withdrawals_path` before the judgement changes; its verdict is rewritten,
+    status and code only (`withdrawn`)."""
+    reason = (reason or "").strip()
+    if not reason:
+        raise budget.WithdrawRefused("a reason is required")
+    with budget.exam_lock(cfg, jid) as mine:
+        if not mine:
+            raise budget.WithdrawRefused(f"judgement {jid} is being examined (or superseded) right now")
+        j = db.get_judgement_by_id(cfg, jid)       # read under the lock: only its holder changes its status
+        if j is None:
+            raise budget.WithdrawRefused(f"no judgement {jid}")
+        if j["holdout_status"] != "pending":
+            raise budget.WithdrawRefused(f"judgement {jid} is {j['holdout_status']} ({j['holdout_reason']}), "
+                                         "not pending")
+        with budget.no_read_held(cfg, jid):
+            budget.record_withdrawal(cfg, {
+                "time": datetime.now(timezone.utc).isoformat(), "judgement_id": jid, "strategy": j["strategy"],
+                "timeframe": j["timeframe"], "strategy_hash": j["strategy_hash"], "lineage_id": j["lineage_id"],
+                "reason": reason})
+            db.update_holdout(cfg, jid, "withdrawn", "withdrawn")
+    return finish(cfg, jid)
+
+
 def exam_pending(cfg, **kw) -> list[dict]:
     """Retry every pending exam, oldest first; one crashing exam never blocks the rest. While
     another `lab exam` is examining, each comes back unchanged, marked `in_progress`."""

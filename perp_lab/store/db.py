@@ -137,7 +137,7 @@ judgements = sa.Table(
 )
 
 DECISIONS = {"promote", "kill"}
-HOLDOUT_STATUSES = {"n/a", "pending", "passed", "failed", "blocked"}
+HOLDOUT_STATUSES = {"n/a", "pending", "passed", "failed", "blocked", "withdrawn"}
 
 APPROVABLE_STATUSES = {"paper", "retired"}   # "live" deliberately absent
 

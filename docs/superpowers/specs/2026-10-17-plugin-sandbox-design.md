@@ -569,4 +569,6 @@ Each test is written first and seen failing. Tests that need the kernel features
 - It learns of exam failures only as reason codes.
 - It never runs `lab exam`, and it gets verdicts as their contents only: no file timestamps, and
   nothing else that tells it when an exam ran or how long it took (R2).
+- It never runs `lab withdraw` (nor calls `judge.withdraw` or writes `withdrawals.jsonl`): choosing
+  which of its promotions reach the holdout is not its decision.
 - It can read the harness source, so assume it knows exactly how the lookahead check works (R1).

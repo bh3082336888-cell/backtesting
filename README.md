@@ -91,6 +91,11 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
   plugin reading them would trade nothing; the exam waits as `pending` / `incomplete_data` (a retry on a
   spent read too, using no attempt), and `lab exam` lists the months and says to run `lab backfill`.
 - `lab exam` reports each failing exam with ` ERROR: ...`, continues with the rest, and exits 1 if any failed.
+- `lab withdraw PLUGIN --tf TF --reason "..."` withdraws a pending promotion before its read is minted (a
+  human's decision on the walk-forward record, e.g. a pre-registered check that failed): status and code
+  `withdrawn`, one line in `withdrawals.jsonl` next to the holdout log, and the verdict rewritten. Its family
+  keeps its one read for a later promotion. Refused (exit 2) without a reason, for anything not pending, while
+  `lab exam` examines it, and once its read is minted. The 3b-2 proposer must not be able to run it.
 - **Paper approval needs a passed exam**, for every strategy.
 - Public verdicts in `runs/verdicts/` carry the holdout outcome as status and code only, never numbers.
 
@@ -127,6 +132,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | Paper approval needs a passed holdout exam | `store/db.py::approve_paper`, `tests/test_store.py` |
 | Harness lineage edges can't be overwritten by hand, nor a harness-judged run re-parented | `store/db.py::add_edge` |
 | Verdicts never carry holdout numbers | `judge/judge.py::write_verdict`, `tests/test_judge_exam.py` |
+| A promotion can be withdrawn only while pending and holding no read (checked under the mint's lock), with a reason recorded in `withdrawals.jsonl`; its family keeps its read | `judge/judge.py::withdraw`, `judge/budget.py::no_read_held`, `tests/test_judge_exam.py` |
 | No holdout read over candles that didn't come from exchange files (ccxt-stitched, incomplete or unknown months wait as `incomplete_data`) | `judge/exam.py::window_data_problems`, `tests/test_exam.py`, `tests/test_judge_exam.py` |
 
 ## Modelling choices (and their bias)

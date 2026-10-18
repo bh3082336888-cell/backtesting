@@ -12,13 +12,14 @@ from typer.testing import CliRunner
 from perp_lab.cli import app
 from perp_lab.judge import budget
 from perp_lab.judge.exam import ExamResult
-from perp_lab.judge.judge import VERDICT_KEYS, attempt_exam, exam_pending, judge, verdict_path
+from perp_lab.judge.budget import WithdrawRefused
+from perp_lab.judge.judge import VERDICT_KEYS, attempt_exam, exam_pending, judge, verdict_path, withdraw
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.store import db
 from perp_lab.validate import walkforward as wfm
 from tests.conftest import market_config
-from tests.judge_fixtures import STRONG, WIDE_TEXT, StubValidate, add_plugin, plugins  # noqa: F401
+from tests.judge_fixtures import NOISE, STRONG, WIDE_TEXT, StubValidate, add_plugin, plugins  # noqa: F401
 from tests.test_store import cfg  # noqa: F401
 
 HOLDOUT_DAYS = pd.date_range("2026-07-01", periods=200, freq="D", tz="UTC")
@@ -822,3 +823,105 @@ def test_a_short_window_waits_without_starting_a_worker(cfg, plugins, monkeypatc
     done = attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(100), cost_fn=boom)
     assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "too_short")
     assert budget.reads_used(cfg) == 0
+
+
+# ---------------------------------------------------------------- withdrawing a pending promotion
+
+WHY = "longs carry all the gross OOS P&L (pre-registered per-side check)"
+
+
+def withdrawals(cfg) -> list[dict]:
+    p = budget.withdrawals_path(cfg)
+    return [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
+
+
+def test_a_pending_promotion_is_withdrawn_before_its_read_and_its_family_keeps_the_read(cfg, plugins):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    w = withdraw(cfg, j["id"], WHY)
+    assert (w["holdout_status"], w["holdout_reason"]) == ("withdrawn", "withdrawn")
+    [e] = withdrawals(cfg)
+    assert {k: e[k] for k in ("judgement_id", "strategy", "timeframe", "strategy_hash", "lineage_id", "reason")} == {
+        "judgement_id": j["id"], "strategy": "donchian_atr", "timeframe": "4h", "strategy_hash": j["strategy_hash"],
+        "lineage_id": "family:donchian_atr", "reason": WHY}
+    assert pd.Timestamp(e["time"]).tzinfo is not None
+    out = json.loads(Path(w["verdict_path"]).read_text())
+    assert (out["holdout_status"], out["holdout_reason"]) == ("withdrawn", "withdrawn")
+    assert db.pending_judgements(cfg) == [] and exams(cfg, boom) == [] and budget.read_log(budget.log_path(cfg)) == []
+    # the family's one read is still there: a later promotion in it is examined
+    v = StubValidate({"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)})
+    child = judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    assert child["decision"] == "promote" and child["lineage_id"] == "family:donchian_atr"
+    assert db.get_judgement_by_id(cfg, j["id"])["holdout_status"] == "withdrawn"     # not superseded over it
+    [done] = exams(cfg, stub_run(0.003))
+    assert (done["id"], done["holdout_status"]) == (child["id"], "passed") and budget.reads_used(cfg) == 1
+
+
+def test_a_promotion_holding_its_read_cannot_be_withdrawn(cfg, plugins):
+    # Its read is minted (a crashed exam): the holdout was unlocked, so the exam must finish or fail.
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    crash(cfg, j["id"])
+    with pytest.raises(WithdrawRefused, match="holds its family's read"):
+        withdraw(cfg, j["id"], WHY)
+    r = db.get_judgement_by_id(cfg, j["id"])
+    assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error") and withdrawals(cfg) == []
+
+
+def test_only_a_pending_promotion_can_be_withdrawn(cfg, plugins):
+    budget.init_log(cfg)
+    k = judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    with pytest.raises(WithdrawRefused, match=r"is n/a \(n/a\), not pending"):
+        withdraw(cfg, k["id"], WHY)
+    with pytest.raises(WithdrawRefused, match="no judgement 999"):
+        withdraw(cfg, 999, WHY)
+    assert withdrawals(cfg) == []
+
+
+@pytest.mark.parametrize("why", ["", "   ", None])
+def test_a_withdrawal_needs_a_reason(cfg, plugins, why):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    with pytest.raises(WithdrawRefused, match="a reason is required"):
+        withdraw(cfg, j["id"], why)
+    assert db.get_judgement_by_id(cfg, j["id"])["holdout_status"] == "pending" and withdrawals(cfg) == []
+
+
+def test_a_promotion_being_examined_cannot_be_withdrawn(cfg, plugins):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    with budget.exam_lock(cfg, j["id"]) as mine:             # as `lab exam` holds it throughout an attempt
+        assert mine
+        with pytest.raises(WithdrawRefused, match="being examined"):
+            withdraw(cfg, j["id"], WHY)
+    assert db.get_judgement_by_id(cfg, j["id"])["holdout_status"] == "pending" and withdrawals(cfg) == []
+
+
+def test_no_withdrawal_while_the_read_record_cannot_be_read(cfg, plugins):
+    j = promoted(cfg)                                        # no holdout log: whether it holds a read is unknown
+    with pytest.raises(WithdrawRefused, match="whether it holds a read is unknown"):
+        withdraw(cfg, j["id"], WHY)
+    assert db.get_judgement_by_id(cfg, j["id"])["holdout_status"] == "pending" and withdrawals(cfg) == []
+
+
+def test_cli_withdraw(cfg, plugins):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    base = ["withdraw", "donchian_atr", "--tf", "4h", "--config", str(cfg.path)]
+    r = CliRunner().invoke(app, base)                          # no --reason
+    assert r.exit_code == 2 and db.get_judgement_by_id(cfg, j["id"])["holdout_status"] == "pending"
+    r = CliRunner().invoke(app, ["withdraw", "donchian_atr", "--tf", "1h", "--reason", WHY, "--config", str(cfg.path)])
+    assert r.exit_code == 2 and "no pending promotion of donchian_atr @ 1h" in r.output
+    r = CliRunner().invoke(app, [*base, "--reason", WHY])
+    assert r.exit_code == 0, r.output
+    assert f"donchian_atr @ 4h: withdrawn (judgement {j['id']})" in r.output and "keeps its holdout read" in r.output
+    r = CliRunner().invoke(app, [*base, "--reason", WHY])        # nothing pending any more
+    assert r.exit_code == 2 and "no pending promotion" in r.output and len(withdrawals(cfg)) == 1
+
+
+def test_cli_withdraw_refuses_a_read_already_minted(cfg, plugins):
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    crash(cfg, j["id"])
+    r = CliRunner().invoke(app, ["withdraw", "donchian_atr", "--tf", "4h", "--reason", WHY, "--config", str(cfg.path)])
+    assert r.exit_code == 2 and "refused:" in r.output and "holds its family's read" in r.output
