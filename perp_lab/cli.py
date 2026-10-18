@@ -61,10 +61,19 @@ def tail(symbols: Optional[str] = None, tfs: Optional[str] = None, config: Optio
     from perp_lab.data.live import make_exchange, tail as do_tail
     cfg = load_config(config)
     ex = make_exchange()
+    failed = []
     for s in _syms(cfg, symbols):
         for tf in (tfs.split(",") if tfs else cfg["timeframes"]):
-            n = do_tail(cfg, s, tf, ex)
+            try:
+                n = do_tail(cfg, s, tf, ex)
+            except Exception as e:
+                typer.secho(f"{s} {tf}: failed: {type(e).__name__}: {e}", fg="red")
+                failed.append(f"{s} {tf}")
+                continue
             typer.echo(f"{s} {tf}: +{n} candles")
+    if failed:
+        typer.secho("tail failed for: " + ", ".join(failed), fg="red")
+        raise typer.Exit(1)
 
 
 @app.command()

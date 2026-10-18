@@ -421,3 +421,21 @@ def test_cli_paper_refuses_more_coins_than_workers(tmp_path, monkeypatch, plugin
     r = CliRunner().invoke(app, ["paper", "c1", "--symbols", "BTC", "--config", str(cfg.path)])
     assert r.exit_code == 0, r.output
 
+
+def test_cli_tail_carries_on_past_a_failing_coin(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    from perp_lab.data import live
+    cfg = market_config(tmp_path)
+
+    def tail(c, s, tf, ex):
+        if s == "ETHUSDT":
+            raise ccxt.BadSymbol("binance does not have market symbol ETH/USDT:USDT")
+        return 3
+    monkeypatch.setattr(live, "make_exchange", lambda: object())
+    monkeypatch.setattr(live, "tail", tail)
+    r = CliRunner().invoke(app, ["tail", "--symbols", "BTC,ETH,SOL", "--tfs", "1h", "--config", str(cfg.path)])
+    assert r.exit_code == 1
+    assert "BTCUSDT 1h: +3" in r.output and "ETHUSDT 1h: failed: BadSymbol" in r.output
+    assert "SOLUSDT 1h: +3" in r.output and "tail failed for: ETHUSDT 1h" in r.output
