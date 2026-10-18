@@ -3,8 +3,10 @@
 Status: research note, written by us without an outside brief. Section 5 is the spec that the
 next task implements, as written. Implementing the plugin spends no trial. Running its
 walk-forward does: N goes from 6 to 7 store-wide, so that run is the user's call. Section 6 gives
-the one command for it, `lab judge flow_shock_fade --tf 1h`; without `--tf 1h` the judge runs at
-4h and spends the trial on the wrong timeframe.
+the one command for it, `lab judge flow_shock_fade --tf 1h`. Run it only once the harness guards
+(branch `fix/judge-guards`) are on main: with them, `lab judge` refuses a timeframe the plugin
+doesn't declare instead of spending the trial at its 4h default, and `lab exam` refuses to spend a
+read over candles this plugin can't trade on.
 
 How this was done:
 - No internet of any kind. Everything below comes from the repo, from memory (each citation is
@@ -568,15 +570,15 @@ the 2022 H1 training half-year has 36 triggers even at `flow_x = 1.0` (look 5). 
    come through ccxt, whose OHLCV carries NaN taker columns (`perp_lab/data/live.py`). This plugin
    never fires on such candles.
    - `lab paper` couldn't trade it without first extending the live feed.
-   - Before `lab exam`, every candle in the exam window must come from data.binance.vision.
-     `lab backfill` after the window's last month has closed does that, and complete funding needs
-     that run anyway. Otherwise the exam can come up short of 10 trades and spend the family's
-     one read for nothing.
-   - Check it rather than assume it, before any `lab exam` while this plugin is pending (the
-     command examines every pending promotion at once): each symbol's
-     `data/<SYMBOL>/1h/_manifest.json` must show `"complete": true` with a data.binance.vision
-     source (`"monthly"`, or `"daily"` for a closed month) for every month from 2026-07 to the end
-     of the exam window, and none may show `"ccxt"`. Section 7, criterion 6, gives the details.
+   - Every candle in the exam window must come from data.binance.vision, or the exam can come up
+     short of 10 trades and spend the family's one read for nothing. With the harness guards,
+     `lab exam` checks this from the klines manifests before it mints: while any month of the
+     window, for any symbol, is stitched from ccxt, has no manifest entry, or is incomplete though
+     the window covers it to its end, the promotion stays `pending` / `incomplete_data`, no read
+     is spent, and `lab exam` prints the months. `lab backfill` rebuilds them (a closed month from
+     its monthly file, the current one from daily files up to yesterday); then run `lab exam`
+     again. Complete funding needs that backfill anyway.
+   - Section 7, criterion 6, keeps a manual manifest check as a cross-check.
 
 ## 6. How to run it
 
@@ -586,10 +588,11 @@ Run it once, with exactly this command:
 lab judge flow_shock_fade --tf 1h
 ```
 
-- **Always pass `--tf 1h`.** `lab judge` defaults to `--tf 4h` (`perp_lab/cli.py`), and nothing
-  checks the timeframe against the plugin's declared `timeframes`. `lab judge flow_shock_fade`
-  without the flag walks the plugin forward at 4h. That spends a trial on a run this research
-  never proposed, raises N for every later plugin, and still leaves the 1h run to do.
+- **Pass `--tf 1h`, and run it only with the harness guards on main.** `lab judge` defaults to
+  `--tf 4h` (`perp_lab/cli.py`). With the guards it refuses a timeframe the plugin doesn't declare
+  (`refused: flow_shock_fade declares timeframes 1h, not 4h`, exit 2, nothing recorded). Without
+  them, `lab judge flow_shock_fade` would walk the plugin forward at 4h: a trial spent on a run
+  this research never proposed, N raised for every later plugin, and the 1h run still to do.
 - **Don't run `lab walkforward` first.** The judge runs its own walk-forward. A prior
   `lab walkforward flow_shock_fade --tf 1h` adds no trial, because N counts distinct (plugin
   version, timeframe) pairs, but the judge doesn't reuse it, so it only doubles the compute.
@@ -599,7 +602,7 @@ lab judge flow_shock_fade --tf 1h
   free retry either.
 - The judge needs the sandbox and refuses to run without one.
 - A promotion only queues the holdout exam. Run `lab exam` only after the checks in section 7,
-  criterion 6.
+  criterion 6; if one fails, withdraw the promotion as that criterion says.
 
 ## 7. What would kill it
 
@@ -632,17 +635,23 @@ Each of these ends this line of research. None of them is a reason to write a tw
 6. **Before the exam: concentration, sides and data.** The judge promotes on its own, but
    `lab exam` is a separate command, and it examines every pending promotion at once. So while
    this plugin is pending, these checks come before any `lab exam`, whichever plugin it is run
-   for. There is no command to withdraw a pending promotion: if a check fails, not spending the
-   family's read means not running `lab exam` at all until it is resolved.
+   for. If a check fails, withdraw the promotion rather than hold `lab exam` back for every
+   family: `lab withdraw flow_shock_fade --tf 1h --reason "<the check that failed>"`. It is
+   refused once the read is minted, the family keeps its read, and the withdrawal is recorded in
+   `withdrawals.jsonl` next to the holdout log. These checks are fixed here, before the
+   walk-forward, and read no holdout data, so a withdrawal on one is not a choice made after
+   seeing an exam.
    - Concentration. Check the per-symbol and per-fold OOS results. If one symbol or one 2-month
      fold supplies more than half of the OOS net P&L, treat the effect as not established, and
-     don't spend the family's read on it.
+     withdraw the promotion.
    - Sides. The verdict file's `walkforward.run_id` names the judge's walk-forward run, and
      `walkforward.report` points into its directory (`runs/<run_id>/` by default), which also
      holds `oos_trades.parquet`. Sum `pnl_gross` by `side` over it. If either side's gross is
      ≤ 0, the pass is not the symmetric reversion this plugin claims (when only the longs made
-     money, it is drift; section 4). Don't spend the family's read on it.
-   - Data. For every symbol, the 1h klines manifest under the config's `data_dir` (for example
+     money, it is drift; section 4). Withdraw the promotion.
+   - Data. `lab exam` checks this itself with the harness guards and waits as `pending` /
+     `incomplete_data` rather than mint over such months (section 5, harness note 3). As a
+     cross-check: for every symbol, the 1h klines manifest under the config's `data_dir` (for example
      `data/BTCUSDT/1h/_manifest.json`) must show `"complete": true` and `"source": "monthly"` for
      every month from 2026-07 to the month in which the exam window ends. (`"source": "daily"`
      with `"complete": true` is also fine: a closed month rebuilt from data.binance.vision's daily
@@ -650,15 +659,15 @@ Each of these ends this line of research. None of them is a reason to write a tw
      never turns into `"monthly"`.) The window runs to the last 00:00 UTC for which every symbol
      has candles and funding, so any month `lab tail` has stitched is inside it. `lab tail` marks
      such a month `"complete": false, "source": "ccxt"`, and its candles have NaN taker columns,
-     on which this plugin can't fire. A `lab backfill` after the month has closed replaces them,
-     but one narrowed with `--tfs` or `--datasets` so that it skips 1h klines leaves them in
-     place.
+     on which this plugin can't fire. A `lab backfill` replaces them (a closed month from its
+     monthly file, the current one from daily files up to yesterday), but one narrowed with
+     `--tfs` or `--datasets` so that it skips 1h klines leaves them in place.
 7. **The holdout exam fails.** The family ends; by rule it gets one read.
 
 Two results that rule out any child:
 - The long side's gross P&L is positive while the short side's is not. That is drift (about two
-  thirds of the trades are long), not the symmetric mechanism, and it also stops the exam
-  (criterion 6).
+  thirds of the trades are long), not the symmetric mechanism, and it is a reason to withdraw
+  the promotion before the exam (criterion 6).
 - All the profit comes from the 2022 crash months. This one kills nothing by itself.
 
 ## 8. Data looks
