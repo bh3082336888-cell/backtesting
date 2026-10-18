@@ -1,0 +1,8 @@
+Trades per symbol over 2022-07 -> 2026-07, median [min, max] over symbols; pooled minima per window:
+ flow_x  hold per_symbol_lower per_symbol_upper  total_lower  long_share  pooled_6m_min  pooled_2m_min
+    0.5     6    357 [246,593]    442 [293,754]         3013        0.64            275             58
+    0.5    12    327 [229,530]    442 [293,754]         2740        0.64            251             52
+    0.5    24    277 [203,429]    442 [293,754]         2330        0.64            213             47
+    1.0     6      75 [44,131]      93 [50,150]          673        0.67             52              5
+    1.0    12      71 [43,127]      93 [50,150]          647        0.68             48              5
+    1.0    24      67 [43,121]      93 [50,150]          609        0.68             46              5

@@ -1,8 +1,10 @@
 """The confined worker and its trusted client: batch runs, limits, failures and confinement seen
 through a real worker. Tests marked `sandbox` spawn real workers; the rest run on the twin."""
 
+import ast
 import ctypes
 import errno
+import json
 import os
 import select
 import subprocess
@@ -324,19 +326,296 @@ def test_data_and_runs_are_unreadable(cfg):
 
 
 @pytest.mark.sandbox
-def test_a_forged_token_cannot_load_holdout_bars(cfg, tmp_path):
+def test_a_plugin_can_neither_mint_a_token_nor_read_holdout_bars(cfg, tmp_path):
+    # The worker never loads perp_lab.holdout (where _MINT_KEY lives), and once sealed it can't
+    # load anything, so no token can be minted inside it; the holdout bars can't be opened anyway.
     token = issue_holdout_token("lin", "test", tmp_path / "log.jsonl")
     assert len(load_candles(cfg, "BTCUSDT", "4h", holdout=token)) > 0   # the bars are there to read
+    parquet = cfg.data_dir / "BTCUSDT" / "4h" / "all.parquet"
     src = plugin("forger", f"""
-        from perp_lab import holdout
-        from perp_lab.config import Config
-        from perp_lab.data.store import load_bars
-        tok = holdout.HoldoutToken("lin", "forged", "n", holdout._MINT_KEY)
-        holdout.check_token(tok)                      # minting works inside the worker...
-        load_bars(Config(raw={cfg.raw!r}), "BTCUSDT", "4h", holdout=tok)   # ...reading doesn't
-        raise RuntimeError("holdout bars were read")""")
+        import errno
+        out = []
+        try:
+            import perp_lab.holdout
+            out.append("imported")
+        except ImportError as e:
+            out.append(type(e).__name__)
+        try:
+            open({str(parquet)!r}, "rb").read(1)
+            out.append("read")
+        except OSError as e:
+            out.append(type(e).__name__ + ":" + errno.errorcode[e.errno])
+        raise RuntimeError(" ".join(out))""")
     e = plugin_error(batch_run, cfg, src)
-    assert e.kind == "exception" and e.type in ("FileNotFoundError", "PermissionError"), e.reason()
+    assert e.message == "ModuleNotFoundError PermissionError:EPERM", e.reason()
+
+
+@pytest.mark.sandbox
+def test_a_sealed_plugin_can_open_stat_or_readlink_nothing(cfg):
+    # The allowlist is readable while the worker loads its modules; once sealed, no path resolves.
+    stdlib, ours, link = json.__file__, REPO / "perp_lab" / "strategy.py", Path(sys.base_prefix, "bin", "python3")
+    assert Path(stdlib).is_file() and ours.is_file() and link.is_symlink()
+    src = plugin("sealed", f"""
+        import errno
+        out = []
+        for fn in (lambda: open({stdlib!r}, "rb"), lambda: open({str(ours)!r}, "rb"),
+                   lambda: os.stat({stdlib!r}), lambda: os.lstat({str(ours)!r}),
+                   lambda: os.readlink({str(link)!r}), lambda: os.listdir({str(ours.parent)!r})):
+            try:
+                fn()
+                out.append("OK")
+            except OSError as e:
+                out.append(errno.errorcode[e.errno])
+        raise RuntimeError(" ".join(out))""")
+    e = plugin_error(batch_run, cfg, src)
+    assert e.message == "EPERM EPERM EPERM EPERM EPERM EPERM", e.reason()
+
+
+OLD_NS = 10**18                                       # 2001-09-09: older than any relatime window
+
+
+@pytest.mark.sandbox
+def test_a_plugin_moves_no_access_time(cfg, tmp_path):
+    # On a relatime mount, reading a file, and following or reading a symlink, each update its
+    # access time when that is old: a bit per file per day a worker could leave for a later one,
+    # which anyone reads back with stat(). Checked from outside, on a scratch file inside the
+    # allowlist (the virtualenv: this user's, and no repo file) and on a symlink to it.
+    if not os.access(sys.prefix, os.W_OK):              # a system Python: sys.prefix is /usr
+        pytest.skip(f"needs a scratch file in sys.prefix, and {sys.prefix} isn't writable")
+    target = Path(sys.prefix) / f"perp_lab_atime_test_{os.getpid()}_{time.monotonic_ns()}.txt"
+    link = tmp_path / "link"
+    link.symlink_to(target)
+
+    def age():
+        os.utime(target, ns=(OLD_NS, OLD_NS))
+        os.utime(link, ns=(OLD_NS, OLD_NS), follow_symlinks=False)
+
+    def atimes():
+        return os.lstat(link).st_atime_ns, os.stat(target).st_atime_ns
+    try:
+        target.write_text("x")
+        age()
+        target.read_bytes()                               # a read from outside moves both: the
+        os.readlink(link)                                 # mount does record access times here
+        assert OLD_NS not in atimes()
+        age()
+        src = plugin("toucher", f"""
+            import errno
+            out = []
+            for fn in (lambda: os.stat({str(link)!r}), lambda: os.readlink({str(link)!r}),
+                       lambda: open({str(link)!r}, "rb").read(1), lambda: open({str(target)!r}, "rb").read(1)):
+                try:
+                    fn()
+                    out.append("OK")
+                except OSError as e:
+                    out.append(errno.errorcode[e.errno])
+            raise RuntimeError(" ".join(out))""")
+        e = plugin_error(batch_run, cfg, src)
+        assert atimes() == (OLD_NS, OLD_NS)
+        assert e.message == "EPERM EPERM EPERM EPERM", e.reason()
+    finally:
+        target.unlink(missing_ok=True)
+
+
+# The modules a plugin may import (perp_lab/strategy.py's contract), and the ones they load.
+PLUGIN_IMPORTS = ["math", "numpy", "pandas", "perp_lab.strategy", "perp_lab.indicators", "perp_lab.engine.backtest"]
+
+
+@pytest.mark.sandbox
+def test_a_plugin_can_import_only_what_the_worker_preloaded(cfg):
+    src = plugin("importer", f"""
+        import sys
+        for name in {PLUGIN_IMPORTS!r}:
+            __import__(name)
+        for sub in ("char", "ctypeslib", "fft", "polynomial", "rec", "strings"):
+            getattr(np, sub)                          # numpy 2 loads these on first use
+        print(bars.head())                            # pandas loads its frame formatter on first use
+        assert "colorsys" not in sys.modules          # standard library, on the allowlist, never loaded
+        import colorsys
+        return bars[[]]""")
+    e = plugin_error(batch_run, cfg, src)
+    assert (e.kind, e.type) == ("exception", "ModuleNotFoundError") and "colorsys" in e.message, e.reason()
+    assert e.reason().startswith("plugin_error: exception: ModuleNotFoundError: ")
+
+
+@pytest.mark.sandbox
+def test_a_sealed_plugin_can_neither_see_nor_steer_the_page_cache(cfg):
+    # Which pages of a mapped library are resident is a channel to a later reader (mincore, or
+    # fault timing): no residency query, no eviction or prefetch advice. MADV_HUGEPAGE is prefetch
+    # on a file mapping (a fault reads a whole 2 MiB folio in, which a live mapping of any of its
+    # pages then keeps resident past the eviction). Freeing memory and plain allocation still work,
+    # large arrays included: numpy's MADV_HUGEPAGE hint on them is refused, and numpy ignores that.
+    src = plugin("pagecache", """
+        import ctypes, errno
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mmap.restype = ctypes.c_void_p
+        libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+        libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        libc.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p]
+        page = 4096
+        lib = ctypes.cast(libc.mmap, ctypes.c_void_p).value & ~(page - 1)    # a page of libc: file-backed
+        anon = libc.mmap(None, 4 * page, 3, 0x22, -1, 0)                     # read-write, private, anonymous
+
+        def call(fn, *args):
+            return "OK" if fn(*args) == 0 else errno.errorcode[ctypes.get_errno()]
+        out = [call(libc.mincore, lib, page, ctypes.create_string_buffer(1))]
+        out += [call(libc.madvise, lib, page, a) for a in (21, 20, 3, 14)]  # PAGEOUT, COLD, WILLNEED, HUGEPAGE
+        out += [call(libc.madvise, anon, page, a) for a in (22, 23)]        # POPULATE_READ, POPULATE_WRITE
+        out += [call(libc.madvise, anon, page, 4)]                          # DONTNEED
+        out.append("OK" if np.ones(1 << 23).sum() == 1 << 23 else "BAD")    # 64 MiB, allocated and freed
+        raise RuntimeError(" ".join(out))""")
+    e = plugin_error(batch_run, cfg, src)
+    assert e.message == "EPERM EPERM EPERM EPERM EPERM EPERM EPERM OK OK", e.reason()
+
+
+@pytest.mark.sandbox
+def test_pandas_methods_that_load_code_lazily_work_in_a_sealed_worker(cfg):
+    src = plugin("lazy", """
+        f = bars[["close", "open"]].head()
+        out = []
+        for fn in (lambda: f.to_dict(), lambda: f.stack().unstack(), lambda: f["close"].to_frame().unstack(),
+                   lambda: pd.crosstab(bars.regime, bars.regime), lambda: f.to_csv()):
+            try:
+                fn()
+                out.append("ok")
+            except Exception as e:
+                out.append(f"{type(e).__name__}:{e}")
+        raise RuntimeError(" ".join(out))""")
+    e = plugin_error(batch_run, cfg, src)
+    assert e.message == "ok ok ok ok ok", e.reason()
+
+
+PRELOADED = """
+import json, sys
+from perp_lab.sandbox import worker
+worker._preload()
+print(json.dumps(sorted(sys.modules)))
+"""
+# Modules numpy and pandas import inside functions that the worker does not preload, each with why
+# a plugin doesn't need it. Anything else such a function imports must be preloaded: a sealed
+# worker can't load it, so the method would fail with ModuleNotFoundError.
+NOT_PRELOADED = {
+    "numpy.core": "deprecated alias of numpy._core",
+    "numpy.f2py": "Fortran wrapper generator",
+    "numpy.matlib": "deprecated matrix library",
+    "numpy.testing": "test helpers",
+    "numpy.lib.recfunctions": "imported only by numpy.testing",
+    "numpy._core._multiarray_tests": "numpy's own tests",
+    "pandas._version": "pd.show_versions()",
+    "pandas.core._numba": "the numba engine (numba is not installed)",
+    "pandas.core.arrays.arrow": "Arrow-backed extension dtypes, from Arrow data a plugin never gets",
+    "pandas.core.arrays.sparse.scipy_sparse": "scipy (not installed)",
+    "pandas.core.interchange": "the dataframe interchange protocol, for other libraries",
+    "pandas.io.clipboard": "clipboard I/O",
+    "pandas.io.formats.excel": "Excel I/O (openpyxl)",
+    "pandas.io.formats.html": "HTML output",
+    "pandas.io.formats.style": "Styler (jinja2)",
+    "pandas.io.formats.xml": "XML output (lxml)",
+    "pandas.io.sas": "SAS file I/O",
+    "pandas.plotting": "plotting (matplotlib)",
+}
+
+
+def _lazy_imports(package: str, loaded: set[str]) -> dict[str, list[str]]:
+    """Modules of `package` imported inside its functions and not in `loaded`: {module: [where]}."""
+    root = Path(__import__(package).__file__).parent
+
+    def is_module(name):
+        base = root.parent.joinpath(*name.split("."))
+        return base.with_suffix(".py").is_file() or (base / "__init__.py").is_file() \
+            or any(base.parent.glob(base.name + ".*.so"))
+    found: dict[str, list[str]] = {}
+    for path in sorted(root.rglob("*.py")):
+        if "tests" in path.relative_to(root).parts:
+            continue
+        here = ".".join(path.relative_to(root.parent).with_suffix("").parts).removesuffix(".__init__")
+        package_of_here = here if path.name == "__init__.py" else here.rpartition(".")[0]
+        for fn in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Import):
+                    targets = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    base = node.module or ""
+                    if node.level:
+                        pkg = package_of_here
+                        for _ in range(node.level - 1):
+                            pkg = pkg.rpartition(".")[0]
+                        base = f"{pkg}.{base}" if base else pkg
+                    targets = [base] + [f"{base}.{a.name}" for a in node.names if is_module(f"{base}.{a.name}")]
+                else:
+                    continue
+                for t in targets:
+                    if t.split(".")[0] == package and t not in loaded:
+                        found.setdefault(t, []).append(f"{path.relative_to(root)}:{node.lineno}")
+    return found
+
+
+@pytest.mark.parametrize("package", ["numpy", "pandas"])
+def test_the_preload_leaves_no_lazy_import_a_plugin_could_hit(package):
+    # A fresh interpreter launched as the worker is: what it holds after _preload() is what a
+    # sealed worker has. (Confinement doesn't change which modules load, so none is needed here.)
+    r = subprocess.run([sys.executable, "-s", "-P", "-c", PRELOADED], env=client.ENV, cwd="/", capture_output=True,
+                       text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    lazy = _lazy_imports(package, set(json.loads(r.stdout)))
+    unexplained = {m: w[:3] for m, w in lazy.items()
+                   if not any(m == x or m.startswith(x + ".") for x in NOT_PRELOADED)}
+    assert not unexplained, unexplained
+
+
+NO_SEAL = """
+import sys
+from perp_lab.sandbox import confine, worker
+confine.seal = lambda: None                           # a seal that silently did nothing
+sys.exit(worker.main(sys.argv[1:]))
+"""
+
+
+def _unavailable(r) -> str:
+    """The message of the "unavailable" error a worker run by hand reported, or the test fails."""
+    assert r.returncode == worker.UNAVAILABLE_EXIT, (r.returncode, r.stderr)
+    n = int.from_bytes(r.stdout[:4], "big")
+    error = json.loads(r.stdout[4:4 + n])["error"]
+    assert error["kind"] == "unavailable", error
+    return error["message"]
+
+
+def _by_hand(cfg, *python_args, stdin=subprocess.DEVNULL):
+    return subprocess.run([sys.executable, "-s", "-P", *python_args, "--deny-probe", str(cfg.path), "--memory-mb",
+                           "3072", "--cpu-s", "60", "--parent-pid", str(os.getpid())],
+                          env=client.ENV, cwd="/", stdin=stdin, capture_output=True, timeout=120)
+
+
+@pytest.mark.sandbox
+def test_a_worker_whose_seal_did_not_take_is_unavailable(cfg):
+    assert "sealed open" in _unavailable(_by_hand(cfg, "-c", NO_SEAL))
+
+
+@pytest.mark.sandbox
+def test_a_sealed_worker_holding_anything_but_pipes_is_unavailable(cfg, tmp_path):
+    # A descriptor on a file would let it read the file (moving its access time) without opening
+    # anything. Here the protocol's input is a file instead of the parent's pipe.
+    held = tmp_path / "held.txt"
+    held.write_bytes(b"x")
+    with open(held, "rb") as f:
+        message = _unavailable(_by_hand(cfg, "-m", "perp_lab.sandbox.worker", stdin=f))
+    assert "fd 3 is not a pipe" in message, message
+
+
+@pytest.mark.sandbox
+def test_the_seal_comes_before_any_plugin_code(cfg):
+    # Code at a plugin's module level runs as the worker loads it: sealed already.
+    src = plugin("early", "raise RuntimeError(AT_LOAD)", tail="""
+        import errno
+        try:
+            open(np.__file__, "rb").close()
+            AT_LOAD = "OK"
+        except OSError as e:
+            AT_LOAD = errno.errorcode[e.errno]
+        """)
+    assert plugin_error(batch_run, cfg, src).message == "EPERM"
 
 
 @pytest.mark.sandbox
@@ -399,34 +678,6 @@ def test_a_plugin_cannot_change_file_metadata(cfg, tmp_path):
     assert (after.st_mode, after.st_uid, after.st_gid) == (before.st_mode, before.st_uid, before.st_gid)
     assert (after.st_mtime_ns, after.st_ctime_ns) == (before.st_mtime_ns, before.st_ctime_ns)   # chown moves ctime
     assert os.listxattr(target) == ["user.kept"] and os.getxattr(target, "user.kept") == b"v"
-
-
-@pytest.mark.sandbox
-def test_a_plugin_cannot_set_inode_flags(cfg):
-    # On a file it may open (its own package's source, owned by this user), setting the flags,
-    # attributes and write hint it already has would change nothing, and is still refused.
-    src = plugin("chattr", """
-        import errno, fcntl
-        import perp_lab
-        out = []
-        fd = os.open(perp_lab.__file__, os.O_RDONLY)
-        try:
-            flags = fcntl.ioctl(fd, 0x80086601, bytes(8))            # FS_IOC_GETFLAGS
-            attrs = fcntl.ioctl(fd, 0x801C581F, bytes(28))           # FS_IOC_FSGETXATTR
-            hint = fcntl.fcntl(fd, 1035, bytes(8))                   # F_GET_RW_HINT
-            for fn in (lambda: fcntl.ioctl(fd, 0x40086602, flags),   # FS_IOC_SETFLAGS
-                       lambda: fcntl.ioctl(fd, 0x401C5820, attrs),   # FS_IOC_FSSETXATTR
-                       lambda: fcntl.fcntl(fd, 1036, hint)):         # F_SET_RW_HINT
-                try:
-                    fn()
-                    out.append("OK")
-                except OSError as e:
-                    out.append(errno.errorcode[e.errno])
-        finally:
-            os.close(fd)
-        raise RuntimeError(" ".join(out))""")
-    e = plugin_error(batch_run, cfg, src)
-    assert e.message == "EPERM EPERM EPERM", e.reason()
 
 
 PARENT = """
@@ -583,6 +834,24 @@ def test_a_reply_that_fails_to_parse_is_logged_with_its_traceback(caplog):
     text = rec.getMessage()
     assert "4242" in text and "Traceback" in text and "in parse" in text
     assert "ValueError: a parser bug near ?[2J??" in text           # printable only
+
+
+def test_mapped_files_that_cannot_be_read_are_logged(caplog):
+    # A worker whose /proc/<pid>/maps can't be read at ready would have nothing evicted after its
+    # exam: a warning. At close it is only a note: a sealed worker maps nothing new, so what ready
+    # noted is still evicted, and a plugin can make its maps unreadable at will (PR_SET_DUMPABLE 0).
+    class Fake:
+        pid = -1                                  # /proc/-1 doesn't exist
+        _mapped = {"/usr/lib/libfake.so"}
+    with caplog.at_level("INFO", logger="perp_lab.sandbox.client"):
+        client.Worker._note_mapped(Fake(), "ready")
+        client.Worker._note_mapped(Fake(), "close")
+    ready, close = [r for r in caplog.records if r.name == "perp_lab.sandbox.client"]
+    text = ready.getMessage()
+    assert ready.levelname == "WARNING" and "worker -1" in text and "ready" in text and "won't be evicted" in text, text
+    text = close.getMessage()
+    assert close.levelname == "INFO" and "worker -1" in text and "close" in text, text
+    assert "the 1 file noted at ready is still evicted" in text, text
 
 
 def test_error_reply_is_printable_and_capped():

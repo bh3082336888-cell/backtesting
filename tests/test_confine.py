@@ -1,7 +1,9 @@
 """Confinement: every escape a plugin could try fails, checked from outside where the test can.
 
 Each test runs tests/confine_probe.py in a fresh interpreter launched the way the worker is
-(`-s -P`, the spec's environment, cwd /, a new session), since confinement can't be undone.
+(`-s -P`, the spec's environment, cwd /, a new session), since confinement can't be undone. Most
+probes apply stage 1 only (`confine()`); a worker also seals itself (`seal()`) before plugin code
+runs, which tests/test_worker.py checks through real workers.
 """
 
 import ctypes
@@ -80,6 +82,7 @@ EXPECTED = {
     "fcntl_setlk": "DENIED EPERM",
     "fcntl_ofd_setlk": "DENIED EPERM",
     "fcntl_notify": "DENIED EPERM",               # seccomp: a directory watch, like inotify
+    "set_inode_flags": "DENIED EPERM",            # seccomp: chattr on a file it may open
 }
 
 
@@ -104,6 +107,8 @@ def test_each_escape_is_denied(probe, tmp_path):
         target = Path(socket.__file__)            # on the allowlist: the open works, the lock doesn't
     elif probe == "fcntl_notify":
         target = Path(socket.__file__).parent
+    elif probe == "set_inode_flags":
+        target = REPO / "perp_lab" / "__init__.py"   # this user's, on the allowlist
     elif probe == "mq_open":
         target = f"/perp_lab_confine_{os.getpid()}"
         assert not _queue_left(target)
@@ -146,6 +151,18 @@ def test_numpy_pandas_pyarrow_import_after_confinement():
     assert len(threads) == count >= 2, out
     assert all(line.endswith(" DENIED EACCES") for line in threads), out
     assert out[-1] == "DENIED EACCES"
+
+
+def test_the_seal_reaches_every_thread():
+    # seal() runs once numpy and pyarrow have started their threads; seccomp's thread sync must
+    # reach those too, or plugin code could borrow one to open files (through ctypes).
+    import numpy
+    out = run_probe("seal_every_thread", Path(numpy.__file__))
+    threads = [line for line in out if line.startswith("THREAD ")]
+    count = int(next(line for line in out if line.startswith("THREADS ")).split()[1])
+    assert len(threads) == count >= 2, out
+    assert all(line.endswith(" DENIED EPERM") for line in threads), out
+    assert out[-1] == "DENIED EPERM"
 
 
 def test_priority_of_this_process_still_works():
@@ -233,10 +250,11 @@ def _highest_known(lib, arch) -> int:
     return top
 
 
-def _filter_bpf() -> bytes:
-    """confine's seccomp filter as the kernel would be given it, exported without loading it."""
+def _filter_bpf(stage: int = 1) -> bytes:
+    """confine's seccomp filter (stage 1) or seal's (stage 2) as the kernel would be given it,
+    exported without loading it."""
     lib = confine._seccomp()
-    ctx = confine._build_filter(lib)
+    ctx = confine._build_filter(lib, stage)
     fd = os.memfd_create("seccomp-bpf")
     try:
         assert lib.seccomp_export_bpf(ctx, fd) == 0
@@ -326,6 +344,163 @@ def test_the_filter_pins_every_rule():
     assert _run_bpf(prog, 0x40000003, 20) == KILL_PROCESS            # i386
     if os.uname().machine == "x86_64":
         assert run(0x40000000 | 39) == KILL_PROCESS                   # x32
+
+
+# Stage 2 (Confinement, the seal): every call that resolves a pathname, so a sealed worker follows
+# and reads no symlink and opens, stats or names no file.
+PATHNAME = """
+    open openat openat2 creat open_by_handle_at name_to_handle_at uselib execve execveat
+    stat lstat newfstatat statx statfs access faccessat faccessat2 readlink readlinkat
+    chdir chroot pivot_root mount umount2 open_tree move_mount fsopen fsconfig fspick mount_setattr
+    mkdir mkdirat mknod mknodat rmdir unlink unlinkat rename renameat renameat2 link linkat symlink symlinkat
+    truncate acct swapon swapoff quotactl inotify_add_watch fanotify_mark
+    chmod fchmodat chown lchown fchownat utime utimes utimensat futimesat
+    getxattr lgetxattr setxattr lsetxattr removexattr lremovexattr listxattr llistxattr""".split()
+NEWER_PATHNAME = {**NEWER, "open_tree_attr": 467}     # every one of NEWER takes a path too
+# What a sealed worker still does with what it holds: its pipes, memory, threads.
+SEALED_ALLOWED = """read write close fstat fstatfs lseek mmap munmap mprotect futex fcntl ioctl getdents64 fchdir
+    getcwd dup dup3 pipe2 clone memfd_create getrandom clock_gettime exit_group""".split()
+
+
+def test_the_seal_pins_every_rule():
+    lib, seal, stage1 = _scmp(), _filter_bpf(2), _filter_bpf(1)
+    arch = lib.seccomp_arch_native()
+
+    def nr(name):
+        n = lib.seccomp_syscall_resolve_name(name.encode())
+        assert n != -1, f"libseccomp cannot name {name}"
+        return n
+
+    for name in PATHNAME:
+        if nr(name) >= 0:                     # (a negative number: no such call on this architecture)
+            assert _run_bpf(seal, arch, nr(name)) == EPERM, name
+            assert _run_bpf(seal, arch, nr(name), [JUNK | 7] * 6) == EPERM, name
+    for name, n in NEWER_PATHNAME.items():    # unknown to this libseccomp: stage 1's ENOSYS stands in
+        known = lib.seccomp_syscall_resolve_name(name.encode()) == n
+        assert (_run_bpf(seal, arch, n) == EPERM) if known else (_run_bpf(stage1, arch, n) == ENOSYS), name
+    for name in SEALED_ALLOWED:
+        if nr(name) >= 0:
+            assert _run_bpf(seal, arch, nr(name)) == ALLOW, name
+    assert _run_bpf(seal, 0x40000003, 5) == KILL_PROCESS                 # i386 open
+    if os.uname().machine == "x86_64":
+        assert _run_bpf(seal, arch, 0x40000000 | 2) == KILL_PROCESS       # x32 open
+
+
+# The page cache of files a worker has mapped (its libraries): what it may not see or steer.
+MADV_DENIED = {"MADV_WILLNEED": 3, "MADV_HUGEPAGE": 14, "MADV_COLD": 20, "MADV_PAGEOUT": 21,
+               "MADV_POPULATE_READ": 22, "MADV_POPULATE_WRITE": 23, "MADV_COLLAPSE": 25}
+MADV_ALLOWED = {"MADV_NORMAL": 0, "MADV_RANDOM": 1, "MADV_SEQUENTIAL": 2, "MADV_DONTNEED": 4, "MADV_FREE": 8,
+                "MADV_NOHUGEPAGE": 15, "MADV_DONTDUMP": 16, "MADV_DODUMP": 17}
+
+
+def test_the_seal_denies_reading_or_steering_the_page_cache():
+    lib, seal, stage1 = _scmp(), _filter_bpf(2), _filter_bpf(1)
+    arch = lib.seccomp_arch_native()
+    assert _run_bpf(seal, arch, lib.seccomp_syscall_resolve_name(b"mincore")) == EPERM
+    cachestat = lib.seccomp_syscall_resolve_name(b"cachestat")
+    if cachestat == -1:                       # newer than this libseccomp: stage 1's ENOSYS answers it
+        assert _run_bpf(stage1, arch, 451) == ENOSYS
+    else:
+        assert _run_bpf(seal, arch, cachestat) == EPERM
+    madvise = lib.seccomp_syscall_resolve_name(b"madvise")
+    for name, advice in MADV_DENIED.items():
+        assert _run_bpf(seal, arch, madvise, (0x7F0000000000, 4096, advice)) == EPERM, name
+        assert _run_bpf(seal, arch, madvise, (0x7F0000000000, 4096, JUNK | advice)) == EPERM, name
+    for name, advice in MADV_ALLOWED.items():
+        assert _run_bpf(seal, arch, madvise, (0x7F0000000000, 4096, advice)) == ALLOW, name
+
+
+# Every other syscall this libseccomp names on x86_64; none of them resolves a pathname. (On aarch64
+# a name missing from every list below fails the classification test until someone classifies it.)
+PATH_FREE = """
+    _sysctl accept accept4 adjtimex afs_syscall alarm arch_prctl brk capget capset clock_adjtime clock_getres
+    clock_gettime clock_nanosleep clock_settime clone clone3 close close_range copy_file_range
+    create_module dup dup2 dup3 epoll_create epoll_create1 epoll_ctl epoll_ctl_old epoll_pwait epoll_pwait2
+    epoll_wait epoll_wait_old eventfd eventfd2 exit exit_group fadvise64 fallocate fchdir fcntl fdatasync fsmount
+    fstat fstatfs fsync ftruncate futex futex_requeue futex_wait futex_waitv futex_wake get_kernel_syms
+    get_mempolicy get_robust_list get_thread_area getcpu getcwd getdents getdents64 getegid geteuid getgid
+    getgroups getitimer getpeername getpgid getpgrp getpid getpmsg getppid getpriority getrandom getresgid
+    getresuid getrlimit getrusage getsid getsockname getsockopt gettid gettimeofday getuid inotify_rm_watch
+    io_cancel io_destroy io_getevents io_pgetevents io_setup io_submit ioctl ioperm iopl ioprio_get ioprio_set
+    kill landlock_add_rule landlock_create_ruleset landlock_restrict_self listen lookup_dcookie lseek madvise
+    map_shadow_stack mbind membarrier memfd_create memfd_secret mlock mlock2 mlockall mmap modify_ldt mprotect
+    mremap msync munlock munlockall munmap nanosleep nfsservctl pause personality pidfd_send_signal pipe pipe2
+    pkey_alloc pkey_free pkey_mprotect poll ppoll prctl pread64 preadv preadv2 prlimit64 process_mrelease pselect6
+    putpmsg pwrite64 pwritev pwritev2 query_module quotactl_fd read readahead readv reboot recvfrom recvmmsg
+    recvmsg remap_file_pages restart_syscall rseq rt_sigaction rt_sigpending rt_sigprocmask rt_sigqueueinfo
+    rt_sigreturn rt_sigsuspend rt_sigtimedwait rt_tgsigqueueinfo sched_get_priority_max sched_get_priority_min
+    sched_getaffinity sched_getattr sched_getparam sched_getscheduler sched_rr_get_interval sched_setaffinity
+    sched_setattr sched_setparam sched_setscheduler sched_yield seccomp security select sendfile
+    set_mempolicy set_mempolicy_home_node set_robust_list set_thread_area set_tid_address setdomainname
+    setfsgid setfsuid setgid setgroups sethostname setitimer setpgid setpriority setregid setresgid setresuid
+    setreuid setrlimit setsid setsockopt settimeofday setuid shutdown sigaltstack signalfd signalfd4 splice sync
+    sync_file_range syncfs sysfs sysinfo syslog tee tgkill time timer_create timer_delete timer_getoverrun
+    timer_gettime timer_settime timerfd_create timerfd_gettime timerfd_settime times tkill tuxcall umask uname
+    ustat vhangup vmsplice vserver wait4 waitid write writev""".split()
+# These resolve a path only as a UNIX socket's address, and a worker can't hold a socket: stage 1
+# denies socket and socketpair, and the sealed self-test finds nothing but pipes.
+SOCKET_ADDRESS = "bind connect sendto sendmsg sendmmsg".split()
+
+
+def test_every_syscall_this_libseccomp_names_is_classified():
+    # So a libseccomp that learns a new path-taking call can't leave it allowed unseen: each name is
+    # resolves-a-path (the seal denies it: pinned above), always denied by stage 1 (pinned above),
+    # page cache (pinned above) or listed as path-free.
+    lib = _scmp()
+    libc = ctypes.CDLL(None)
+    libc.free.argtypes = [ctypes.c_void_p]
+    arch, names = lib.seccomp_arch_native(), set()
+    for nr in range(1024):
+        name = lib.seccomp_syscall_resolve_num_arch(arch, nr)
+        if name:
+            names.add(ctypes.string_at(name).decode())
+            libc.free(name)
+    denied = set(PATHNAME) | set(NEWER_PATHNAME) | {"mincore", "cachestat"} | set(DENIED)
+    allowed = set(PATH_FREE) | set(SOCKET_ADDRESS)
+    assert not allowed & denied, sorted(allowed & denied)    # no name in two minds
+    assert not names - denied - allowed, sorted(names - denied - allowed)
+
+
+SEAL_ALONE = """
+import os, sys
+from perp_lab.sandbox import confine
+try:
+    confine.seal()
+    print("SEALED")
+except RuntimeError as e:
+    print("REFUSED", e)
+os.stat(sys.executable)                                # still works: nothing was loaded
+print("UNSEALED")
+"""
+
+
+def test_seal_refuses_without_stage_1():
+    # Stage 2 alone would leave everything stage 1 denies (and its ENOSYS range) allowed.
+    r = subprocess.run([sys.executable, "-s", "-P", "-c", SEAL_ALONE], env=ENV, cwd="/", capture_output=True,
+                       text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    first, last = r.stdout.splitlines()
+    assert first.startswith("REFUSED") and "confine()" in first and last == "UNSEALED", r.stdout
+
+
+@pytest.mark.parametrize("libc, reason", [
+    ("glibc 2.38", "glibc 2.38 < 2.39"), ("glibc 2.17", "glibc 2.17 < 2.39"),
+    (None, "glibc 2.39 or later needed, and this C library is not glibc"),
+    ("musl 1.2.5", "glibc 2.39 or later needed, and this C library is not glibc")])
+def test_probe_reports_a_c_library_whose_fstat_the_seal_breaks(monkeypatch, libc, reason):
+    def confstr(name):
+        assert name == "CS_GNU_LIBC_VERSION"
+        if libc is None:
+            raise ValueError("unrecognized configuration name")
+        return libc
+    monkeypatch.setattr(os, "confstr", confstr)
+    assert confine.probe() == reason
+
+
+@pytest.mark.parametrize("libc", ["glibc 2.39", "glibc 2.40", "glibc 3.0"])
+def test_probe_accepts_glibc_2_39_and_later(monkeypatch, libc):
+    monkeypatch.setattr(os, "confstr", lambda name: libc)
+    assert confine.probe() is None
 
 
 def test_probe_reports_none_here():

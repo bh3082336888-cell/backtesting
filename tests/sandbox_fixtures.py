@@ -2,7 +2,8 @@
 
 Tests without the `sandbox` marker get `InProcessWorker` in place of `client.spawn` (see the
 autouse fixture in conftest.py). It runs plugin code unconfined, in the test process, so it exists
-only here, under tests/.
+only here, under tests/. Nor does it seal the test process (`confine.seal`), so a plugin it runs
+can still open files and import any module; tests of the seal use real workers.
 """
 
 import contextlib
@@ -57,6 +58,7 @@ class InProcessWorker:
         self.pid = os.getpid()
         self.abi = None
         self.last_cpu_s = 0.0
+        self.mapped_files = frozenset()               # it maps no file of its own
         self._out = io.StringIO()
         self._index = None
         self._s = session.Session()                   # a fresh plugin module per instance

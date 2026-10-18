@@ -1,0 +1,15 @@
+2026-10-18 03:17:36,375 WARNING perp_lab.data.store: SOLUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-18 03:17:36,503 WARNING perp_lab.data.store: SOLUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-18 03:17:36,870 WARNING perp_lab.data.store: XRPUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-18 03:17:37,001 WARNING perp_lab.data.store: XRPUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+1h, 8 symbols pooled, research span 2022-01 -> 2026-07
+flow_x                                          0.5     0.5     1.0     1.0
+funding z_thr                                   1.5     2.0     1.5     2.0
+flow triggers                                  3998    3998     812     812
+funding_fade triggers                          2097    1118    2097    1118
+flow on a settlement bar                      0.121   0.121   0.128   0.128
+flow on a funding trigger bar                0.0085   0.004  0.0148  0.0074
+  same side                                  0.0043  0.0018  0.0074  0.0049
+all bars that are funding triggers           0.0067  0.0035  0.0067  0.0035
+flow within 24 bars after a funding trigger     0.1   0.055   0.107   0.063
+all bars within 24 bars after one             0.115   0.062   0.115   0.062

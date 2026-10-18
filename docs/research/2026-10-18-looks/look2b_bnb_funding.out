@@ -1,0 +1,14 @@
+           BTC  ETH  SOL  BNB  XRP  DOGE  AVAX  LINK
+time time                                           
+2022 0     543  543  528  296  528   543   543   543
+     1     552  552  627  263  552   552   552   552
+2023 0     543  543  543  274  543   543   543   543
+     1     552  552  552  314  552   552   552   552
+2024 0     546  546  546  335  546   546   545   546
+     1     552  552  552  181  552   552   552   552
+2025 0     543  543  543  183  543   543   543   543
+     1     552  552  552  201  552   552   552   552
+2026 0     543  543  543  186  543   543   543   543
+BNB bars at 00/08/16 UTC: 4926  with nonzero charge: 2233  funding_last NaN share: 0.0
+BNB zero-charge settlement-hour bars by year: {2022: 536, 2023: 507, 2024: 582, 2025: 711, 2026: 357}
+BNB settlement-hour bars whose funding_last is exactly 0 (a recorded zero rate, not a missing row): 2693
