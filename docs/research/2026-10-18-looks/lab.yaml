@@ -14,7 +14,7 @@ costs:
   maker: 0.0002
   slippage_bps: 2.0
   taker: 0.0005
-data_dir: /home/burhan/backtesting/data
+data_dir: ./data
 history_start: '2022-01-01'
 holdout_start: '2026-07-01'
 judge:
@@ -22,12 +22,10 @@ judge:
   dsr_min: 0.95
   exam_max_attempts: 3
   holdout_floor_pct: 5
-  holdout_log: /tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/runs/holdout_log.jsonl
   holdout_max_reads: 10
   holdout_min_trades: 10
   min_holdout_days: 180
   parent_beat_frac: 0.95
-  verdicts_dir: /tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/runs/verdicts
 margin_brackets:
   AVAXUSDT:
     cum: 0.0
@@ -69,7 +67,6 @@ regime:
   vol_high_pct: 0.8
   vol_n: 42
   vol_rank_window: 1080
-runs_dir: /tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/runs
 sandbox:
   exam_cpu_hours: 6
   max_output_mb: 64
@@ -78,8 +75,6 @@ sandbox:
   stream_step_s: 30
   task_cpu_s: 900
   wall_factor: 4
-store:
-  url: sqlite:////tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/lab.db
 timeframes:
 - 5m
 - 15m

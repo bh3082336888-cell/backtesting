@@ -2,13 +2,14 @@
 config; the default end is the holdout start (2026-07-01), and no end or token is ever passed."""
 
 from functools import lru_cache
+from pathlib import Path
 
 import pandas as pd
 
 from perp_lab.config import load_config
 from perp_lab.data.store import load_bars
 
-CFG_PATH = "/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/lab.yaml"
+CFG_PATH = Path(__file__).with_name("lab.yaml")     # run from the repo root: its data_dir is ./data
 CFG = load_config(CFG_PATH)
 SYMBOLS = CFG.symbols
 TFS = ["15m", "1h", "4h"]

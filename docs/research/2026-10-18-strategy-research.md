@@ -668,9 +668,8 @@ How the looks were done:
   `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/burhan/backtesting-research /home/burhan/backtesting/.venv/bin/python <script>`.
   Without `PYTHONPATH`, a script run by path resolves `perp_lab` to the main checkout's editable
   install.
-- All market data went through `common.py`. It loads the research config
-  `/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/lab.yaml`
-  and calls `perp_lab.data.store.load_bars(cfg, symbol, tf)` with no `end` and no token, so every
+- All market data went through `common.py`. It loads the research config (`lab.yaml`, next to
+  it) and calls `perp_lab.data.store.load_bars(cfg, symbol, tf)` with no `end` and no token, so every
   read ends at `holdout_start` (2026-07-01). It also asserts that the last bar is before the
   holdout start.
 - No script opens a data file, calls `load_funding` directly, or touches the holdout log, the
@@ -679,14 +678,20 @@ How the looks were done:
   the settlements that fall inside, or before, the returned bars, so no post-holdout rate reaches
   a bar.
 - Every script, its output (`*.out`), `common.py`, the research config `lab.yaml` and look 7's
-  draft are kept with this note, byte for byte as they ran, in
-  [`2026-10-18-looks/`](2026-10-18-looks/). None of the outputs holds a candidate's forward
-  return, P&L or hit rate; the only trade and exit counts in them are look 7's, on synthetic bars.
-- They ran from the scratch directory
-  `/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/`,
-  and `common.py`, `lab.yaml` and looks 7 and 7b still name paths there. To run one again, point
-  `common.CFG_PATH` (and look 7b's two paths) at the copies in `2026-10-18-looks/`; `lab.yaml`
-  reads the main checkout's `data/`, read-only.
+  draft are kept with this note in [`2026-10-18-looks/`](2026-10-18-looks/). None of the outputs
+  holds a candidate's forward return, P&L or hit rate; the only trade and exit counts in them are
+  look 7's, on synthetic bars.
+- They ran from a session scratch directory. Afterwards only their paths were changed, so that
+  they run from here; nothing else in them changed, and the outputs are as they ran:
+  - `common.py` and looks 7 and 7b find the config, the draft and the repo next to themselves,
+    where they named the scratch directory and the worktree;
+  - `lab.yaml`'s `data_dir` is `./data`, where it was the main checkout's absolute `data/`, and
+    its `runs_dir`, `store` and `judge.holdout_log` / `verdicts_dir` entries, which named the
+    scratch directory and which no look uses, are gone.
+
+  Rerun one from the repo root (the one with `data/`) as
+  `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python docs/research/2026-10-18-looks/<script>`. Looks 2b,
+  7 and 7b were rerun that way after the change, and their output matched the kept `.out` files.
 
 Directory: `docs/research/2026-10-18-looks/`
 

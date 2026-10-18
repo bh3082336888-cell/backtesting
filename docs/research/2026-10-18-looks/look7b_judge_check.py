@@ -2,7 +2,10 @@
 scratch draft, with the in-process worker twin the test suite uses, as the judge's lookahead check
 would. Confirms the spec's defaults are verifiable (signal on the judge's synthetic bars)."""
 import sys
-sys.path.insert(0, "/home/burhan/backtesting-research")
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[2]))                 # the repo root, for tests/
 from perp_lab.config import load_config
 from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client
@@ -11,8 +14,8 @@ from tests import sandbox_fixtures
 
 client.spawn = sandbox_fixtures.InProcessWorker
 client.check = lambda cfg: 8
-cfg = load_config("/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/lab.yaml")
-text = open("/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research/flow_shock_fade_draft.py", "rb").read()
+cfg = load_config(HERE / "lab.yaml")
+text = (HERE / "flow_shock_fade_draft.py").read_bytes()
 src = PluginSource.from_text("flow_shock_fade", text)
 print("judge-style causality_failures (default synthetic bars):", causality_failures(cfg, src) or "none")
 # Counter-check: the same draft with the default flow_x raised to 1.0 must be reported unverifiable.

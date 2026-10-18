@@ -4,10 +4,11 @@ at the judge's cut points? Uses perp_lab.validate.causality.synthetic_bars / wit
 the same generator the judge's lookahead check uses. In-process (not the sandbox)."""
 
 import sys
+from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, "/tmp/claude-1000/-home-burhan-backtesting/464fe316-f53a-4226-89ab-e02f2b7426f3/scratchpad/research")
+sys.path.insert(0, str(Path(__file__).parent))          # flow_shock_fade_draft.py
 from flow_shock_fade_draft import FlowShockFade  # noqa: E402
 
 from perp_lab.engine.backtest import EngineParams, run_backtest  # noqa: E402
