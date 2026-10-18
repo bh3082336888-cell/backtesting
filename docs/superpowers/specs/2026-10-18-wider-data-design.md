@@ -1,6 +1,7 @@
 # Wider data: history from 2020 and 17 coins
 
-Status: chosen in conversation 2026-10-18 (option B of three); this document awaits the user's
+Status: chosen in conversation 2026-10-18 (option B of three); both open questions answered by
+the user the same day (see "Answered questions"); the document as a whole awaits the user's
 review. Nothing is built yet.
 Scope: the research data only: `history_start`, the coin universe, per-coin costs, and the fixes
 the code needs for coins that start (and may stop) on different dates. It comes **before** the
@@ -130,8 +131,8 @@ test in the same PR (org rule), one concern per commit.
    data identity (history start, universe, cost model version) and match on all of it, so the judge
    re-runs the parent under the family on the new data (it already does when no matching run
    exists).
-7. **The exam with coins that stop trading** (medium; open question 1 asks whether it is in this
-   project at all). Today `window_end` is the earliest last candle across all coins
+7. **The exam with coins that stop trading: deferred, not built here** (user, 2026-10-18; see
+   "Answered questions", 1). Recorded so the follow-up spec starts from it. Today `window_end` is the earliest last candle across all coins
    (`judge/exam.py:57-73`): a coin delisted before holdout + 180 days leaves the exam
    `pending`/`too_short` forever (`judge/judge.py:448-450`), one delisted later freezes the window
    at its delisting, and the per-day candle check (commit 33969fa) means one whole-day halt on any
@@ -182,9 +183,24 @@ test in the same PR (org rule), one concern per commit.
 - Survivor bias that isn't stated where results are shown.
 - An exam that can be unblocked by excluding a coin because of how it did in the holdout.
 
-## Open questions for the user
+## Order of work
 
-1. **Is change 7 in this project?** Recommended: **no, defer it** to its own small spec, decided
+Agreed with the user 2026-10-18:
+
+1. This project (changes 1–6 and 8–11; per-coin costs and run identity before any walk-forward on
+   the new data).
+2. A dated addendum to `docs/research/2026-10-18-strategy-research.md` re-deriving its
+   data-dependent numbers on the wider data (answered question 2).
+3. `lab judge flow_shock_fade --tf 1h` on the wider data: trial 7.
+4. Phase 3b-2, the proposer.
+
+In parallel, before the first exam (about 2026-12-28): the small spec for change 7.
+
+## Answered questions
+
+Both answered by the user 2026-10-18: "yes to both, go with your recommendations".
+
+1. **Is change 7 in this project?** **No, deferred** to its own small spec, decided
    before the first exam (no exam can run before about 2026-12-28, and none of the 17 coins is
    delisted today). Until then today's exam guards stay exactly as merged. Any rule for it touches
    when a holdout read is spent, and a family gets one read, so a wrong rule can't be undone. The
@@ -194,7 +210,7 @@ test in the same PR (org rule), one concern per commit.
    how it did in the holdout, and decide separately whether a whole-day gap in a month the archive
    has published complete (a real exchange halt) should still block. That last part would loosen
    the guard from commit 33969fa for all 17 coins, so it needs an explicit yes.
-2. **When to run `flow_shock_fade` (trial 7).** Recommended: after this lands, on the wider data.
+2. **When to run `flow_shock_fade` (trial 7).** **After this lands, on the wider data.**
    The bar drops (1.24 instead of 1.52 at N = 7), and its plugin and kill rules don't depend on the
    coin list. But pre-registration only counts before a result is seen, so before that run, a dated
    addendum to its research note re-derives the numbers that depend on the data (the "600–3,000 OOS
