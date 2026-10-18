@@ -10,6 +10,7 @@ import math
 import random
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -28,6 +29,7 @@ from perp_lab.sandbox.protocol import signal_from
 from perp_lab.sandbox.stream import Aborted, Lockstep, StreamedStrategy
 from perp_lab.strategy import HOLD, Signal
 from tests.conftest import REAL_PLUGINS, REPO, make_bars, market_config
+from tests import sandbox_fixtures
 from tests.sandbox_fixtures import InProcessWorker, load_class
 from tests.test_worker import header, sandboxed
 
@@ -623,6 +625,25 @@ def test_a_forged_signal_is_a_protocol_error(tmp_path):
     with pytest.raises(PluginError) as e:
         run_exam(cfg, src, "4h", ["BTCUSDT"], {}, token(tmp_path), SHORT_END)
     assert (e.value.kind, e.value.message) == ("protocol", "signal stop must be a number")
+
+
+@pytest.mark.sandbox
+def test_a_real_exam_evicts_the_page_cache_its_workers_mapped(tmp_path, monkeypatch):
+    cfg = market_config(tmp_path)
+    real, calls = client.evict_page_cache, []
+
+    def spy(paths):
+        calls.append((sorted(paths), sandbox_fixtures.running_workers()))
+        real(paths)
+    monkeypatch.setattr(client, "evict_page_cache", spy)
+    src = real_source("donchian_atr")
+    run_exam(cfg, src, "4h", cfg.symbols, src.meta.params, token(tmp_path), SHORT_END)
+    [(paths, running)] = calls
+    assert running == []                                  # once the exam's workers are gone
+    names = {Path(p).name for p in paths}
+    assert all(Path(p).is_absolute() and Path(p).is_file() for p in paths), paths
+    for lib in ("libarrow.so", "libseccomp.so.2", "_multiarray_umath"):   # pyarrow, confine, numpy
+        assert any(n.startswith(lib) for n in names), (lib, names)
 
 
 @pytest.mark.sandbox

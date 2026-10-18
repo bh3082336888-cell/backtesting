@@ -101,11 +101,13 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 
 - Plugin code runs only in a confined worker process (`perp_lab/sandbox/`); `session.py` is the one module that executes it.
-- A worker reads only the Python installation (everything under `sys.base_prefix`, which for a system Python is all of `/usr`), the virtualenv and `perp_lab/`, plus the bars it is sent; not `data/`, `runs/`, `config/`, `strategies/` or anything else in `$HOME`. It writes no file and changes no file's metadata (mode, owner, times, extended attributes, inode flags), opens no socket and starts no process.
+- A worker loads its modules from the Python installation (everything under `sys.base_prefix`, which for a system Python is all of `/usr`), the virtualenv and `perp_lab/`, never from `data/`, `runs/`, `config/`, `strategies/` or anything else in `$HOME`. Then, before any plugin byte arrives, it seals itself: from there on it can't open, stat or readlink any path, so it reads no file at all (the bars come through its pipe), and it changes no file's metadata (mode, owner, times, access times of files and symlinks included, extended attributes, inode flags). It opens no socket and starts no process.
+- A sealed worker can't query page-cache residency or evict or prefetch pages (no `mincore`, no such `madvise` advice, `MADV_HUGEPAGE` included: on a file mapping it reads 2 MiB in per fault), and after each batch of an exam's workers the files they mapped are evicted from the page cache. That narrows the page-cache channel but doesn't close it: a live process mapping the same libraries can keep a page a worker touched resident through fault-around, and a worker can still touch the pages it chooses (spec R7). A `lab paper` run's workers, which hold live holdout-window bars, are neither evicted nor kept apart from a running exam; that is accepted, since paper runs only exam-passed, hand-approved plugins (spec R6).
+- A plugin can import only what the worker loaded before sealing: `math`, `numpy` (not `numpy.testing` or `numpy.f2py`), `pandas`, `perp_lab.strategy`, `perp_lab.indicators` and `perp_lab.engine.backtest`, and whatever these load, plus the interpreter's built-in and frozen modules, which need no file (here, for one, `itertools`, `time`, `zlib` and `unicodedata`). Anything else is `ModuleNotFoundError`, and no named time zone but UTC works (the time zone database is files).
 - It reports decisions, not results: the trusted engine replays them, and any disagreement is a `mismatch`.
 - `lab judge` runs lookahead checks, walk-forward and the benchmark through workers; an error caused by the plugin is a recorded kill (`plugin_error`).
 - `lab exam` streams the holdout to each worker one bar at a time, symbols in lockstep, and is the only command that runs exams; one exam runs at a time on a machine.
-- Needs Linux, Landlock ABI 6 or later and `libseccomp.so.2`; without them plugin code does not run. No flag bypasses it.
+- Needs Linux, Landlock ABI 6 or later, `libseccomp.so.2` and glibc 2.39 or later (older glibc makes `fstat` with a call the seal denies); without them plugin code does not run. No flag bypasses it.
 - Tests that need the real sandbox carry `@pytest.mark.sandbox`; run them alone with `pytest -m sandbox`.
 
 ## Rules the code enforces
@@ -121,7 +123,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | OOS is the headline; IS is shown greyed and labelled | `validate/pipeline.py` report |
 | A strategy must beat random-entry (same exits, matched frequency) p95 OOS | `validate/benchmarks.py` |
 | Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days | `judge/budget.py`, `tests/test_budget.py` |
-| Plugin code runs only in a confined worker: Landlock, seccomp and rlimits; it reads no data, store, log or verdict, writes no file or file metadata, opens no socket | `sandbox/confine.py`, `tests/test_confine.py` |
+| Plugin code runs only in a confined, sealed worker: Landlock, seccomp and rlimits, then a seal under which no path resolves; it reads no file (no data, store, log or verdict, and once sealed not even its own modules' files), writes no file or file metadata (access times included), opens no socket | `sandbox/confine.py`, `sandbox/worker.py`, `tests/test_confine.py`, `tests/test_worker.py` |
 | Scores come from the trusted engine replaying the plugin's decisions, never from numbers the plugin reports | `sandbox/replay.py`, `tests/test_replay.py` |
 | The exam streams the holdout one bar at a time, symbols in lockstep, so a plugin never holds a later bar | `sandbox/stream.py`, `tests/test_stream.py` |
 | Only `lab exam` runs exams; `lab judge` records `awaiting_exam` and returns | `judge/judge.py`, `tests/test_judge_exam.py` |

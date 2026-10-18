@@ -9,6 +9,11 @@ run starts at history_start); only returns and trades inside [holdout_start, end
 
 `cost_hours` estimates an exam's CPU time per symbol before any read is spent, from research data
 only, so a plugin too slow to stream is blocked without one.
+
+After each batch, whatever its outcome, and before the next batch's workers start, the files the
+batch's workers mapped (their libraries) are evicted from the page cache: a worker can fault in
+chosen pages of them, which a later batch's workers, holding earlier bars, or a later exam could
+read back (spec R7). `stream.run_batch` does it, and before a rerun too.
 """
 
 from __future__ import annotations
@@ -83,7 +88,8 @@ def cost_hours(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict
 def run_exam(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict, token, end: pd.Timestamp,
              stderr_dir: Path | None = None) -> ExamResult:
     """The streamed exam of `src` with frozen `params` on [holdout_start, end). A plugin failure is
-    a PluginError; each worker's stderr goes to `stderr_dir` when it closes."""
+    a PluginError; each worker's stderr goes to `stderr_dir` when it closes. After each batch,
+    whatever the outcome, the files its workers mapped are evicted from the page cache."""
     check_token(token)
     start = cfg.holdout_start
     start_ms = start.value // 10**6
@@ -96,7 +102,7 @@ def run_exam(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict, 
     runs = {}
     per = client.max_workers(cfg)
     for b in range(0, len(symbols), per):
-        runs.update(stream.run_batch(cfg, src, tf, params, symbols[b:b + per], load, stderr_dir))
+        runs.update(stream.run_batch(cfg, src, tf, params, symbols[b:b + per], load, stderr_dir))   # evicts its files
     daily, parts = {}, []
     for s in symbols:
         res = runs[s]

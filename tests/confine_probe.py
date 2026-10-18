@@ -164,6 +164,34 @@ def fcntl_notify(target, pre):
         os.close(fd)
 
 
+def set_inode_flags(target, pre):
+    """Stage 1 only (a sealed worker can open no file to try this on): on a file this user owns and
+    may open, setting the flags, attributes and write hint it already has would change nothing,
+    and is still refused."""
+    import fcntl
+    fd = os.open(target, os.O_RDONLY)
+    try:
+        flags = fcntl.ioctl(fd, 0x80086601, bytes(8))            # FS_IOC_GETFLAGS
+        attrs = fcntl.ioctl(fd, 0x801C581F, bytes(28))           # FS_IOC_FSGETXATTR
+        hint = fcntl.fcntl(fd, 1035, bytes(8))                   # F_GET_RW_HINT
+        codes = []
+        for fn in (lambda: fcntl.ioctl(fd, 0x40086602, flags),   # FS_IOC_SETFLAGS
+                   lambda: fcntl.ioctl(fd, 0x401C5820, attrs),   # FS_IOC_FSSETXATTR
+                   lambda: fcntl.fcntl(fd, 1036, hint)):         # F_SET_RW_HINT
+            try:
+                fn()
+                codes.append(0)
+            except OSError as e:
+                codes.append(e.errno)
+    finally:
+        os.close(fd)
+    other = [c for c in codes if c != errno.EPERM]
+    if not other:
+        raise PermissionError(errno.EPERM, "every set was refused")
+    if 0 not in other:
+        raise OSError(other[0], "refused, but not by seccomp")
+
+
 def fcntl_other(target, pre):
     import fcntl
     with open(target, "rb") as f:                      # the calls Python and its libraries make
@@ -257,7 +285,8 @@ def _in_each_thread(taskfd, path):
     return results
 
 
-def import_numpy_pandas_pyarrow(target, pre):
+def _the_workers_imports():
+    """The worker's imports and an Arrow round trip, which start numpy's and pyarrow's threads."""
     import numpy as np
     import pandas as pd
     import pyarrow as pa
@@ -273,6 +302,10 @@ def import_numpy_pandas_pyarrow(target, pre):
         w.write_table(pa.Table.from_pandas(df))
     back = pa.ipc.open_stream(sink.getvalue()).read_all().to_pandas()
     assert back.equals(df) and float(np.ones((50, 50)) @ np.ones(50) @ np.ones(50)) == 2500.0
+
+
+def import_numpy_pandas_pyarrow(target, pre):
+    _the_workers_imports()
     threads = _in_each_thread(pre["taskfd"], target)
     for tid, (name, result) in sorted(threads.items()):
         print("THREAD", tid, name, result)
@@ -281,12 +314,28 @@ def import_numpy_pandas_pyarrow(target, pre):
         raise PermissionError(errno.EACCES, "every thread was denied")
 
 
+def seal_every_thread(target, pre):
+    """The worker's own preload and warm-up (`worker._preload`, which starts numpy's and pyarrow's
+    threads), then seal(): every thread, the ones started before it included, is refused a file on
+    the allowlist (`target`), which stage 1 alone would let it open."""
+    from perp_lab.sandbox import worker
+    from perp_lab.sandbox.confine import seal
+    worker._preload()
+    seal()
+    threads = _in_each_thread(pre["taskfd"], target)
+    for tid, (name, result) in sorted(threads.items()):
+        print("THREAD", tid, name, result)
+    print("THREADS", len(os.listdir(pre["taskfd"])))
+    if {r for _, r in threads.values()} == {"DENIED EPERM"}:
+        raise PermissionError(errno.EPERM, "every thread was denied")
+
+
 PROBES = {f.__name__.rstrip("_"): f for f in (
     read_repo_file, write_tmp, tcp_connect, udp_send, unix_connect, fork, subprocess_, shmget,
     prlimit_parent, kill_parent, sched_getaffinity_parent, read_pre_existing_thread, read_allowlisted,
     import_numpy_pandas_pyarrow, setpriority_pgrp, ioprio_get_user, getpriority_self, mq_open,
     x32_syscall, clone3, inotify_init1, pdeathsig_clear, pdeathsig_clear_wide, prctl_set_name, flock,
-    fcntl_setlk, fcntl_ofd_setlk, fcntl_notify, fcntl_other)}
+    fcntl_setlk, fcntl_ofd_setlk, fcntl_notify, fcntl_other, set_inode_flags, seal_every_thread)}
 
 
 def main(argv):
@@ -303,7 +352,7 @@ def main(argv):
     probe = PROBES[name]
 
     pre = {"nofile": resource.getrlimit(resource.RLIMIT_NOFILE)}
-    if name == "import_numpy_pandas_pyarrow":
+    if name in ("import_numpy_pandas_pyarrow", "seal_every_thread"):
         pre["taskfd"] = os.open("/proc/self/task", os.O_RDONLY | os.O_DIRECTORY)  # opened while allowed
     if name == "read_pre_existing_thread":
         pre["go"], pre["result"] = threading.Event(), "NO ANSWER"
