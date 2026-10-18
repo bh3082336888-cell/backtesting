@@ -375,7 +375,10 @@ as in 3a); after that the judgement is `failed` with `exam_error`.
    be complete. Otherwise (a month `lab tail` stitched from ccxt, whose candles have no taker,
    trade-count or quote-volume columns; an incomplete month; a missing entry, manifest or unknown
    source) the judgement stays `pending` with `incomplete_data` and nothing is minted. This step
-   also runs on a retry (with the stored window end), where it uses no attempt.
+   also runs on a retry (with the stored window end), where it uses no attempt. `load_bars` also
+   reads the regime timeframe's candles (`cfg.regime.timeframe`, 4h) to build `regime`, so their
+   months are checked as well, with ccxt allowed (the labels need OHLC only), and the window end
+   (step 3) stops at their last candle too: past it, every bar would carry the last label.
 4. The dated lookahead check (as in 3a, now sandboxed). It still matters: it stops a plugin whose
    promotion came from peeking from spending a read.
 5. **Cost probe:** time `prepare` on the full research bars in a separate worker and multiply by

@@ -8,7 +8,7 @@ from perp_lab.holdout import HoldoutViolation, issue_holdout_token
 from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, window_end
 from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client
-from tests.conftest import market_config
+from tests.conftest import market_config, write_market
 from tests.sandbox_fixtures import InProcessWorker
 
 END = pd.Timestamp("2026-10-01", tz="UTC")   # funding ends 2026-09-30 16:00 + 8h
@@ -98,6 +98,43 @@ def test_a_missing_or_unreadable_manifest_counts_for_every_month(tmp_path, text,
     p.unlink() if text is None else p.write_text(text)
     assert window_data_problems(cfg, cfg.symbols, "4h", END) == [
         f"ETHUSDT 4h {m}: {why}" for m in ("2026-07", "2026-08", "2026-09")]
+
+
+def hourly(tmp_path):
+    """The market with 1h candles too: an exam at 1h reads 4h candles as well, for `regime`."""
+    cfg = market_config(tmp_path)
+    write_market(cfg.data_dir, cfg.symbols, tfs=("4h", "1h"))
+    assert cfg["regime"]["timeframe"] == "4h"
+    return cfg
+
+
+def _drop(cfg, symbol, tf, a, b):
+    """Remove `symbol`'s `tf` candles that open in [a, b)."""
+    f = cfg.data_dir / symbol / tf / "all.parquet"
+    df = pd.read_parquet(f)
+    lo, hi = (pd.Timestamp(x, tz="UTC").value // 10**6 for x in (a, b))
+    df[(df.open_time < lo) | (df.open_time >= hi)].to_parquet(f)
+
+
+def test_window_end_waits_for_the_regime_timeframe(tmp_path):
+    # `regime` comes from 4h candles: past the last of them a 1h exam would carry one label forward.
+    cfg = hourly(tmp_path)
+    assert window_end(cfg, cfg.symbols, "1h") == END                      # funding ends first here
+    _drop(cfg, "ETHUSDT", "4h", "2026-09-20 16:00", "2027-01-01")
+    assert window_end(cfg, cfg.symbols, "1h") == pd.Timestamp("2026-09-20", tz="UTC")
+
+
+def test_a_1h_exam_checks_its_regime_timeframe_too(tmp_path):
+    # A 4h month missing or incomplete inside the window would leave stale regime labels; one
+    # stitched from ccxt is fine (the labels need OHLC only, which ccxt candles have).
+    cfg = hourly(tmp_path)
+    assert window_data_problems(cfg, cfg.symbols, "1h", END) == []
+    _manifest(cfg, "BTCUSDT", **{"2026_08": {"complete": False, "source": "ccxt"}})
+    assert window_data_problems(cfg, cfg.symbols, "1h", END) == []
+    _manifest(cfg, "BTCUSDT", **{"2026_08": None, "2026_09": {"complete": False, "source": "daily"}})
+    assert window_data_problems(cfg, cfg.symbols, "1h", END) == [
+        "BTCUSDT 4h 2026-08: no manifest entry (for the regime labels)",
+        "BTCUSDT 4h 2026-09: incomplete (days missing from data.binance.vision) (for the regime labels)"]
 
 
 def test_exam_refuses_without_a_token(tmp_path):
