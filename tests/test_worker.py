@@ -380,6 +380,8 @@ def test_a_plugin_moves_no_access_time(cfg, tmp_path):
     # access time when that is old: a bit per file per day a worker could leave for a later one,
     # which anyone reads back with stat(). Checked from outside, on a scratch file inside the
     # allowlist (the virtualenv: this user's, and no repo file) and on a symlink to it.
+    if not os.access(sys.prefix, os.W_OK):              # a system Python: sys.prefix is /usr
+        pytest.skip(f"needs a scratch file in sys.prefix, and {sys.prefix} isn't writable")
     target = Path(sys.prefix) / f"perp_lab_atime_test_{os.getpid()}_{time.monotonic_ns()}.txt"
     link = tmp_path / "link"
     link.symlink_to(target)

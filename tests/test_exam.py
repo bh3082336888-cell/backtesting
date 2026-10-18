@@ -174,6 +174,8 @@ def test_a_rerun_starts_once_the_lost_attempts_files_are_evicted(tmp_path, monke
 
 def test_evicting_drops_a_file_from_the_page_cache(caplog):
     # On the real disk (.venv), not a tmpfs, whose pages can't be dropped.
+    if not os.access(sys.prefix, os.W_OK):              # a system Python: sys.prefix is /usr
+        pytest.skip(f"needs a scratch file in sys.prefix, and {sys.prefix} isn't writable")
     path = Path(sys.prefix) / f"perp_lab_evict_test_{os.getpid()}_{time.monotonic_ns()}"
     libc = ctypes.CDLL(None, use_errno=True)
     libc.mmap.restype = ctypes.c_void_p
