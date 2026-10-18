@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+import ccxt
 import numpy as np
 import pandas as pd
 
@@ -198,6 +199,16 @@ class PaperRunner:
         self.quote = cfg.get("quote", "USDT")
         self.seen: dict[str, pd.DataFrame] = {}
         self.warmup = cfg["paper"]["warmup_bars"]
+        self.dropped: dict[str, str] = {}               # coin -> why the exchange stopped serving it
+        self._gone = {s: asyncio.Event() for s in symbols}
+
+    def _drop(self, sym: str, e: Exception):
+        """The exchange no longer lists this coin (ccxt BadSymbol): the coin leaves the run, the others carry
+        on. Its open position stays as it is: no fill is invented. Its other loops stop at their next turn."""
+        if sym not in self.dropped:
+            self.dropped[sym] = f"{type(e).__name__}: {e}"
+            log.error("%s paper: dropped, the exchange no longer serves it (%s)", sym, self.dropped[sym])
+        self._gone[sym].set()
 
     def _persist(self):
         rows = [t for b in self.books.values() for t in b.trades]
@@ -205,7 +216,8 @@ class PaperRunner:
             pd.DataFrame(rows).to_parquet(self.out / "trades.parquet", index=False)
         for s, df in self.seen.items():
             df.to_parquet(self.out / f"bars_{s}.parquet", index=False)
-        state = {s: {"W": b.W, "pos": b.pos} for s, b in self.books.items()}
+        state = {s: {"W": b.W, "pos": b.pos, **({"dropped": self.dropped[s]} if s in self.dropped else {})}
+                 for s, b in self.books.items()}
         (self.out / "state.json").write_text(json.dumps(state, default=float, indent=1))
 
     async def _warm(self, sym) -> pd.DataFrame:
@@ -228,12 +240,15 @@ class PaperRunner:
     async def _bars_loop(self, sym, max_bars):
         # The worker is spawned and closed in this thread (its parent-death signal is the spawning thread's).
         book = self.books[sym]
-        bars = await self._warm(sym)
-        worker = client.spawn(self.cfg, self.src)
         try:
-            await self._stream(sym, book, worker, bars, max_bars)
-        finally:
-            worker.close()
+            bars = await self._warm(sym)
+            worker = client.spawn(self.cfg, self.src)
+            try:
+                await self._stream(sym, book, worker, bars, max_bars)
+            finally:
+                worker.close()
+        except ccxt.BadSymbol as e:
+            self._drop(sym, e)
 
     async def _stream(self, sym, book, worker, bars, max_bars):
         self.seen[sym] = bars.assign(live=False).reset_index(drop=True)
@@ -253,15 +268,19 @@ class PaperRunner:
                 log.info("%s signal %s", sym, sig)
             self._persist()
             n += 1
-            if max_bars and n >= max_bars:
+            if (max_bars and n >= max_bars) or self._gone[sym].is_set():
                 return
 
     async def _quotes_loop(self, sym, stop_evt):
         book = self.books[sym]
         csym = ccxt_symbol(sym, self.quote)
-        while not stop_evt.is_set():
+        while not stop_evt.is_set() and not self._gone[sym].is_set():
             # bookTicker stream: Binance USD-M's ticker stream carries no bid/ask.
-            t = (await acall_with_backoff(self.ex.watch_bids_asks, [csym])).get(csym) or {}
+            try:
+                t = (await acall_with_backoff(self.ex.watch_bids_asks, [csym])).get(csym) or {}
+            except ccxt.BadSymbol as e:
+                self._drop(sym, e)
+                return
             bid, ask = t.get("bid"), t.get("ask")
             if bid and ask:
                 had = len(book.trades)
@@ -272,8 +291,12 @@ class PaperRunner:
     async def _funding_loop(self, sym, stop_evt, poll_s=30):
         book = self.books[sym]
         nxt, rate = None, None
-        while not stop_evt.is_set():
-            fr = await acall_with_backoff(self.ex.fetch_funding_rate, ccxt_symbol(sym, self.quote))
+        while not stop_evt.is_set() and not self._gone[sym].is_set():
+            try:
+                fr = await acall_with_backoff(self.ex.fetch_funding_rate, ccxt_symbol(sym, self.quote))
+            except ccxt.BadSymbol as e:
+                self._drop(sym, e)
+                return
             now = int(time.time() * 1000)
             if nxt is not None and now >= nxt and rate is not None:
                 book.on_funding(rate, float(fr.get("markPrice") or 0.0))
@@ -295,11 +318,17 @@ class PaperRunner:
         try:
             # The quote and funding loops run until the bars are done; one that ends first failed
             # (e.g. a fill the book refused as a mismatch), and that stops the run with its error.
-            await asyncio.wait([bars, *side], return_when=asyncio.FIRST_COMPLETED)
-            for t in side:
-                if t.done():
-                    t.result()
+            # A dropped coin's side loops end cleanly, so keep waiting on the rest until the bars are done.
+            while not bars.done():
+                waiting = [t for t in side if not t.done()]
+                await asyncio.wait([bars, *waiting], return_when=asyncio.FIRST_COMPLETED)
+                for t in side:
+                    if t.done():
+                        t.result()
             await bars
+            if len(self.dropped) == len(self.symbols):
+                raise RuntimeError("paper: every coin was dropped: "
+                                   + "; ".join(f"{s}: {why}" for s, why in self.dropped.items()))
         finally:
             stop_evt.set()
             bars.cancel()                   # if a side loop failed: each bars loop closes its worker
