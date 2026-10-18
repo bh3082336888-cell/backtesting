@@ -35,7 +35,7 @@ import numpy as np
 import pandas as pd
 
 from perp_lab.config import Config, load_config
-from perp_lab.data.store import load_bars
+from perp_lab.data.store import load_bars, research_symbols
 from perp_lab.engine.backtest import BacktestResult, EngineParams
 from perp_lab.engine.metrics import daily_returns, portfolio_returns, sharpe, summarize
 from perp_lab.plugins import PluginSource
@@ -205,7 +205,9 @@ class WFResult:
 
 def walkforward(cfg: Config, src: PluginSource, tf: str, symbols: list[str] | None = None,
                 workers: int | None = None, stderr_dir: Path | None = None) -> WFResult:
-    symbols = symbols or cfg.symbols
+    symbols = research_symbols(cfg, symbols or cfg.symbols, tf)
+    if not symbols:
+        raise ValueError(f"no coin has {tf} research bars; run `lab backfill`")
     wf = cfg["walkforward"]
     combos = grid_combos(src.meta.grid)
     log.info("walkforward %s %s: %d combos x %d symbols", src.name, tf, len(combos), len(symbols))

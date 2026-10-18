@@ -60,6 +60,24 @@ def load_candles(cfg: Config, symbol: str, tf: str, start: pd.Timestamp | None =
     return df
 
 
+def research_symbols(cfg: Config, symbols: list[str], tf: str) -> list[str]:
+    """`symbols` in order, minus each coin with no `tf` candle in [history_start, holdout_start).
+
+    A coin listed late still qualifies; only a coin with nothing to research on is dropped.
+    Reads the `open_time` column only.
+    """
+    s_ms, e_ms = int(cfg.history_start.value // 10**6), int(cfg.holdout_start.value // 10**6)
+    keep = []
+    for sym in symbols:
+        files = sorted((cfg.data_dir / sym / tf).glob("*.parquet"))
+        if any(pd.read_parquet(f, columns=["open_time"]).open_time.between(s_ms, e_ms, inclusive="left").any()
+               for f in files):
+            keep.append(sym)
+        else:
+            log.warning("%s %s: no research bars before %s; skipped", sym, tf, cfg.holdout_start.date())
+    return keep
+
+
 def load_funding(cfg: Config, symbol: str) -> pd.DataFrame:
     df = _read_dir(cfg.data_dir / symbol / "funding")
     if df is None:

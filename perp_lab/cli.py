@@ -82,7 +82,7 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
              params: str = typer.Option("{}", help='JSON params, e.g. \'{"n": 40}\''),
              config: Optional[str] = CfgOpt):
     """Single fixed-param backtest over the research span. This is IN-SAMPLE by definition."""
-    from perp_lab.data.store import load_bars
+    from perp_lab.data.store import load_bars, research_symbols
     from perp_lab.engine.backtest import EngineParams
     from perp_lab.engine.metrics import daily_returns, portfolio_returns, summarize
     from perp_lab.plugins import PluginSource
@@ -93,7 +93,7 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
     src = PluginSource.read(strategy)
     p = json.loads(params)
     per, trades = {}, []
-    for s in _syms(cfg, symbols):
+    for s in research_symbols(cfg, _syms(cfg, symbols), tf):
         bars = load_bars(cfg, s, tf)
         with _sandbox_required(), client.Batch(cfg, src, s, tf, bars) as batch:
             r = batch.backtest({**src.meta.params, **p}, EngineParams.from_config(cfg, s))
