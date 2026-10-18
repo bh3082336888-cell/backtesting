@@ -18,7 +18,9 @@ import json
 import logging
 import random
 import threading
+import re
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -30,6 +32,7 @@ import requests
 log = logging.getLogger(__name__)
 
 BASE = "https://data.binance.vision/data/futures/um"
+LIST_URL = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 
 KLINE_COLS = [
     "open_time", "open", "high", "low", "close", "volume", "close_time",
@@ -158,6 +161,36 @@ class Job:
     dataset: str          # klines | fundingRate | metrics
     tf: str | None
     month: pd.Period
+    first: pd.Period | None = None   # earliest month the archive holds; earlier months are absent
+
+
+def first_archive_month(symbol: str, dataset: str, tf: str | None, max_retries: int) -> pd.Period | None:
+    """Earliest month with a .zip in the archive listing, or None when it can't be told.
+
+    S3 lists keys in ascending order, so the first page holds the earliest file.
+    """
+    prefix = {"klines": f"data/futures/um/monthly/klines/{symbol}/{tf}/",
+              "fundingRate": f"data/futures/um/monthly/fundingRate/{symbol}/",
+              "metrics": f"data/futures/um/daily/metrics/{symbol}/"}[dataset]
+    try:
+        body = _get(f"{LIST_URL}?delimiter=/&prefix={prefix}", max_retries)
+        if body is None:
+            log.warning("no archive listing for %s %s %s", symbol, dataset, tf or "")
+            return None
+        root = ET.fromstring(body)
+    except (FetchError, ET.ParseError) as e:
+        log.warning("archive listing unreadable for %s %s %s: %s", symbol, dataset, tf or "", e)
+        return None
+    months = []
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] == "Key" and el.text and el.text.endswith(".zip"):
+            m = re.search(r"(\d{4}-\d{2})(?:-\d{2})?\.zip$", el.text)
+            if m:
+                months.append(m.group(1))
+    if not months:
+        log.warning("archive listing for %s %s %s holds no file", symbol, dataset, tf or "")
+        return None
+    return pd.Period(min(months), "M")
 
 
 def _months(start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Period]:
@@ -222,6 +255,9 @@ def run_job(job: Job, data_dir: Path, max_retries: int, today: pd.Timestamp) -> 
     mkey = job.month.strftime("%Y-%m")
     if man.is_complete(mkey):
         return "skip", 0
+    if job.first is not None and job.month < job.first:
+        man.mark(mkey, complete=True, source="absent", rows=0)
+        return "absent", 0
     parse = _PARSERS[job.dataset]
     month_done = job.month.end_time.tz_localize("UTC") < today.normalize()
     frames, source = [], None
@@ -281,7 +317,18 @@ def backfill(cfg, symbols: list[str], tfs: list[str], datasets: list[str],
                 log.warning("dataset %s not supported; skipping", ds)
     workers = workers or cfg["backfill"]["workers"]
     retries = cfg["backfill"]["max_retries"]
-    stats = {"ok": 0, "partial": 0, "skip": 0, "missing": 0, "error": 0}
+    # One listing per (symbol, dataset, tf) group that still has work; a complete group needs none.
+    firsts: dict[tuple, pd.Period | None] = {}
+    mans: dict[tuple, Manifest] = {}
+    for j in jobs:
+        g = (j.symbol, j.dataset, j.tf)
+        if g not in mans:
+            mans[g] = Manifest(dataset_dir(cfg.data_dir, j.symbol, j.dataset, j.tf))
+        if g not in firsts and not mans[g].is_complete(j.month.strftime("%Y-%m")):
+            firsts[g] = first_archive_month(j.symbol, j.dataset, j.tf, retries)
+    for j in jobs:
+        j.first = firsts.get((j.symbol, j.dataset, j.tf))
+    stats = {"absent": 0, "ok": 0, "partial": 0, "skip": 0, "missing": 0, "error": 0}
     log.info("backfill: %d jobs, %d workers", len(jobs), workers)
     with ThreadPoolExecutor(workers) as ex:
         futs = {ex.submit(run_job, j, cfg.data_dir, retries, today): j for j in jobs}
