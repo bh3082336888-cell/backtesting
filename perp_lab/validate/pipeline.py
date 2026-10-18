@@ -10,7 +10,7 @@ import pandas as pd
 from perp_lab.plugins import PluginSource, require_timeframe
 from perp_lab.runs import new_run_id, repo_commit, verdict, write_run
 from perp_lab.validate.benchmarks import buy_and_hold, random_entry, regime_split
-from perp_lab.validate.montecarlo import mc_drawdown
+from perp_lab.validate.montecarlo import coins_per_day, mc_drawdown
 from perp_lab.validate.sensitivity import sensitivity
 from perp_lab.validate.walkforward import listed_coins, walkforward
 
@@ -86,7 +86,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     log.info("walkforward done; OOS Sharpe %.2f", wf.oos_summary["sharpe"])
     sens = sensitivity(cfg, wf, workers)
     rnd = random_entry(cfg, wf, seeds, workers)
-    mc = mc_drawdown(wf.oos_trades, len(wf.symbols), cfg["validation"]["mc_iterations"])
+    mc = mc_drawdown(wf.oos_trades, coins_per_day(wf.oos_daily), cfg["validation"]["mc_iterations"])
     oa, ob = wf.raw["oos_span"]
     bh = buy_and_hold(cfg, wf.symbols, tf, oa, ob)
     reg = regime_split(wf.oos_trades)
