@@ -444,6 +444,19 @@ def test_judge_refuses_to_start_without_a_sandbox(cfg, plugins, monkeypatch):
     assert r.exit_code == 1 and "sandbox unavailable: no landlock" in r.output
 
 
+def test_a_wrong_timeframe_is_refused_even_without_a_sandbox(cfg, plugins, monkeypatch):
+    # The refusals that read only plugin source (an undeclared timeframe, a missing or identical
+    # parent) come before the sandbox check: a wrong --tf is refused on any machine, as such.
+    monkeypatch.setattr(client, "check", lambda cfg: pytest.fail("checked the sandbox first"))
+    with pytest.raises(JudgeRefused, match=r"donchian_atr_wide declares timeframes 4h, not 1h"):
+        judge(cfg, "donchian_atr_wide", "1h", validate=StubValidate({}))
+    add_plugin(plugins, "orphan", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "nope"'))
+    with pytest.raises(JudgeRefused, match="PARENT 'nope' is not a plugin"):
+        judge(cfg, "orphan", "4h", validate=StubValidate({}))
+    r = CliRunner().invoke(app, ["judge", "donchian_atr_wide", "--tf", "1h", "--config", str(cfg.path)])
+    assert r.exit_code == 2 and "refused: donchian_atr_wide declares timeframes 4h, not 1h" in r.output
+
+
 def test_an_edit_during_judging_does_not_change_what_is_judged(cfg, plugins):
     from perp_lab.strategy import plugin_hash
     ph, ch = plugin_hash("donchian_atr"), plugin_hash("donchian_atr_wide")

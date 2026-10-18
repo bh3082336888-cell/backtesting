@@ -58,8 +58,8 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 (spec: `docs/superpowers/specs/2026-10-16-judge-design.md`).
 
 - `--tf` must be one of the plugin's declared `timeframes` (and its parent's); anything else is refused (exit
-  2) before any check runs or anything is recorded, since the walk-forward would be a trial that can't be
-  taken back. `lab walkforward` refuses the same way; `lab backtest` (in-sample, not a trial) doesn't.
+  2) before the sandbox check, the lookahead check or anything is recorded, since the walk-forward would be a
+  trial that can't be taken back. `lab walkforward` refuses the same way; `lab backtest` (in-sample, not a trial) doesn't.
 - A plugin names its parent with a module-level `PARENT = "name"`; without one it starts a family.
 - A family is `"family:<root plugin name>"`, found by walking PARENT links, so a whole PARENT chain
   (e.g. `donchian_atr` and `donchian_atr_wide`) shares one family and therefore one holdout read. A plugin

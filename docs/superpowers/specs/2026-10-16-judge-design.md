@@ -61,6 +61,9 @@ the dashboard shows judgements and the holdout budget.
    - `TF` isn't in the plugin's declared `timeframes`, or in its parent's (added 2026-10-18): the
      walk-forward would be a trial that can't be taken back, so a mistyped or defaulted `--tf`
      (the CLI defaults to 4h) must not spend one. `lab walkforward` refuses the same way.
+
+   These read plugin source only (no plugin code runs), so they come before 3b's sandbox check: a
+   wrong `--tf` is refused as such on any machine.
 3. **Idempotency.** If a judgement exists for this `(strategy_hash, timeframe)`, rewrite its
    verdict file, print it and exit 0. No new trial is created. The verdict and the printed
    header name the strategy that was judged, so a renamed byte-identical copy reports the

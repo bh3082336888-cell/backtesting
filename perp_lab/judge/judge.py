@@ -188,7 +188,6 @@ def supersede(cfg, parent: str, tf: str, family: str) -> None:
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
           validate: Callable = validate_strategy) -> dict:
     jc = cfg["judge"]
-    client.check(cfg)                    # no sandbox, no judging: SandboxUnavailable propagates
     src = read_plugin(name)              # read once: this src and h are what is checked, run and recorded
     h = src.hash
     _require_timeframe(src, tf)
@@ -203,6 +202,8 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         if psrc.hash == h:
             raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
         _require_timeframe(psrc, tf, "parent ")   # its walk-forward runs at tf too, and is a trial
+    # The refusals above read only plugin source (no code runs), so they come first, on any machine.
+    client.check(cfg)                    # no sandbox, no judging: SandboxUnavailable propagates
 
     existing = db.get_judgement(cfg, h, tf)
     if existing:   # (re)write its verdict under the judged strategy's name, even for a renamed copy
