@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -76,14 +77,20 @@ CANDLE_COLS = ["open_time", "open", "high", "low", "close", "volume", "quote_vol
 
 
 def write_market(data_dir, symbols, candles_until="2026-10-15", funding_until="2026-09-30 16:00"):
-    """Synthetic 4h candles from 2025-01-01 and 8h funding, laid out like `lab backfill` output."""
+    """Synthetic 4h candles from 2025-01-01 and 8h funding, laid out like `lab backfill` output,
+    with its klines manifest: closed months from the monthly files, the last one (still open on
+    `candles_until`) from daily files and incomplete."""
     t0, t1 = pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp(candles_until, tz="UTC")
     n = int((t1 - t0) / pd.Timedelta(hours=4))
+    months = pd.period_range(t0.tz_localize(None), t1.tz_localize(None), freq="M")
+    manifest = {str(m): {"complete": m != months[-1], "source": "monthly" if m != months[-1] else "daily",
+                         "rows": 0} for m in months}
     for i, s in enumerate(symbols):
         b = make_bars(n=n, seed=10 + i, start="2025-01-01", tf_ms=4 * H)
         d = Path(data_dir) / s / "4h"
         d.mkdir(parents=True, exist_ok=True)
         b[CANDLE_COLS].reset_index(drop=True).to_parquet(d / "all.parquet")
+        (d / "_manifest.json").write_text(json.dumps(manifest, indent=1, sort_keys=True))
         ms = pd.date_range("2025-01-01", funding_until, freq="8h", tz="UTC").as_unit("ms").asi8
         fd = Path(data_dir) / s / "funding"
         fd.mkdir(parents=True, exist_ok=True)

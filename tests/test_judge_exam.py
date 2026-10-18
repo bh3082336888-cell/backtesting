@@ -47,6 +47,11 @@ def no_cost(cfg, src, tf, symbols, params, end):
     return 0.0
 
 
+def no_gaps(cfg, symbols, tf, end):
+    """Stand-in for the exam window's data check: exchange files throughout."""
+    return []
+
+
 def boom(*a, **kw):
     raise AssertionError("must not run")
 
@@ -56,12 +61,12 @@ def judged(cfg, name, outcomes, run, days=200):
     j = judge(cfg, name, "4h", validate=StubValidate(outcomes))
     if j["decision"] != "promote" or j.get("existing"):
         return j
-    return attempt_exam(cfg, j["id"], run=run, end_fn=end_after(days), cost_fn=no_cost)
+    return attempt_exam(cfg, j["id"], run=run, data_fn=no_gaps, end_fn=end_after(days), cost_fn=no_cost)
 
 
 def exams(cfg, run, days=200):
     """`lab exam`, with a stand-in exam and window end."""
-    return exam_pending(cfg, run=run, end_fn=end_after(days), cost_fn=no_cost)
+    return exam_pending(cfg, run=run, data_fn=no_gaps, end_fn=end_after(days), cost_fn=no_cost)
 
 
 ROOT_STRONG = {"donchian_atr": ("candidate", STRONG)}
@@ -141,7 +146,7 @@ def test_an_interrupted_exam_after_the_mint_is_left_as_exam_error(cfg, plugins):
     def interrupted(*a, **kw):
         raise Interrupted
     with pytest.raises(Interrupted):
-        attempt_exam(cfg, j["id"], run=interrupted, end_fn=end_after(200), cost_fn=no_cost)
+        attempt_exam(cfg, j["id"], run=interrupted, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
     r = db.get_judgement_by_id(cfg, j["id"])
     assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error") and budget.reads_used(cfg) == 1
     out = json.loads(verdict_path(cfg, r["strategy"], r["timeframe"], r["strategy_hash"]).read_text())
@@ -205,9 +210,9 @@ def test_a_judgement_that_already_has_a_result_is_never_re_examined(cfg, plugins
     done = judged(cfg, "donchian_atr", outcomes, stub_run(0.003))
     blocked = judged(cfg, "donchian_atr_wide", outcomes, stub_run(0.003))
     assert blocked["holdout_status"] == "blocked" and budget.reads_used(cfg) == 1
-    again = attempt_exam(cfg, done["id"], run=boom, end_fn=end_after(200))
+    again = attempt_exam(cfg, done["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200))
     assert again["holdout_status"] == "passed" and again["holdout_run_id"] == done["holdout_run_id"]
-    again = attempt_exam(cfg, blocked["id"], run=boom, end_fn=end_after(200))
+    again = attempt_exam(cfg, blocked["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200))
     assert (again["holdout_status"], again["holdout_reason"]) == ("blocked", "family_examined")
     assert budget.reads_used(cfg) == 1
 
@@ -250,7 +255,7 @@ def test_a_judgement_superseded_before_the_mint_is_not_minted(cfg, plugins):
     def superseded_meanwhile(cfg, src, tf, symbols, params, end):
         db.update_holdout(cfg, j["id"], "blocked", "superseded")
         return 0.0
-    r = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=superseded_meanwhile)
+    r = attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200), cost_fn=superseded_meanwhile)
     assert (r["holdout_status"], r["holdout_reason"]) == ("blocked", "superseded")
     assert budget.reads_used(cfg) == 0
 
@@ -455,7 +460,8 @@ def promoted(cfg, name="donchian_atr"):
 def crash(cfg, jid, days=200):
     """One attempt that mints its read and then crashes."""
     with pytest.raises(RuntimeError, match="exam crashed"):
-        attempt_exam(cfg, jid, run=stub_run(0.003, fail=True), end_fn=end_after(days), cost_fn=no_cost)
+        attempt_exam(cfg, jid, run=stub_run(0.003, fail=True), data_fn=no_gaps, end_fn=end_after(days),
+                     cost_fn=no_cost)
 
 
 def test_lab_judge_never_runs_an_exam(cfg, plugins, monkeypatch):
@@ -481,7 +487,8 @@ def test_a_retry_uses_the_window_stored_at_the_mint(cfg, plugins):
     def spy(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
         ends.append(end)
         return run(cfg, src, tf, symbols, params, token, end, stderr_dir=stderr_dir)
-    done = attempt_exam(cfg, j["id"], run=spy, end_fn=end_after(260), cost_fn=no_cost)   # more data since
+    done = attempt_exam(cfg, j["id"], run=spy, data_fn=no_gaps, end_fn=end_after(260),   # more data since
+                        cost_fn=no_cost)
     assert ends == [DAY_200] and done["holdout_status"] == "passed"
     assert db.run_row(cfg, done["holdout_run_id"])["date_end"] == str(DAY_200.date())
     entries = budget.read_log(budget.log_path(cfg))
@@ -494,7 +501,7 @@ def test_a_retry_skips_the_cost_probe_and_the_dated_check(cfg, plugins, monkeypa
     j = promoted(cfg)
     crash(cfg, j["id"])
     monkeypatch.setattr(jm, "dated_lookahead_failures", boom)
-    done = attempt_exam(cfg, j["id"], run=stub_run(0.003), end_fn=boom, cost_fn=boom)
+    done = attempt_exam(cfg, j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=boom, cost_fn=boom)
     assert done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
 
 
@@ -506,7 +513,7 @@ def test_a_read_fails_after_its_last_attempt(cfg, plugins):
         crash(cfg, j["id"])
     r = db.get_judgement_by_id(cfg, j["id"])
     assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error")
-    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=no_cost)
+    done = attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
     assert (done["holdout_status"], done["holdout_reason"]) == ("failed", "exam_error")
     assert done["holdout_run_id"] is None and budget.attempts(cfg, j["id"]) == 3 and budget.reads_used(cfg) == 1
     out = json.loads(Path(done["verdict_path"]).read_text())
@@ -522,10 +529,81 @@ def test_a_slow_plugin_is_blocked_before_any_read(cfg, plugins):
     def slow(cfg, src, tf, symbols, params, end):
         probed.append((src.name, tf, params, end))
         return 7.0                              # CPU hours per symbol; exam_cpu_hours is 6
-    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=slow)
+    done = attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200), cost_fn=slow)
     assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "too_slow")
     assert budget.reads_used(cfg) == 0
     assert probed == [("donchian_atr", "4h", {"n": 40, "atr_n": 14, "atr_mult": 3.0}, DAY_200)]
+
+
+CCXT_MONTH = "ETHUSDT 4h 2026-12: stitched from ccxt (no taker, trade-count or quote-volume columns)"
+
+
+def test_candles_not_from_exchange_files_keep_the_exam_pending_without_a_read(cfg, plugins, monkeypatch):
+    # A month `lab tail` stitched has no taker columns: a plugin reading them would trade nothing in
+    # the exam and spend its family's one read on a data gap. Checked before any worker starts.
+    import perp_lab.judge.judge as jm
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    monkeypatch.setattr(jm, "dated_lookahead_failures", boom)
+    seen = []
+
+    def ccxt_month(cfg, symbols, tf, end):
+        seen.append((symbols, tf, end))
+        return [CCXT_MONTH]
+    done = attempt_exam(cfg, j["id"], run=boom, data_fn=ccxt_month, end_fn=end_after(200), cost_fn=boom)
+    assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "incomplete_data")
+    assert seen == [(cfg.symbols, "4h", DAY_200)]
+    assert budget.read_log(budget.log_path(cfg)) == [] and budget.reads_used(cfg) == 0
+    assert done["detail"][0] == CCXT_MONTH and "lab backfill" in done["detail"][-1]
+    text = Path(done["verdict_path"]).read_text()
+    assert (json.loads(text)["holdout_status"], json.loads(text)["holdout_reason"]) == ("pending", "incomplete_data")
+    assert "ccxt" not in text                               # the verdict carries the code only
+    monkeypatch.setattr(jm, "dated_lookahead_failures", lambda *a, **k: [])
+    done = attempt_exam(cfg, j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
+    assert done["holdout_status"] == "passed" and budget.reads_used(cfg) == 1      # once the data is fixed
+
+
+def test_a_retry_waits_for_exchange_data_without_using_an_attempt(cfg, plugins):
+    # The read is spent and its window fixed; a retry over ccxt candles would still fail for want of
+    # data, so it waits too, and waiting uses none of the read's attempts.
+    budget.init_log(cfg)
+    j = promoted(cfg)
+    crash(cfg, j["id"], days=200)
+    seen = []
+
+    def ccxt_month(cfg, symbols, tf, end):
+        seen.append(end)
+        return [CCXT_MONTH]
+    done = attempt_exam(cfg, j["id"], run=boom, data_fn=ccxt_month, end_fn=boom, cost_fn=boom)
+    assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "incomplete_data")
+    assert seen == [DAY_200] and budget.attempts(cfg, j["id"]) == 1 and budget.reads_used(cfg) == 1
+    done = attempt_exam(cfg, j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=boom, cost_fn=boom)
+    assert done["holdout_status"] == "passed" and budget.attempts(cfg, j["id"]) == 2 and budget.reads_used(cfg) == 1
+
+
+def test_lab_exam_prints_why_the_data_is_refused(cfg, monkeypatch):
+    import perp_lab.judge.judge as jm
+    waiting = {"strategy": "s", "timeframe": "1h", "holdout_status": "pending", "holdout_reason": "incomplete_data",
+               "detail": [CCXT_MONTH, "run `lab backfill` ..."]}
+    monkeypatch.setattr(jm, "exam_pending", lambda cfg: [waiting])
+    r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
+    assert r.exit_code == 0 and "s @ 1h: pending (incomplete_data)" in r.output
+    assert f"  {CCXT_MONTH}" in r.output and "lab backfill" in r.output
+
+
+def test_a_real_market_with_a_ccxt_month_in_the_window_mints_nothing(tmp_path, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    cfg = market_config(tmp_path, judge={"min_holdout_days": 30})
+    budget.init_log(cfg)
+    p = cfg.data_dir / "ETHUSDT" / "4h" / "_manifest.json"
+    man = json.loads(p.read_text())
+    man["2026-08"] = {"complete": False, "source": "ccxt", "rows": 0}
+    p.write_text(json.dumps(man))
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG))
+    monkeypatch.setattr(jm, "dated_lookahead_failures", boom)       # the data check comes first
+    done = attempt_exam(cfg, j["id"], run=boom, cost_fn=boom)        # the real window end and data check
+    assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "incomplete_data")
+    assert done["detail"][0].startswith("ETHUSDT 4h 2026-08: stitched from ccxt") and budget.reads_used(cfg) == 0
 
 
 def test_a_plugin_error_fails_the_exam_without_its_message_in_the_verdict(cfg, plugins):
@@ -536,7 +614,7 @@ def test_a_plugin_error_fails_the_exam_without_its_message_in_the_verdict(cfg, p
     def raises(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
         dirs.append(stderr_dir)
         raise PluginError("exception", "ValueError", "close=123.45")
-    done = attempt_exam(cfg, j["id"], run=raises, end_fn=end_after(200), cost_fn=no_cost)
+    done = attempt_exam(cfg, j["id"], run=raises, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
     assert (done["holdout_status"], done["holdout_reason"]) == ("failed", "plugin_error")
     assert budget.reads_used(cfg) == 1
     text = Path(done["verdict_path"]).read_text()
@@ -560,7 +638,7 @@ def test_no_mint_when_the_sandbox_is_unavailable(cfg, plugins, monkeypatch):
         raise SandboxUnavailable("Landlock ABI 3 < 6")
     monkeypatch.setattr(client, "check", unavailable)
     with pytest.raises(SandboxUnavailable):
-        attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=no_cost)
+        attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
     assert budget.reads_used(cfg) == 0
     r = db.get_judgement_by_id(cfg, j["id"])
     assert (r["holdout_status"], r["holdout_reason"]) == ("pending", "exam_error")
@@ -571,7 +649,7 @@ def test_no_mint_when_the_sandbox_is_unavailable(cfg, plugins, monkeypatch):
     crash(cfg, j["id"])
     monkeypatch.setattr(client, "check", unavailable)
     with pytest.raises(SandboxUnavailable):
-        attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=no_cost)
+        attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
     assert budget.attempts(cfg, j["id"]) == 1
 
 
@@ -594,7 +672,7 @@ def test_the_exam_runs_on_the_bytes_whose_hash_was_checked(cfg, plugins, monkeyp
     def run(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
         sent.append(src.text)
         return stub_run(0.003)(cfg, src, tf, symbols, params, token, end)
-    done = attempt_exam(cfg, j["id"], run=run, end_fn=end_after(200), cost_fn=no_cost)
+    done = attempt_exam(cfg, j["id"], run=run, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
     assert sent == [judged_bytes] and len(reads) == 1 and done["holdout_status"] == "passed"
 
 
@@ -621,7 +699,7 @@ def test_the_attempt_cap_is_enforced_at_the_mint(cfg, plugins, monkeypatch):
     for _ in range(3):
         crash(cfg, j["id"])
     monkeypatch.setattr(budget, "attempts", lambda *a, **kw: 0)    # a stale count before the lock
-    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=no_cost)
+    done = attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
     assert (done["holdout_status"], done["holdout_reason"]) == ("failed", "exam_error")
     assert len(budget.read_log(budget.log_path(cfg))) == 3
 
@@ -635,7 +713,7 @@ def test_a_plugin_error_in_the_cost_probe_blocks_without_a_read(cfg, plugins, er
 
     def failing(*a, **kw):
         raise err
-    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200), cost_fn=failing)
+    done = attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200), cost_fn=failing)
     assert (done["holdout_status"], done["holdout_reason"]) == ("blocked", "plugin_error")
     assert budget.reads_used(cfg) == 0
     text = Path(done["verdict_path"]).read_text()
@@ -654,7 +732,7 @@ def test_a_sandbox_down_before_the_mint_mints_nothing(cfg, plugins, monkeypatch,
     if step == "dated check":
         monkeypatch.setattr(jm, "dated_lookahead_failures", unavailable)
     with pytest.raises(SandboxUnavailable):
-        attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(200),
+        attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(200),
                      cost_fn=unavailable if step == "cost probe" else no_cost)
     assert budget.reads_used(cfg) == 0
     r = db.get_judgement_by_id(cfg, j["id"])
@@ -676,11 +754,11 @@ def test_an_exam_in_progress_is_left_alone(cfg, plugins):
         assert release.wait(60)
         return held(cfg, src, tf, symbols, params, token, end, stderr_dir=stderr_dir)
     a = threading.Thread(target=lambda: out.setdefault("a", attempt_exam(
-        cfg, j["id"], run=slow, end_fn=end_after(200), cost_fn=no_cost)))
+        cfg, j["id"], run=slow, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)))
     a.start()
     try:
         assert inside.wait(60)
-        b = attempt_exam(cfg, j["id"], run=boom, end_fn=boom, cost_fn=boom)
+        b = attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=boom, cost_fn=boom)
         assert b["in_progress"] is True and (b["holdout_status"], b["holdout_reason"]) == ("pending", "awaiting_exam")
         r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
         assert r.exit_code == 0 and "in progress elsewhere" in r.output and "ERROR" not in r.output
@@ -703,15 +781,16 @@ def test_one_exam_at_a_time_on_this_machine(cfg, plugins):
     inner, held = [], stub_run(0.003)
 
     def run(cfg_, src, tf, symbols, params, token, end, stderr_dir=None):
-        inner.append(attempt_exam(cfg, b["id"], run=boom, end_fn=boom, cost_fn=boom))
+        inner.append(attempt_exam(cfg, b["id"], run=boom, data_fn=no_gaps, end_fn=boom, cost_fn=boom))
         return held(cfg_, src, tf, symbols, params, token, end, stderr_dir=stderr_dir)
-    done = attempt_exam(cfg, a["id"], run=run, end_fn=end_after(200), cost_fn=no_cost)
+    done = attempt_exam(cfg, a["id"], run=run, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
     assert done["holdout_status"] == "passed"
     [other] = inner
     assert other["in_progress"] is True and (other["holdout_status"], other["holdout_reason"]) == \
         ("pending", "awaiting_exam")
     assert budget.reads_used(cfg) == 1 and not budget.holds_read(cfg, b["id"], b["lineage_id"])
-    done = attempt_exam(cfg, b["id"], run=held, end_fn=end_after(200), cost_fn=no_cost)   # later, its turn
+    done = attempt_exam(cfg, b["id"], run=held, data_fn=no_gaps, end_fn=end_after(200),  # later, its turn
+                        cost_fn=no_cost)
     assert done["holdout_status"] == "passed" and budget.reads_used(cfg) == 2
 
 
@@ -727,7 +806,7 @@ def test_a_retry_minted_after_a_stale_count_runs_on_the_stored_end(cfg, plugins,
     def spy(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
         ends.append(end)
         return run(cfg, src, tf, symbols, params, token, end, stderr_dir=stderr_dir)
-    done = attempt_exam(cfg, j["id"], run=spy, end_fn=end_after(260), cost_fn=no_cost)
+    done = attempt_exam(cfg, j["id"], run=spy, data_fn=no_gaps, end_fn=end_after(260), cost_fn=no_cost)
     assert ends == [DAY_200] and done["holdout_status"] == "passed"
     assert db.run_row(cfg, done["holdout_run_id"])["date_end"] == str(DAY_200.date())
     assert [e["window_end"] for e in budget.read_log(budget.log_path(cfg))] == [DAY_200.isoformat()] * 2
@@ -740,6 +819,6 @@ def test_a_short_window_waits_without_starting_a_worker(cfg, plugins, monkeypatc
     monkeypatch.setattr(jm, "dated_lookahead_failures", boom)
     monkeypatch.setattr(client, "check", boom)
     monkeypatch.setattr(client, "spawn", boom)
-    done = attempt_exam(cfg, j["id"], run=boom, end_fn=end_after(100), cost_fn=boom)
+    done = attempt_exam(cfg, j["id"], run=boom, data_fn=no_gaps, end_fn=end_after(100), cost_fn=boom)
     assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "too_short")
     assert budget.reads_used(cfg) == 0

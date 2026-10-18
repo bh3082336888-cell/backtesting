@@ -13,6 +13,7 @@ only, so a plugin too slow to stream is blocked without one.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,6 +63,57 @@ def window_end(cfg, symbols: list[str], tf: str) -> pd.Timestamp:
         ih = fund.interval_hours if pd.notna(fund.interval_hours) else DEFAULT_FUNDING_H
         ends.append(min(last_open + TF_MS[tf], int(fund.funding_time) + int(ih * 3_600_000)))
     return pd.Timestamp(min(ends), unit="ms", tz="UTC").floor("D")
+
+
+EXCHANGE_SOURCES = ("monthly", "daily")    # data.binance.vision files: every column, taker flow included
+CCXT = "stitched from ccxt (no taker, trade-count or quote-volume columns)"
+
+
+def window_data_problems(cfg, symbols: list[str], tf: str, end: pd.Timestamp) -> list[str]:
+    """Where the exam window's candles didn't come from exchange files, as "SYMBOL tf YYYY-MM: why",
+    from the klines manifests (`lab backfill` and `lab tail` write them); no candle is read.
+
+    For every month overlapping [holdout_start, end), each symbol's manifest must name a
+    data.binance.vision source (`monthly`, or `daily` for a month rebuilt from daily files). A month
+    `lab tail` stitched is `ccxt`: its candles carry no taker, trade-count or quote-volume columns,
+    so a plugin that reads them sits flat through the exam and spends its family's one read on a
+    data gap. A month the window covers to its end must also be complete (otherwise days of it are
+    missing); the month the window ends in may still be open, since `window_end` stops at the last
+    candle. A missing or unreadable manifest, a month without an entry or an unknown source counts
+    too: what isn't known to be exchange data is refused."""
+    start = cfg.holdout_start
+    if end <= start:
+        return []
+    months = pd.period_range(start.tz_localize(None), (end - pd.Timedelta(milliseconds=1)).tz_localize(None),
+                             freq="M")
+    out = []
+    for s in symbols:
+        p = cfg.data_dir / s / tf / "_manifest.json"
+        try:
+            man = json.loads(p.read_text())
+            if not isinstance(man, dict):
+                raise ValueError("not an object")
+        except FileNotFoundError:
+            out += [f"{s} {tf} {m}: no manifest" for m in months]
+            continue
+        except (OSError, ValueError):
+            out += [f"{s} {tf} {m}: manifest unreadable" for m in months]
+            continue
+        for m in months:
+            e = man.get(str(m))
+            covered = (m + 1).start_time.tz_localize("UTC") <= end     # the window runs to its end
+            if not isinstance(e, dict):
+                why = "no manifest entry"
+            elif e.get("source") == "ccxt":
+                why = CCXT
+            elif e.get("source") not in EXCHANGE_SOURCES:
+                why = f"unknown source {e.get('source')!r}"
+            elif covered and e.get("complete") is not True:
+                why = "incomplete (days missing from data.binance.vision)"
+            else:
+                continue
+            out.append(f"{s} {tf} {m}: {why}")
+    return out
 
 
 def cost_hours(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict, end: pd.Timestamp) -> float:

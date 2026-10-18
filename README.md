@@ -85,6 +85,11 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 - If a plugin file is edited after it was judged, its pending exam waits with holdout status `pending` and
   reason `plugin_changed` (no new read is spent; one already spent by a crashed exam stays with it) until the
   judged version is restored; an edited plugin is a new version and is judged separately.
+- Before any read, the exam checks where its window's candles came from (the klines manifests, no candle read):
+  every month must come from data.binance.vision files, and a month the window covers to its end must be
+  complete. A month `lab tail` stitched from ccxt has no taker, trade-count or quote-volume columns, so a
+  plugin reading them would trade nothing; the exam waits as `pending` / `incomplete_data` (a retry on a
+  spent read too, using no attempt), and `lab exam` lists the months and says to run `lab backfill`.
 - `lab exam` reports each failing exam with ` ERROR: ...`, continues with the rest, and exits 1 if any failed.
 - **Paper approval needs a passed exam**, for every strategy.
 - Public verdicts in `runs/verdicts/` carry the holdout outcome as status and code only, never numbers.
@@ -122,6 +127,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | Paper approval needs a passed holdout exam | `store/db.py::approve_paper`, `tests/test_store.py` |
 | Harness lineage edges can't be overwritten by hand, nor a harness-judged run re-parented | `store/db.py::add_edge` |
 | Verdicts never carry holdout numbers | `judge/judge.py::write_verdict`, `tests/test_judge_exam.py` |
+| No holdout read over candles that didn't come from exchange files (ccxt-stitched, incomplete or unknown months wait as `incomplete_data`) | `judge/exam.py::window_data_problems`, `tests/test_exam.py`, `tests/test_judge_exam.py` |
 
 ## Modelling choices (and their bias)
 

@@ -21,7 +21,7 @@ import pandas as pd
 
 from perp_lab.engine.metrics import summarize
 from perp_lab.judge import budget, gates
-from perp_lab.judge.exam import cost_hours, run_exam, window_end
+from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, window_end
 from perp_lab.plugins import PluginMetaError, PluginSource, UndeclaredTimeframe, require_timeframe
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
@@ -284,6 +284,8 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
 
 
 HOLDOUT_BOOT = 10_000
+BACKFILL_HINT = ("run `lab backfill --tfs {tf}` (it rebuilds a ccxt-stitched month from data.binance.vision once "
+                 "the month has closed), then `lab exam` again")
 
 
 def holdout_report(j: dict, res, ok: bool, reasons: list[str], m: dict, floor_pct: float) -> str:
@@ -381,18 +383,22 @@ def _record_failed_holdout_run(cfg, j: dict, s: dict, end: pd.Timestamp, err: Pl
 
 
 def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = window_end,
-                 cost_fn: Callable = cost_hours) -> dict:
+                 cost_fn: Callable = cost_hours, data_fn: Callable = window_data_problems) -> dict:
     """Try the holdout exam for a pending judgement, under the budget rules. Run by `lab exam`
     only. In order (the sandbox spec's "Streamed exam"):
 
     1. read the plugin once; an edit since it was judged waits as plugin_changed;
     2. a judgement already holding its read: failed / exam_error after exam_max_attempts, else the
-       window end stored at the mint, and on to 6 (the read is spent and the window fixed);
+       window end stored at the mint, and on to 3b, then 6 (the read is spent and the window fixed);
     3. the window end (shorter than min_holdout_days: pending / too_short, before any worker
-       starts); 4. the dated lookahead check over it; 5. the cost probe (too_slow, or
-       plugin_error if the plugin fails it); 6. the sandbox check; 7. the judgement read again (no
-       longer pending, e.g. superseded meanwhile: stop, no read), then mint, storing the window end
-       (refused, failed / exam_error, once the read's attempts are used up); 8. the streamed exam.
+       starts); 3b. where the window's candles came from, from the manifests only: a month not
+       from exchange files (stitched from ccxt, incomplete, unknown) waits as pending /
+       incomplete_data, with the months under `detail`, so no read is spent and no attempt used
+       on candles a plugin may not be able to trade on; 4. the dated lookahead check over it;
+       5. the cost probe (too_slow, or plugin_error if the plugin fails it); 6. the sandbox
+       check; 7. the judgement read again (no longer pending, e.g. superseded meanwhile: stop,
+       no read), then mint, storing the window end (refused, failed / exam_error, once the
+       read's attempts are used up); 8. the streamed exam.
 
     SandboxUnavailable at any step before the mint is pending / exam_error, re-raised: nothing is
     minted and no attempt used. A plugin error in the exam itself is failed / plugin_error (the read
@@ -409,10 +415,10 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
             return j
         if not (mine and alone):
             return {**j, "in_progress": True}
-        return _attempt(cfg, j, run, end_fn, cost_fn)
+        return _attempt(cfg, j, run, end_fn, cost_fn, data_fn)
 
 
-def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -> dict:
+def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable, data_fn: Callable) -> dict:
     """attempt_exam's steps, under the judgement's exam lock."""
     jid = j["id"]
     try:                                                     # 1. these bytes are checked and examined
@@ -427,7 +433,8 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -
     syms, tf, params, fam = s["universe"], j["timeframe"], s["sensitivity"]["base_params"], j["lineage_id"]
     jc = cfg["judge"]
     try:                                    # the sandbox down at any step before the mint: no read, no attempt
-        if budget.holds_read(cfg, jid, fam):                 # 2. a retry on the same read
+        retry = budget.holds_read(cfg, jid, fam)
+        if retry:                                            # 2. a retry on the same read
             if budget.attempts(cfg, jid, fam) >= jc["exam_max_attempts"]:   # (the mint re-checks, locked)
                 db.update_holdout(cfg, jid, "failed", "exam_error")
                 return finish(cfg, jid)
@@ -439,6 +446,12 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable) -
             if (end - cfg.holdout_start).days < jc["min_holdout_days"]:   # too short: no worker started
                 db.update_holdout(cfg, jid, "pending", "too_short")       # (the mint checks again, locked)
                 return finish(cfg, jid)
+        problems = data_fn(cfg, syms, tf, end)               # 3b. manifests only: no candle is read
+        if problems:
+            log.warning("exam of judgement %s waits for exchange data:\n  %s", jid, "\n  ".join(problems))
+            db.update_holdout(cfg, jid, "pending", "incomplete_data")
+            return {**finish(cfg, jid), "detail": [*problems, BACKFILL_HINT.format(tf=tf)]}
+        if not retry:
             if dated_lookahead_failures(cfg, src, end, params=params):     # 4
                 db.update_holdout(cfg, jid, "blocked", "lookahead")   # caught over the real exam window: no read
                 return finish(cfg, jid)

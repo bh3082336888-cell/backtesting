@@ -369,6 +369,13 @@ as in 3a); after that the judgement is `failed` with `exam_error`.
 2. If the judgement already holds a read (`budget.holds_read`): the stored window end, and on to
    step 6. The read is spent and the window fixed, so the checks in between can only strand it.
 3. Window end.
+   3b. (Added 2026-10-18.) Where the window's candles came from, from the klines manifests only:
+   every month overlapping the window must name a data.binance.vision source (`monthly`, or
+   `daily` for a month rebuilt from daily files), and a month the window covers to its end must
+   be complete. Otherwise (a month `lab tail` stitched from ccxt, whose candles have no taker,
+   trade-count or quote-volume columns; an incomplete month; a missing entry, manifest or unknown
+   source) the judgement stays `pending` with `incomplete_data` and nothing is minted. This step
+   also runs on a retry (with the stored window end), where it uses no attempt.
 4. The dated lookahead check (as in 3a, now sandboxed). It still matters: it stops a plugin whose
    promotion came from peeking from spending a read.
 5. **Cost probe:** time `prepare` on the full research bars in a separate worker and multiply by
