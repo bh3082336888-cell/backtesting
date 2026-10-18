@@ -56,7 +56,7 @@ walkforward:
   train_months: 6
   test_months: 2
   selection_metric: sharpe    # pooled: mean per-symbol Sharpe over the train window
-  min_train_trades: 20        # pooled across universe; combos below this score -inf
+  min_train_trades_per_coin: 2.5   # pooled; × coins listed in the train window (20 at 8 coins)
 
 validation:
   sensitivity_steps: [-0.2, -0.1, 0.1, 0.2]

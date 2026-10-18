@@ -16,6 +16,11 @@ import pandas as pd
 MIN_OOS_TRADES = 30
 
 
+def per_coin_min(per_coin: float, n_coins: int) -> int:
+    """A trade minimum that scales with the number of coins behind it."""
+    return math.ceil(per_coin * n_coins)
+
+
 def new_run_id() -> str:
     return f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
 
