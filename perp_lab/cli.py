@@ -150,6 +150,7 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
     import sqlalchemy as sa
 
     from perp_lab.paper.runner import PaperRunner
+    from perp_lab.sandbox import client
     from perp_lab.runs import data_id, data_identity, new_run_id, repo_commit
     from perp_lab.store.db import current_status, engine, record_run, runs
     from perp_lab.plugins import PluginSource
@@ -168,6 +169,12 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
     rid = new_run_id()
     out = cfg.runs_dir / rid
     syms = _syms(cfg, symbols) if symbols else r["universe"]
+    held = client.max_workers(cfg)
+    if len(syms) > held:
+        # One paper worker per coin. Which real fix to pick waits until a strategy first passes an exam.
+        typer.secho(f"refused: {len(syms)} coins need {len(syms)} paper workers of {cfg['sandbox']['memory_mb']} MB; "
+                    f"this machine holds {held}. Pass --symbols with at most {held} coins.", fg="red")
+        raise typer.Exit(2)
     started = datetime.now(timezone.utc)
     record_run(cfg, {"run_id": rid, "strategy": r["strategy"], "strategy_hash": src.hash,
                      "hypothesis": src.meta.hypothesis, "params": params, "universe": syms,

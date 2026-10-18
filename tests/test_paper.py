@@ -1,7 +1,9 @@
 import asyncio
+import json
 import math
 import time
 
+import ccxt
 import numpy as np
 import pandas as pd
 import pytest
@@ -403,3 +405,19 @@ def test_a_paper_run_records_its_data(tmp_path, monkeypatch, plugins):
     assert r.exit_code == 0, r.output
     p = db.read_table(cfg, db.runs, db.runs.c.validation_mode == "paper")
     assert p.data_id.tolist() == [data_id(data_identity(cfg, ["BTCUSDT", "ETHUSDT"]))]
+
+
+def test_cli_paper_refuses_more_coins_than_workers(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    from perp_lab.store import db
+    cfg = approved_paper_run(tmp_path)                  # helper from Task 8
+    monkeypatch.setattr(client, "max_workers", lambda c: 1)
+    monkeypatch.setattr(PaperRunner, "run", lambda self, max_bars=None: asyncio.sleep(0))
+    r = CliRunner().invoke(app, ["paper", "c1", "--config", str(cfg.path)])
+    assert r.exit_code == 2 and "refused: 2 coins need 2 paper workers" in r.output
+    assert db.read_table(cfg, db.runs, db.runs.c.validation_mode == "paper").empty
+    r = CliRunner().invoke(app, ["paper", "c1", "--symbols", "BTC", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+
