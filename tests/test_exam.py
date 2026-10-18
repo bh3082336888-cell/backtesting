@@ -5,14 +5,16 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from perp_lab.data.store import load_bars
+from perp_lab.engine.backtest import EngineParams
 from perp_lab.holdout import HoldoutViolation, issue_holdout_token
 from perp_lab.judge.exam import cost_hours, run_exam, window_end
 from perp_lab.plugins import PluginSource
-from perp_lab.sandbox import client
+from perp_lab.sandbox import client, stream
 from perp_lab.sandbox.errors import PluginError, WorkerLost
 from tests.conftest import market_config
 from tests.sandbox_fixtures import InProcessWorker
@@ -204,3 +206,20 @@ def test_evicting_drops_a_file_from_the_page_cache(caplog):
         assert "/nonexistent/lib.so" in caplog.text               # skipped, not raised
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_a_batch_evicts_its_workers_files_itself(tmp_path, monkeypatch):
+    # The eviction is run_batch's own job, before a rerun and once it ends, so no caller can leave
+    # it out: here it is called directly, with a lost first attempt.
+    cfg = market_config(tmp_path)
+    _, _, events = _spied(monkeypatch, lose=0)
+    tok = issue_holdout_token("fam", "exam test", tmp_path / "test_log.jsonl")
+    start_ms = cfg.holdout_start.value // 10**6
+
+    def load(s):
+        bars = load_bars(cfg, s, "4h", end=END, holdout=tok)
+        return bars, int(np.searchsorted(bars["open_time"].to_numpy(), start_ms)), EngineParams.from_config(cfg, s)
+    stream.run_batch(cfg, PluginSource.read("donchian_atr"), "4h", {"n": 20}, cfg.symbols, load)
+    assert [e[0] for e in events] == ["spawn", "spawn", "evict", "spawn", "spawn", "evict"], events
+    first, rerun = {e[1] for e in events[:2]}, {e[1] for e in events[3:5]}
+    assert events[2] == ("evict", first, True) and events[5] == ("evict", first | rerun, True)

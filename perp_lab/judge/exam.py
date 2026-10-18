@@ -13,7 +13,7 @@ only, so a plugin too slow to stream is blocked without one.
 After each batch, whatever its outcome, and before the next batch's workers start, the files the
 batch's workers mapped (their libraries) are evicted from the page cache: a worker can fault in
 chosen pages of them, which a later batch's workers, holding earlier bars, or a later exam could
-read back (spec R7). `stream.run_batch` does the same before a rerun.
+read back (spec R7). `stream.run_batch` does it, and before a rerun too.
 """
 
 from __future__ import annotations
@@ -102,11 +102,7 @@ def run_exam(cfg, src: PluginSource, tf: str, symbols: list[str], params: dict, 
     runs = {}
     per = client.max_workers(cfg)
     for b in range(0, len(symbols), per):
-        mapped: list = []
-        try:
-            runs.update(stream.run_batch(cfg, src, tf, params, symbols[b:b + per], load, stderr_dir, mapped))
-        finally:
-            stream.evict(mapped)            # before the next batch's workers start
+        runs.update(stream.run_batch(cfg, src, tf, params, symbols[b:b + per], load, stderr_dir))   # evicts its files
     daily, parts = {}, []
     for s in symbols:
         res = runs[s]

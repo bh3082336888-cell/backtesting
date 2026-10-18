@@ -24,9 +24,10 @@ that decides at random on holdout bars, or that changes course once it has seen 
 
 Each thread spawns, uses and closes its own worker (a worker dies with the thread that spawned
 it), writes the worker's stderr, if any, to `<stderr_dir>/<symbol>-<pid>.txt`, and adds the files
-the worker mapped to `mapped`. `evict` drops those from the page cache once their workers are gone:
-`run_batch` does before a rerun, and the exam after each batch, so no worker starts while pages
-touched by workers that held later bars are still cached (spec R7).
+the worker mapped to `mapped`. `run_batch` drops those from the page cache (`evict`) once their
+workers are gone: before a rerun, and when it returns or raises. So no worker starts, in a rerun or
+in the exam's next batch, while pages touched by workers that held later bars are still cached
+(spec R7).
 """
 
 from __future__ import annotations
@@ -228,22 +229,26 @@ def _streams(cfg, src: PluginSource, tf: str, params: dict, symbols: list[str], 
 
 
 def run_batch(cfg, src: PluginSource, tf: str, params: dict, symbols: list[str], load: Loader,
-              stderr_dir: Path | None = None, mapped: list | None = None) -> dict[str, BacktestResult]:
+              stderr_dir: Path | None = None) -> dict[str, BacktestResult]:
     """Each symbol's streamed run, all at once in lockstep; the trusted engine's result per symbol.
     A lost worker restarts the whole batch once, in fresh workers, and that rerun must repeat the
-    lost run's decisions (a mismatch otherwise); a second loss is `PluginError(kind)`. Each worker's
-    mapped files (a frozenset per worker, the rerun's included) are appended to `mapped`; before a
-    rerun, the lost attempt's are evicted from the page cache (its workers may have held later bars
-    than the rerun's first ones). The caller evicts the rest once this returns."""
+    lost run's decisions (a mismatch otherwise); a second loss is `PluginError(kind)`. The files its
+    workers mapped are evicted from the page cache before a rerun (the lost attempt's workers may
+    have held later bars than the rerun's first ones) and again when it returns or raises, so the
+    caller's next batch starts on a cache they no longer mark."""
     symbols = list(symbols)
     first = {s: Trace() for s in symbols}
+    mapped: list = []                       # a frozenset per worker, the rerun's included
     try:
-        return _streams(cfg, src, tf, params, symbols, load, stderr_dir, first, mapped=mapped)
-    except WorkerLost:
-        pass                                # transient machine trouble gets one rerun, held to the first
-    evict(mapped)                           # the lost attempt's workers are all closed by now
-    try:
-        return _streams(cfg, src, tf, params, symbols, load, stderr_dir, {s: Trace() for s in symbols}, first,
-                        mapped)
-    except WorkerLost as e:
-        raise PluginError(e.kind, "", e.message, e.stderr) from e
+        try:
+            return _streams(cfg, src, tf, params, symbols, load, stderr_dir, first, mapped=mapped)
+        except WorkerLost:
+            pass                            # transient machine trouble gets one rerun, held to the first
+        evict(mapped)                       # the lost attempt's workers are all closed by now
+        try:
+            return _streams(cfg, src, tf, params, symbols, load, stderr_dir, {s: Trace() for s in symbols}, first,
+                            mapped)
+        except WorkerLost as e:
+            raise PluginError(e.kind, "", e.message, e.stderr) from e
+    finally:
+        evict(mapped)                       # every worker of the batch is closed by now, whatever happened
