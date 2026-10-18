@@ -32,6 +32,27 @@ def test_monte_carlo_divides_each_trade_by_the_coins_listed_on_its_entry_day():
     assert mc_drawdown(trades, cpd, iterations=10, seed=1)["actual_dd"] == pytest.approx(0.9 * 0.95 - 1)
 
 
+def test_random_entry_keeps_coins_the_strategy_never_traded(cfg, monkeypatch):
+    rng = np.random.default_rng(0)
+    ra = {seed: pd.Series(rng.normal(0, 0.01, 10), index=DAYS) for seed in range(3)}
+    monkeypatch.setattr(benchmarks, "run_many", lambda cfg, src, jobs, workers, stderr_dir: [
+        {"seed": j[4], "symbol": j[1], "daily": ra[j[4]], "trades": pd.DataFrame()} for j in jobs])
+    out = benchmarks.random_entry(cfg, make_wf(), seeds=3)
+    want = [sharpe(portfolio_returns({"A": ra[s], "B": pd.Series(0.0, index=DAYS)})) for s in range(3)]
+    assert sorted(out["sharpes"]) == pytest.approx(sorted(want))
+
+
+def test_random_entry_zero_fills_the_never_traded_coin_only_on_its_listed_days(cfg, monkeypatch):
+    # Sharpe ignores a constant scale, so B must be listed on part of the span to show in it.
+    rng = np.random.default_rng(1)
+    ra = {seed: pd.Series(rng.normal(0, 0.01, 10), index=DAYS) for seed in range(3)}
+    monkeypatch.setattr(benchmarks, "run_many", lambda cfg, src, jobs, workers, stderr_dir: [
+        {"seed": j[4], "symbol": j[1], "daily": ra[j[4]], "trades": pd.DataFrame()} for j in jobs])
+    out = benchmarks.random_entry(cfg, make_wf(b_from=5), seeds=3)
+    want = [sharpe(portfolio_returns({"A": ra[s], "B": pd.Series(0.0, index=DAYS[5:])})) for s in range(3)]
+    assert sorted(out["sharpes"]) == pytest.approx(sorted(want))
+
+
 def test_monte_carlo_takes_several_trades_entering_on_one_day():
     cpd = coins_per_day({"A": pd.Series(0.0, index=DAYS)})
     day = int(DAYS[3].value // 10**6)
