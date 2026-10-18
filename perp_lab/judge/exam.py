@@ -87,7 +87,12 @@ def window_data_problems(cfg, symbols: list[str], tf: str, end: pd.Timestamp) ->
     too: what isn't known to be exchange data is refused.
 
     The exam also reads the regime timeframe's candles (`regime`, built from them by `load_bars`),
-    so its months are checked as well, ccxt allowed there: the labels need OHLC only."""
+    so its months are checked as well, ccxt allowed there: the labels need OHLC only.
+
+    Last, at both timeframes, every UTC day of the window must hold at least one candle (from
+    `open_time` alone, as `window_end` reads it; never a price). That catches a day missing from
+    the open month, which `complete` can't show, while a short exchange outage, which monthly files
+    carry too, doesn't hold an exam back for good."""
     start = cfg.holdout_start
     if end <= start:
         return []
@@ -99,6 +104,8 @@ def window_data_problems(cfg, symbols: list[str], tf: str, end: pd.Timestamp) ->
         out += _month_problems(cfg, s, tf, months, end, EXCHANGE_SOURCES, "")
         if rtf != tf:
             out += _month_problems(cfg, s, rtf, months, end, REGIME_SOURCES, " (for the regime labels)")
+        for t in dict.fromkeys((tf, rtf)):
+            out += _missing_days(cfg, s, t, start, end)
     return out
 
 
@@ -126,6 +133,29 @@ def _month_problems(cfg, s: str, tf: str, months, end: pd.Timestamp, sources: tu
         else:
             continue
         out.append(f"{s} {tf} {m}: {why}{note}")
+    return out
+
+
+DAY_MS = 86_400_000
+
+
+def _missing_days(cfg, s: str, tf: str, start: pd.Timestamp, end: pd.Timestamp) -> list[str]:
+    """The UTC days in [start, end) without a single `tf` candle of `s`, as runs ("SYMBOL tf
+    2026-09-10 to 2026-09-12: no candles (3 days)"); reads open_time only, never a price."""
+    lo, hi = start.value // 10**6, end.value // 10**6
+    try:
+        files = _files(cfg.data_dir / s / tf)
+    except FileNotFoundError:
+        t = np.empty(0, dtype="int64")
+    else:
+        t = np.concatenate([pd.read_parquet(f, columns=["open_time"]).open_time.to_numpy("int64") for f in files])
+    t = t[(t >= lo) & (t < hi)]
+    missing = np.setdiff1d(np.arange(lo // DAY_MS, -(-hi // DAY_MS)), t // DAY_MS)
+    out = []
+    for run in (np.split(missing, np.flatnonzero(np.diff(missing) != 1) + 1) if len(missing) else []):
+        a, b = (pd.Timestamp(int(d) * DAY_MS, unit="ms").strftime("%Y-%m-%d") for d in (run[0], run[-1]))
+        out.append(f"{s} {tf} {a}: no candles" if len(run) == 1
+                   else f"{s} {tf} {a} to {b}: no candles ({len(run)} days)")
     return out
 
 

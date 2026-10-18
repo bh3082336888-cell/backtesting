@@ -91,7 +91,9 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
   plugin reading them would trade nothing; the exam waits as `pending` / `incomplete_data` (a retry on a
   spent read too, using no attempt), and `lab exam` lists the months and says to run `lab backfill`. The
   regime timeframe's months (4h: `regime` is built from them) are checked too, ccxt allowed there, and the
-  window ends where those candles do, so no exam bar carries a stale regime label.
+  window ends where those candles do, so no exam bar carries a stale regime label. And every UTC day of the
+  window must hold at least one candle at both timeframes (timestamps only): that catches a day missing from
+  the still-open month, while a short exchange outage doesn't hold an exam back.
 - `lab exam` reports each failing exam with ` ERROR: ...`, continues with the rest, and exits 1 if any failed.
 - `lab withdraw PLUGIN --tf TF --reason "..."` withdraws a pending promotion before its read is minted (a
   human's decision on the walk-forward record, e.g. a pre-registered check that failed): status and code

@@ -607,6 +607,21 @@ def test_a_real_market_with_a_ccxt_month_in_the_window_mints_nothing(tmp_path, p
     assert done["detail"][0].startswith("ETHUSDT 4h 2026-08: stitched from ccxt") and budget.reads_used(cfg) == 0
 
 
+def test_a_real_market_with_a_day_missing_from_the_window_mints_nothing(tmp_path, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    cfg = market_config(tmp_path, judge={"min_holdout_days": 30})
+    budget.init_log(cfg)
+    f = cfg.data_dir / "BTCUSDT" / "4h" / "all.parquet"
+    df = pd.read_parquet(f)
+    day = pd.Timestamp("2026-08-15", tz="UTC").value // 10**6
+    df[(df.open_time < day) | (df.open_time >= day + 86_400_000)].to_parquet(f)
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG))
+    monkeypatch.setattr(jm, "dated_lookahead_failures", boom)       # the data check comes first
+    done = attempt_exam(cfg, j["id"], run=boom, cost_fn=boom)        # the real window end and data check
+    assert (done["holdout_status"], done["holdout_reason"]) == ("pending", "incomplete_data")
+    assert done["detail"][0] == "BTCUSDT 4h 2026-08-15: no candles" and budget.reads_used(cfg) == 0
+
+
 def test_a_plugin_error_fails_the_exam_without_its_message_in_the_verdict(cfg, plugins):
     budget.init_log(cfg)
     j = promoted(cfg)

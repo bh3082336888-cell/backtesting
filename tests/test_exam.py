@@ -137,6 +137,27 @@ def test_a_1h_exam_checks_its_regime_timeframe_too(tmp_path):
         "BTCUSDT 4h 2026-09: incomplete (days missing from data.binance.vision) (for the regime labels)"]
 
 
+def test_whole_days_without_candles_in_the_window_are_named(tmp_path):
+    # A daily file that never arrived, say, which the open month's `complete` can't show. Whole UTC
+    # days only, so a short exchange outage doesn't hold an exam back for good.
+    cfg = market_config(tmp_path)
+    _drop(cfg, "BTCUSDT", "4h", "2026-08-10 04:00", "2026-08-10 12:00")     # an outage: 2 bars
+    assert window_data_problems(cfg, cfg.symbols, "4h", END) == []
+    _drop(cfg, "BTCUSDT", "4h", "2026-09-05", "2026-09-06")
+    _drop(cfg, "ETHUSDT", "4h", "2026-09-10", "2026-09-13")
+    _drop(cfg, "ETHUSDT", "4h", "2026-10-02", "2026-10-04")                  # after the window
+    _drop(cfg, "ETHUSDT", "4h", "2026-06-02", "2026-06-04")                  # research data
+    assert window_data_problems(cfg, cfg.symbols, "4h", END) == [
+        "BTCUSDT 4h 2026-09-05: no candles",
+        "ETHUSDT 4h 2026-09-10 to 2026-09-12: no candles (3 days)"]
+
+
+def test_whole_days_are_checked_at_the_regime_timeframe_too(tmp_path):
+    cfg = hourly(tmp_path)
+    _drop(cfg, "ETHUSDT", "4h", "2026-08-01", "2026-08-02")
+    assert window_data_problems(cfg, cfg.symbols, "1h", END) == ["ETHUSDT 4h 2026-08-01: no candles"]
+
+
 def test_exam_refuses_without_a_token(tmp_path):
     cfg = market_config(tmp_path)
     with pytest.raises(HoldoutViolation):

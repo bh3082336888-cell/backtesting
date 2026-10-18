@@ -378,7 +378,10 @@ as in 3a); after that the judgement is `failed` with `exam_error`.
    also runs on a retry (with the stored window end), where it uses no attempt. `load_bars` also
    reads the regime timeframe's candles (`cfg.regime.timeframe`, 4h) to build `regime`, so their
    months are checked as well, with ccxt allowed (the labels need OHLC only), and the window end
-   (step 3) stops at their last candle too: past it, every bar would carry the last label.
+   (step 3) stops at their last candle too: past it, every bar would carry the last label. Last,
+   at both timeframes, every UTC day of the window must hold at least one candle (`open_time` only,
+   as `window_end` reads it): a day missing from the open month, which its manifest entry can't
+   show, waits too, while a short exchange outage inside a day doesn't.
 4. The dated lookahead check (as in 3a, now sandboxed). It still matters: it stops a plugin whose
    promotion came from peeking from spending a read.
 5. **Cost probe:** time `prepare` on the full research bars in a separate worker and multiply by
