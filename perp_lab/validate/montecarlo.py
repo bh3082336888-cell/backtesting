@@ -21,8 +21,10 @@ def mc_drawdown(trades: pd.DataFrame, coins_per_day: pd.Series, iterations: int 
     if trades is None or len(trades) < 5:
         return {"n_trades": 0 if trades is None else int(len(trades)), "note": "too few trades"}
     t = trades.sort_values("entry_time")
-    days = pd.to_datetime(t.entry_time, unit="ms", utc=True).dt.floor("D")
-    n = coins_per_day.reindex(coins_per_day.index.union(days)).ffill().bfill().loc[days].to_numpy()
+    days = pd.DatetimeIndex(pd.to_datetime(t.entry_time.to_numpy(), unit="ms", utc=True)).floor("D")
+    cpd = coins_per_day[~coins_per_day.index.duplicated()]
+    full = cpd.reindex(cpd.index.union(days.unique())).ffill().bfill()
+    n = full.to_numpy()[full.index.get_indexer(days)]
     r = t.pnl_pct.to_numpy() / n
     rng = np.random.default_rng(seed)
 
