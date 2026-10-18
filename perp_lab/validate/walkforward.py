@@ -90,14 +90,15 @@ def _bars(symbol: str, tf: str) -> pd.DataFrame:
 LEVEL_COLS = ("level_time", "level_stop", "level_target")
 
 
-def _compact(res: BacktestResult, symbol: str, params: dict, seed) -> dict:
-    """What a walk-forward keeps of one continuous run."""
+def _compact(res: BacktestResult, symbol: str, params: dict, seed, keep_levels: bool = False) -> dict:
+    """What a walk-forward keeps of one continuous run. The trades' stop/target path (`LEVEL_COLS`)
+    only with `keep_levels`: only the walk-forward grid's trades are charted."""
     dr = daily_returns(res.equity, res.time)
     idx = pd.to_datetime(res.time, unit="ms", utc=True)
     expo = pd.Series(res.in_pos.astype(float), index=idx).resample("1D").mean()
     flat_daily = pd.Series((~res.in_pos).astype(float), index=idx).resample("1D").sum()
     trades = pd.DataFrame(res.trades)
-    if seed is not None:    # random-entry jobs feed a benchmark that reads signal_time only
+    if not keep_levels:
         trades = trades.drop(columns=[c for c in LEVEL_COLS if c in trades.columns])
     return {"symbol": symbol, "params": params, "seed": seed, "daily": dr, "exposure": expo,
             "flat_bars": flat_daily, "trades": trades, "rejected": res.rejected}
@@ -107,7 +108,7 @@ def run_chunk(args) -> list[dict]:
     """Pool task: one chunk of jobs, all on one symbol, run in one sandbox `Batch` and replayed by
     the trusted engine. The Batch is opened and closed here, by the thread that runs the chunk (its
     worker dies with that thread), and its worker is sent this one symbol's bars only."""
-    src, symbol, tf, jobs, stderr_dir = args
+    src, symbol, tf, jobs, stderr_dir, keep_levels = args
     if any(j[1] != symbol or j[2] != tf for j in jobs):
         raise ValueError(f"a chunk holds jobs for one symbol and timeframe only ({symbol} {tf})")
     cfg = _cfg()
@@ -116,7 +117,7 @@ def run_chunk(args) -> list[dict]:
         for params, _, _, overrides, seed, entry_prob in jobs:
             ep = EngineParams.from_config(cfg, symbol, **(overrides or {}))
             res = b.backtest(params, ep, random=None if seed is None else (seed, entry_prob))
-            out.append(_compact(res, symbol, params, seed))
+            out.append(_compact(res, symbol, params, seed, keep_levels))
     return out
 
 
@@ -137,14 +138,17 @@ def chunks(jobs: list[tuple], workers: int) -> list[tuple[str, str, list]]:
 
 
 def run_many(cfg: Config, src: PluginSource, jobs: list[tuple], workers: int | None = None,
-             stderr_dir: Path | None = None) -> list[dict]:
+             stderr_dir: Path | None = None, keep_levels: bool = False) -> list[dict]:
     """Every job, a `(params, symbol, tf, overrides, seed, entry_prob)`, through the sandbox; the
-    results in job order. The pool runs trusted code only: each task is one chunk in one Batch."""
+    results in job order. The pool runs trusted code only: each task is one chunk in one Batch.
+    The trades keep their stop/target path only with `keep_levels` (the walk-forward grid's, which
+    become the charted OOS trades): sensitivity reads daily returns only and the random-entry
+    benchmark signal_time only, and the lists would cross the pool for nothing."""
     if not jobs:
         return []
     n = max(1, min(workers or os.cpu_count() or 1, client.max_workers(cfg)))
     pieces = _pieces(jobs, n)
-    tasks = [(src, s, tf, [jobs[i] for i in idx], stderr_dir) for s, tf, idx in pieces]
+    tasks = [(src, s, tf, [jobs[i] for i in idx], stderr_dir, keep_levels) for s, tf, idx in pieces]
     if n == 1:
         _init_worker(str(cfg.path))
         done = [run_chunk(t) for t in tasks]
@@ -206,7 +210,7 @@ def walkforward(cfg: Config, src: PluginSource, tf: str, symbols: list[str] | No
     combos = grid_combos(src.meta.grid)
     log.info("walkforward %s %s: %d combos x %d symbols", src.name, tf, len(combos), len(symbols))
     jobs = [(c, s, tf, None, None, None) for c in combos for s in symbols]
-    results = run_many(cfg, src, jobs, workers, stderr_dir)
+    results = run_many(cfg, src, jobs, workers, stderr_dir, keep_levels=True)
     R: dict[tuple[str, str], dict] = {(combo_key(r["params"]), r["symbol"]): r for r in results}
     keys = [combo_key(c) for c in combos]
     cmap = dict(zip(keys, combos))

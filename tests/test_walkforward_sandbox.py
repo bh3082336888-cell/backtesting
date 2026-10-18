@@ -95,7 +95,7 @@ def test_run_many_matches_a_direct_backtest(tmp_path, workers):
     cls = load_class("donchian_atr")
     jobs = [(c, s, "4h", None, None, None) for c in wfm.grid_combos(src.meta.grid) for s in cfg.symbols]
     jobs += [({"n": 20}, s, "4h", None, seed, 0.02) for seed in (0, 1) for s in cfg.symbols]
-    res = wfm.run_many(cfg, src, jobs, workers)
+    res = wfm.run_many(cfg, src, jobs, workers, keep_levels=True)
     assert [(r["params"], r["symbol"], r["seed"]) for r in res] == [(j[0], j[1], j[4]) for j in jobs]
     for (params, s, tf, _, seed, prob), r in zip(jobs, res):
         bars = load_bars(cfg, s, tf)
@@ -105,13 +105,46 @@ def test_run_many_matches_a_direct_backtest(tmp_path, workers):
         ref = run_backtest(strat, bars, strat.prepare(bars), symbol=s, tf=tf, ep=EngineParams.from_config(cfg, s))
         assert len(ref.trades) > 0
         pd.testing.assert_series_equal(r["daily"], daily_returns(ref.equity, ref.time))
-        want = pd.DataFrame(ref.trades)
-        if seed is None:        # a grid job keeps the stop/target path, a random-entry job drops it
-            assert set(LEVELS) <= set(r["trades"].columns)
-        else:
-            assert not set(LEVELS) & set(r["trades"].columns)
-            want = want.drop(columns=list(LEVELS))
-        pd.testing.assert_frame_equal(r["trades"], want)
+        assert set(LEVELS) <= set(r["trades"].columns)
+        pd.testing.assert_frame_equal(r["trades"], pd.DataFrame(ref.trades))
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_only_jobs_that_ask_for_it_keep_the_level_columns(tmp_path, keep):
+    # A sensitivity-style job (no seed) reads only its daily returns, so by default it carries no
+    # stop/target path through the pool; the walk-forward grid asks for it (its trades are charted).
+    cfg = market_config(tmp_path)
+    src = PluginSource.from_text("donchian_atr", DONCHIAN)
+    jobs = [({"n": 20}, s, "4h", None, None, None) for s in cfg.symbols]
+    res = wfm.run_many(cfg, src, jobs, 1, **({"keep_levels": True} if keep else {}))
+    full = [run_backtest(s, b, s.prepare(b), symbol=sym, tf="4h", ep=EngineParams.from_config(cfg, sym)).trades
+            for sym in cfg.symbols for s, b in [(load_class("donchian_atr")(n=20), load_bars(cfg, sym, "4h"))]]
+    for r, want in zip(res, full):
+        assert len(r["trades"]) > 0 and (set(LEVELS) <= set(r["trades"].columns)) == keep
+        assert keep or not set(LEVELS) & set(r["trades"].columns)
+        want = pd.DataFrame(want)
+        pd.testing.assert_frame_equal(r["trades"], want if keep else want.drop(columns=list(LEVELS)))
+
+
+def test_only_the_walkforward_grid_asks_for_the_level_columns(tmp_path, plugins, monkeypatch):
+    # Its trades become oos_trades (and the trade chart); sensitivity reads daily returns only and
+    # the random-entry benchmark signal_time only.
+    from perp_lab.validate import benchmarks, sensitivity
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    asked = {}
+
+    def spy(who, real):
+        def run_many(*a, **kw):
+            asked.setdefault(who, set()).add(kw.get("keep_levels", False))
+            return real(*a, **kw)
+        return run_many
+    monkeypatch.setattr(wfm, "run_many", spy("walkforward", wfm.run_many))
+    monkeypatch.setattr(sensitivity, "run_many", spy("sensitivity", sensitivity.run_many))
+    monkeypatch.setattr(benchmarks, "run_many", spy("random_entry", benchmarks.run_many))
+    rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    assert asked == {"walkforward": {True}, "sensitivity": {False}, "random_entry": {False}}
+    oos = pd.read_parquet(Path(rec["run_dir"]) / "oos_trades.parquet")
+    assert len(oos) and set(LEVELS) <= set(oos.columns)
 
 
 def test_plugin_output_lands_in_the_run_directory(tmp_path, plugins):
