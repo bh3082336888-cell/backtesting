@@ -55,6 +55,7 @@ runs = sa.Table(
     sa.Column("run_dir", sa.Text),
     sa.Column("parent_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=True),
     sa.Column("lineage_id", sa.String(64), index=True),
+    sa.Column("data_id", sa.String(16)),
     sa.Column("repo_commit", sa.String(64)),
     sa.Column("created_at", sa.DateTime(timezone=True)),
     sa.Column("notes", sa.Text),
@@ -152,6 +153,9 @@ def _engine(url: str) -> sa.Engine:
         Path(url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
     eng = sa.create_engine(url, future=True)
     md.create_all(eng)
+    if "data_id" not in {c["name"] for c in sa.inspect(eng).get_columns("runs")}:
+        with eng.begin() as c:      # create_all never adds a column to an existing table
+            c.execute(sa.text("ALTER TABLE runs ADD COLUMN data_id VARCHAR(16)"))
     return eng
 
 
@@ -224,6 +228,7 @@ def record_run(cfg, rec: dict, run_dir: str | Path | None = None) -> None:
         "run_dir": str(run_dir) if run_dir else rec.get("run_dir"),
         "parent_run_id": rec.get("parent_run_id"),
         "lineage_id": rec.get("lineage_id") or (None if rec.get("parent_run_id") else rec["run_id"]),
+        "data_id": rec.get("data_id"),
         "repo_commit": rec.get("repo_commit"),
         "created_at": _ts(rec.get("created_at")) or _now(),
         "notes": rec.get("notes"),

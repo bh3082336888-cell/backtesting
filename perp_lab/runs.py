@@ -3,6 +3,7 @@ into the results store (schema below mirrors the planned SQLite row)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import secrets
@@ -19,6 +20,32 @@ MIN_OOS_TRADES_PER_COIN = 30 / 8        # today's 30 at 8 coins
 def per_coin_min(per_coin: float, n_coins: int) -> int:
     """A trade minimum that scales with the number of coins behind it."""
     return math.ceil(per_coin * n_coins)
+
+
+def data_identity(cfg, symbols: list[str]) -> dict:
+    """What a run's numbers depend on besides the plugin: history, coins and costs."""
+    from perp_lab.engine.slippage import COST_MODEL_VERSION
+    return {"history_start": str(cfg.history_start.date()), "universe": list(symbols),
+            "cost_model": COST_MODEL_VERSION, "costs": cfg["costs"],
+            "brackets": {s: cfg.bracket(s) for s in symbols}}
+
+
+def _canon(x):
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, int):
+        return float(x)
+    if isinstance(x, dict):
+        return {k: _canon(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_canon(v) for v in x]
+    return x
+
+
+def data_id(identity: dict) -> str:
+    """16 hex characters of the identity's hash; 2 and 2.0 hash alike."""
+    blob = json.dumps(_canon(identity), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
 def new_run_id() -> str:
@@ -71,7 +98,8 @@ def write_run(cfg, record: dict, frames: dict[str, pd.DataFrame], report_md: str
     for name, df in frames.items():
         if df is not None and len(df):
             df.to_parquet(d / f"{name}.parquet")
-    record = {**record, "artifacts": {n: str(d / f"{n}.parquet") for n, df in frames.items()
+    ident = data_identity(cfg, record["universe"])
+    record = {**record, "data": ident, "data_id": data_id(ident), "artifacts": {n: str(d / f"{n}.parquet") for n, df in frames.items()
                                        if df is not None and len(df)}}
     (d / "summary.json").write_text(json.dumps(_clean(record), indent=1))
     if report_md:

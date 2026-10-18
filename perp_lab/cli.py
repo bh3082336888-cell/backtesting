@@ -150,7 +150,7 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
     import sqlalchemy as sa
 
     from perp_lab.paper.runner import PaperRunner
-    from perp_lab.runs import new_run_id, repo_commit
+    from perp_lab.runs import data_id, data_identity, new_run_id, repo_commit
     from perp_lab.store.db import current_status, engine, record_run, runs
     from perp_lab.plugins import PluginSource
     cfg = load_config(config)
@@ -171,6 +171,7 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
     started = datetime.now(timezone.utc)
     record_run(cfg, {"run_id": rid, "strategy": r["strategy"], "strategy_hash": src.hash,
                      "hypothesis": src.meta.hypothesis, "params": params, "universe": syms,
+                     "data": data_identity(cfg, syms), "data_id": data_id(data_identity(cfg, syms)),
                      "timeframes": [r["timeframe"]], "validation_mode": "paper", "repo_commit": repo_commit(),
                      "parent_run_id": from_run, "lineage_id": r["lineage_id"], "created_at": started.isoformat(),
                      "paper_started_at": started.isoformat(), "metrics": {},

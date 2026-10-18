@@ -361,10 +361,7 @@ def test_cli_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins, command):
     assert "sandbox unavailable: Landlock ABI 5 < 6" in r.output
 
 
-def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
-    from typer.testing import CliRunner
-
-    from perp_lab.cli import app
+def approved_paper_run(tmp_path):
     from perp_lab.store import db
     from tests.test_store import fake_run
     cfg = market_config(tmp_path)
@@ -375,6 +372,14 @@ def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
         "holdout_status": "pending", "holdout_reason": "awaiting_exam"})
     db.update_holdout(cfg, jid, "passed", "passed")
     db.approve_paper(cfg, "c1", "me")
+    return cfg
+
+
+def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    cfg = approved_paper_run(tmp_path)
 
     async def run(self, max_bars=None):          # as the runner's first spawn would
         client.spawn(self.cfg, self.src)
@@ -383,3 +388,18 @@ def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
     r = CliRunner().invoke(app, ["paper", "c1", "--config", str(cfg.path)])
     assert (r.exit_code, type(r.exception)) == (1, SystemExit), r.exception
     assert "sandbox unavailable: Landlock ABI 5 < 6" in r.output
+
+
+def test_a_paper_run_records_its_data(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    from perp_lab.runs import data_id, data_identity
+    from perp_lab.store import db
+    cfg = approved_paper_run(tmp_path)
+    monkeypatch.setattr(client, "max_workers", lambda c: 8)      # Task 9's refusal must not apply here
+    monkeypatch.setattr(PaperRunner, "run", lambda self, max_bars=None: asyncio.sleep(0))
+    r = CliRunner().invoke(app, ["paper", "c1", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+    p = db.read_table(cfg, db.runs, db.runs.c.validation_mode == "paper")
+    assert p.data_id.tolist() == [data_id(data_identity(cfg, ["BTCUSDT", "ETHUSDT"]))]

@@ -1,0 +1,60 @@
+import json
+import sqlite3
+
+import yaml
+
+from perp_lab.config import Config, load_config
+from perp_lab.runs import data_id, data_identity
+from perp_lab.store import db
+from tests.test_store import cfg, fake_run  # noqa: F401
+
+U = ["BTCUSDT", "ETHUSDT"]
+
+
+def other(cfg, **raw):
+    return Config(raw={**cfg.raw, **raw}, path=cfg.path)
+
+
+def test_data_id_follows_history_universe_and_costs_only(cfg):
+    base = data_id(data_identity(cfg, U))
+    costs = {**cfg["costs"], "slippage_model": {**cfg["costs"]["slippage_model"], "alpha": 9.0}}
+    br = cfg["margin_brackets"]
+    assert data_id(data_identity(other(cfg, judge={**cfg["judge"], "dsr_min": 0.5}), U)) == base
+    assert data_id(data_identity(other(cfg, history_start="2019-01-01"), U)) != base
+    assert data_id(data_identity(cfg, ["BTCUSDT"])) != base
+    assert data_id(data_identity(other(cfg, costs=costs), U)) != base
+    assert data_id(data_identity(other(cfg, margin_brackets={**br, "ETHUSDT": {"mmr": 0.02, "cum": 0.0}}), U)) != base
+    assert data_id(data_identity(other(cfg, margin_brackets={**br, "SOLUSDT": {"mmr": 0.02, "cum": 0.0}}), U)) == base
+
+
+def test_the_same_config_written_differently_has_the_same_data_id(cfg, tmp_path):
+    raw = yaml.safe_load(open(cfg.path))
+    raw["costs"] = dict(reversed(list(raw["costs"].items())))
+    raw["costs"]["slippage_bps"] = int(raw["costs"]["slippage_bps"])          # 2 instead of 2.0
+    p = tmp_path / "again.yaml"
+    p.write_text(yaml.safe_dump(raw, sort_keys=False))
+    assert data_id(data_identity(load_config(p), U)) == data_id(data_identity(cfg, U))
+
+
+def test_every_written_run_records_its_data(cfg):
+    fake_run(cfg, "r1")
+    s = json.loads((cfg.runs_dir / "r1" / "summary.json").read_text())
+    assert s["data"]["history_start"] == str(cfg.history_start.date()) and s["data"]["universe"] == U
+    assert s["data_id"] == data_id(data_identity(cfg, U)) == db.run_row(cfg, "r1")["data_id"]
+
+
+def test_an_existing_store_gains_the_data_id_column(cfg):
+    fake_run(cfg, "old")
+    path = cfg["store"]["url"][len("sqlite:///"):]
+    with sqlite3.connect(path) as c:
+        c.execute("ALTER TABLE runs DROP COLUMN data_id")
+    db._engine.cache_clear()
+    assert db.run_row(cfg, "old")["data_id"] is None                 # added back, empty for old runs
+    fake_run(cfg, "new")
+    assert db.run_row(cfg, "new")["data_id"] == data_id(data_identity(cfg, U))
+
+
+def test_n_counts_a_plugin_version_once_across_data(cfg):
+    fake_run(other(cfg, history_start="2019-01-01"), "a", strategy="p", strategy_hash="hp")
+    fake_run(cfg, "b", strategy="p", strategy_hash="hp")
+    assert db.trial_stats(cfg)[0] == 1
