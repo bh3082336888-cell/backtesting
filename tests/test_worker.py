@@ -836,15 +836,21 @@ def test_a_reply_that_fails_to_parse_is_logged_with_its_traceback(caplog):
 
 
 def test_mapped_files_that_cannot_be_read_are_logged(caplog):
-    # A worker whose /proc/<pid>/maps can't be read would have nothing evicted after its exam: say so.
+    # A worker whose /proc/<pid>/maps can't be read at ready would have nothing evicted after its
+    # exam: a warning. At close it is only a note: a sealed worker maps nothing new, so what ready
+    # noted is still evicted, and a plugin can make its maps unreadable at will (PR_SET_DUMPABLE 0).
     class Fake:
         pid = -1                                  # /proc/-1 doesn't exist
-        _mapped: set = set()
-    with caplog.at_level("WARNING", logger="perp_lab.sandbox.client"):
+        _mapped = {"/usr/lib/libfake.so"}
+    with caplog.at_level("INFO", logger="perp_lab.sandbox.client"):
         client.Worker._note_mapped(Fake(), "ready")
-    [rec] = [r for r in caplog.records if r.name == "perp_lab.sandbox.client"]
-    text = rec.getMessage()
-    assert rec.levelname == "WARNING" and "worker -1" in text and "ready" in text and "evict" in text, text
+        client.Worker._note_mapped(Fake(), "close")
+    ready, close = [r for r in caplog.records if r.name == "perp_lab.sandbox.client"]
+    text = ready.getMessage()
+    assert ready.levelname == "WARNING" and "worker -1" in text and "ready" in text and "won't be evicted" in text, text
+    text = close.getMessage()
+    assert close.levelname == "INFO" and "worker -1" in text and "close" in text, text
+    assert "the 1 file noted at ready is still evicted" in text, text
 
 
 def test_error_reply_is_printable_and_capped():

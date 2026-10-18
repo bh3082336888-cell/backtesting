@@ -205,13 +205,21 @@ class Worker:
     def _note_mapped(self, when: str) -> None:
         """Add the files the worker maps now (/proc/<pid>/maps, which the parent may read) to
         `mapped_files`. A sealed worker can map no other file, so at ready this names them all.
-        If they can't be read, nothing of this worker would be evicted: that is logged."""
+        If they can't be read at ready, nothing of this worker would be evicted: a warning. Later
+        it is only a note, since what ready noted still covers every file; a plugin can make its
+        maps unreadable to the parent whenever it likes (PR_SET_DUMPABLE 0)."""
         try:
             with open(f"/proc/{self.pid}/maps", "rb") as f:
                 lines = f.read().splitlines()
         except OSError as e:
-            log.warning("worker %d: its mapped files can't be read at %s (%s), so they won't be evicted from "
-                        "the page cache", self.pid, when, e.strerror)
+            if when == "ready":
+                log.warning("worker %d: its mapped files can't be read at ready (%s), so they won't be evicted "
+                            "from the page cache", self.pid, e.strerror)
+            else:
+                n = len(self._mapped)
+                log.info("worker %d: its mapped files can't be read at %s (%s); the %d %s noted at ready %s still "
+                         "evicted", self.pid, when, e.strerror, n, "file" if n == 1 else "files",
+                         "is" if n == 1 else "are")
             return
         for line in lines:
             fields = line.split(None, 5)                # address perms offset dev inode path
