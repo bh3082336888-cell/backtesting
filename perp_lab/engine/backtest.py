@@ -7,8 +7,8 @@ Bar t sequence (all decisions use information available at that moment):
        (deducted from wallet and from isolated margin → liq price moves)
     2. gap checks for a held position: open beyond liq → liquidated;
        open beyond stop → stopped at the open
-    3. pending exit (signal from close of t-1) fills at open, taker + slippage
-    4. pending entry fills at open, taker + slippage; sized from the stop
+    3. pending exit (signal from close of t-1) fills at open, taker + the bar's slippage
+    4. pending entry fills at open, taker + the bar's slippage; sized from the stop
   INTRABAR (OHLC only, no path info → pessimistic)
     5. adverse level (stop or liq, whichever is hit first) checked before target.
        If both stop and target are inside the bar's range, the stop wins.
@@ -37,7 +37,7 @@ NAN = math.nan
 class EngineParams:
     taker: float = 0.0005
     maker: float = 0.0002
-    slippage: float = 0.0002          # fraction (2 bps)
+    slippage: float = 0.0002          # fraction (2 bps); used only when the bars have no `slippage` column
     equity0: float = 10_000.0
     leverage: float = 3.0
     risk: float = 0.01
@@ -100,8 +100,11 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
     if FC is None:
         FC = np.zeros(n)
     REG = A.get("regime")
+    SLIP = A.get("slippage")
+    if SLIP is None:
+        SLIP = np.full(n, ep.slippage)
 
-    taker, maker, slip = ep.taker, ep.maker, ep.slippage
+    taker, maker = ep.taker, ep.maker
     lev, mmr, cum = ep.leverage, ep.mmr, ep.cum
 
     W = ep.equity0
@@ -163,6 +166,7 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
     last = end_i - 1
     for i in range(start_i, end_i):
         o = O[i]; h = H[i]; l = L[i]; c = C[i]
+        slip = SLIP[i]
 
         # 1. funding on the position held into this open
         if side != 0:

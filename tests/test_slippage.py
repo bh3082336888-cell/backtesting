@@ -1,8 +1,11 @@
 import numpy as np
+import pandas as pd
 import pytest
 
+from perp_lab.data.store import load_bars
 from perp_lab.engine.slippage import (DAY_MS, fit_spread_curve, half_spread_bps, slippage_bps,
                                       trailing_adv)
+from tests.conftest import market_config
 
 M = {"adv_days": 30, "spread_bps_at_100m": 1.5, "alpha": 0.5, "max_bps": 50.0}
 
@@ -60,3 +63,37 @@ def test_fit_refuses_a_spread_that_does_not_fall_with_volume():
         fit_spread_curve(adv, 0.5 * (adv / 1e8) ** 0.2)
     with pytest.raises(ValueError):
         fit_spread_curve(adv[:5], 3.0 * (adv[:5] / 1e8) ** -0.4)
+
+
+T = lambda s: pd.Timestamp(s, tz="UTC")  # noqa: E731
+
+
+def with_volume(cfg, values):
+    p = cfg.data_dir / "BTCUSDT" / "4h" / "all.parquet"
+    df = pd.read_parquet(p)
+    df["quote_volume"] = values(len(df))
+    df.to_parquet(p)
+
+
+def test_each_bar_pays_for_the_volume_before_its_day(tmp_path):
+    cfg = market_config(tmp_path)
+    with_volume(cfg, lambda n: np.full(n, 1e6))               # 6 bars a day: 6e6 USDT
+    b = load_bars(cfg, "BTCUSDT", "4h")
+    c = cfg["costs"]
+    assert (b.slippage[b.index < T("2025-01-02")] == c["slippage_model"]["max_bps"] / 1e4).all()
+    want = slippage_bps(np.array([6e6]), c["slippage_bps"], c["slippage_model"])[0] / 1e4
+    assert np.allclose(b.slippage[b.index >= T("2025-02-01")], want) and b.slippage.notna().all()
+
+
+def test_a_bars_slippage_does_not_depend_on_where_the_load_starts(tmp_path):
+    cfg = market_config(tmp_path)
+    with_volume(cfg, lambda n: np.random.default_rng(3).uniform(1e5, 1e7, n))
+    full = load_bars(cfg, "BTCUSDT", "4h")
+    part = load_bars(cfg, "BTCUSDT", "4h", start=T("2025-03-10"))
+    pd.testing.assert_series_equal(part.slippage, full.slippage.loc[part.index])
+
+
+def test_bars_without_volume_pay_the_cap_never_nan(tmp_path):
+    cfg = market_config(tmp_path)                              # synthetic quote_volume is NaN
+    b = load_bars(cfg, "ETHUSDT", "4h")
+    assert (b.slippage == cfg["costs"]["slippage_model"]["max_bps"] / 1e4).all()

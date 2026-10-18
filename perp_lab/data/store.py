@@ -166,12 +166,30 @@ def align_metrics(candles: pd.DataFrame, metrics: pd.DataFrame | None,
     return out
 
 
+def attach_slippage(cfg: Config, candles: pd.DataFrame) -> pd.DataFrame:
+    """Add `slippage` (a fraction): each bar's point-in-time cost, from the volume before its day."""
+    from perp_lab.engine.slippage import slippage_bps, trailing_adv
+
+    costs = cfg["costs"]
+    model = costs["slippage_model"]
+    adv = trailing_adv(candles.open_time.to_numpy(), candles.quote_volume.to_numpy(dtype="float64"),
+                       model["adv_days"])
+    out = candles.copy()
+    out["slippage"] = slippage_bps(adv, costs["slippage_bps"], model) / 1e4
+    return out
+
+
 def load_bars(cfg: Config, symbol: str, tf: str, start=None, end=None, holdout=None,
               with_regime: bool = True, with_metrics: bool = True) -> pd.DataFrame:
     """Candles + funding + OI + regime label, all strictly causal."""
     from perp_lab.validate.regime import attach_regime
 
-    c = load_candles(cfg, symbol, tf, start, end, holdout)
+    lead = (cfg["costs"]["slippage_model"]["adv_days"] + 1) * 86_400_000
+    c = load_candles(cfg, symbol, tf, None if start is None else start - pd.Timedelta(milliseconds=lead),
+                     end, holdout)
+    c = attach_slippage(cfg, c)
+    if start is not None:
+        c = c[c.open_time >= int(start.value // 10**6)]
     c = align_funding(c, load_funding(cfg, symbol), tf)
     if with_metrics:
         c = align_metrics(c, load_metrics(cfg, symbol))
