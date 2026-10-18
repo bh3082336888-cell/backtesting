@@ -57,6 +57,9 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
 `lab judge PLUGIN --tf TF` decides **promote** or **kill** with no human involved
 (spec: `docs/superpowers/specs/2026-10-16-judge-design.md`).
 
+- `--tf` must be one of the plugin's declared `timeframes` (and its parent's); anything else is refused (exit
+  2) before any check runs or anything is recorded, since the walk-forward would be a trial that can't be
+  taken back. `lab walkforward` refuses the same way; `lab backtest` (in-sample, not a trial) doesn't.
 - A plugin names its parent with a module-level `PARENT = "name"`; without one it starts a family.
 - A family is `"family:<root plugin name>"`, found by walking PARENT links, so a whole PARENT chain
   (e.g. `donchian_atr` and `donchian_atr_wide`) shares one family and therefore one holdout read. A plugin
@@ -110,6 +113,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | Entry rejected if liquidation price sits inside the stop | engine step 4 |
 | OOS is the headline; IS is shown greyed and labelled | `validate/pipeline.py` report |
 | A strategy must beat random-entry (same exits, matched frequency) p95 OOS | `validate/benchmarks.py` |
+| A walk-forward (`lab walkforward`, `lab judge`, a judge's parent run) runs only at a timeframe the plugin declares; any other is refused before it can count as a trial | `plugins.py::require_timeframe`, `tests/test_judge.py`, `tests/test_walkforward_sandbox.py` |
 | Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days | `judge/budget.py`, `tests/test_budget.py` |
 | Plugin code runs only in a confined worker: Landlock, seccomp and rlimits; it reads no data, store, log or verdict, writes no file or file metadata, opens no socket | `sandbox/confine.py`, `tests/test_confine.py` |
 | Scores come from the trusted engine replaying the plugin's decisions, never from numbers the plugin reports | `sandbox/replay.py`, `tests/test_replay.py` |

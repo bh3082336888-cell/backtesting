@@ -22,7 +22,7 @@ import pandas as pd
 from perp_lab.engine.metrics import summarize
 from perp_lab.judge import budget, gates
 from perp_lab.judge.exam import cost_hours, run_exam, window_end
-from perp_lab.plugins import PluginMetaError, PluginSource
+from perp_lab.plugins import PluginMetaError, PluginSource, UndeclaredTimeframe, require_timeframe
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.runs import new_run_id, repo_commit, write_run
@@ -82,6 +82,15 @@ def read_plugin(name: str) -> PluginSource:
         return PluginSource.read(name)
     except PluginMetaError as e:
         raise JudgeRefused(f"{name}: {e}") from e
+
+
+def _require_timeframe(src: PluginSource, tf: str, role: str = "") -> None:
+    """A timeframe the plugin doesn't declare is refused before anything runs or is recorded: the
+    walk-forward would be a trial that can't be taken back."""
+    try:
+        require_timeframe(src, tf, role)
+    except UndeclaredTimeframe as e:
+        raise JudgeRefused(str(e)) from e
 
 
 def plugin_parent(name: str, src: PluginSource | None = None) -> str | None:
@@ -182,6 +191,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     client.check(cfg)                    # no sandbox, no judging: SandboxUnavailable propagates
     src = read_plugin(name)              # read once: this src and h are what is checked, run and recorded
     h = src.hash
+    _require_timeframe(src, tf)
     parent = src.meta.parent
     psrc = None
     if parent is not None:
@@ -192,6 +202,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         psrc = read_plugin(parent)
         if psrc.hash == h:
             raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
+        _require_timeframe(psrc, tf, "parent ")   # its walk-forward runs at tf too, and is a trial
 
     existing = db.get_judgement(cfg, h, tf)
     if existing:   # (re)write its verdict under the judged strategy's name, even for a renamed copy

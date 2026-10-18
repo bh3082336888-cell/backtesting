@@ -108,6 +108,37 @@ def test_a_root_keeps_its_family_across_timeframes(cfg, plugins):
     assert a["lineage_id"] is not None and a["lineage_id"] == b["lineage_id"]
 
 
+def test_judge_refuses_a_timeframe_the_plugin_does_not_declare(cfg, plugins, monkeypatch):
+    # A walk-forward is a trial and can't be taken back: donchian_atr_wide declares 4h only, so
+    # 1h is refused before any check runs or anything is recorded or written.
+    monkeypatch.setattr("perp_lab.judge.judge.lookahead_failures", lambda *a, **k: pytest.fail("checked"))
+    v = StubValidate({"donchian_atr_wide": ("candidate", STRONG)})
+    with pytest.raises(JudgeRefused, match=r"donchian_atr_wide declares timeframes 4h, not 1h"):
+        judge(cfg, "donchian_atr_wide", "1h", validate=v)
+    assert v.calls == [] and db.read_table(cfg, db.judgements).empty and db.read_table(cfg, db.runs).empty
+    assert not Path(cfg["judge"]["verdicts_dir"]).exists()
+    r = CliRunner().invoke(app, ["judge", "donchian_atr_wide", "--tf", "1h", "--config", str(cfg.path)])
+    assert r.exit_code == 2 and "refused: donchian_atr_wide declares timeframes 4h, not 1h" in r.output
+    assert db.read_table(cfg, db.judgements).empty and not Path(cfg["judge"]["verdicts_dir"]).exists()
+
+
+def test_judge_refuses_a_timeframe_the_parent_does_not_declare(cfg, plugins):
+    # The parent's walk-forward runs at the child's timeframe, and it is a trial too.
+    root = (plugins / "donchian_atr.py").read_text()
+    assert 'timeframes = ["1h", "4h"]' in root
+    add_plugin(plugins, "hourly_root", root.replace('timeframes = ["1h", "4h"]', 'timeframes = ["1h"]'))
+    add_plugin(plugins, "kid", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "hourly_root"'))
+    v = StubValidate({"hourly_root": ("candidate", STRONG), "kid": ("candidate", STRONG)})
+    with pytest.raises(JudgeRefused, match=r"parent hourly_root declares timeframes 1h, not 4h"):
+        judge(cfg, "kid", "4h", validate=v)
+    assert v.calls == [] and db.read_table(cfg, db.judgements).empty and db.read_table(cfg, db.runs).empty
+
+
+def test_judge_at_a_declared_timeframe_goes_ahead(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("noise", NOISE)})
+    assert judge(cfg, "donchian_atr", "1h", validate=v)["timeframe"] == "1h" and v.calls == ["donchian_atr"]
+
+
 def test_cli_refusal_exits_2(cfg, plugins):
     add_plugin(plugins, "orphan", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "nope"'))
     r = CliRunner().invoke(app, ["judge", "orphan", "--tf", "4h", "--config", str(cfg.path)])
@@ -215,6 +246,7 @@ PARENT = "donchian_atr"
 
 class DatePeek(Strategy):
     params = {}
+    timeframes = ["4h"]
 
     def prepare(self, bars):
         late = bars.index >= pd.Timestamp("2026-07-01", tz="UTC")
@@ -258,6 +290,7 @@ from perp_lab.strategy import HOLD, Strategy, enter
 
 class Seasonal(Strategy):
     params = {}
+    timeframes = ["4h"]
 
     def prepare(self, bars):
         winter = bars.index.month.isin([11, 12, 1, 2, 3, 4])

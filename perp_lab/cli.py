@@ -122,11 +122,16 @@ def walkforward(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
                 parent_run: Optional[str] = typer.Option(None, help="parent run_id (lineage)"),
                 config: Optional[str] = CfgOpt):
     """Walk-forward + sensitivity + random-entry + MC + regime split. OOS headline only."""
+    from perp_lab.plugins import UndeclaredTimeframe
     from perp_lab.validate.pipeline import validate_strategy
     cfg = load_config(config)
-    with _sandbox_required():
-        rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
-                                        parent_run_id=parent_run)
+    try:
+        with _sandbox_required():
+            rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
+                                            parent_run_id=parent_run)
+    except UndeclaredTimeframe as e:            # a trial at a timeframe it doesn't declare: nothing ran
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(2)
     o, i = rec["metrics"], rec["is_metrics"]
     typer.secho(f"{strategy} @ {tf}  →  {rec['status'].upper()}", bold=True,
                 fg="red" if rec["status"] == "noise" else "green")

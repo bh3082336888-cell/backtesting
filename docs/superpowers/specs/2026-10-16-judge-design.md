@@ -58,6 +58,9 @@ the dashboard shows judgements and the holdout budget.
 2. **Pre-checks** (refuse, exit code 2, nothing recorded):
    - `PARENT` names a plugin that doesn't exist.
    - The child file is byte-identical to its parent (same `plugin_hash`).
+   - `TF` isn't in the plugin's declared `timeframes`, or in its parent's (added 2026-10-18): the
+     walk-forward would be a trial that can't be taken back, so a mistyped or defaulted `--tf`
+     (the CLI defaults to 4h) must not spend one. `lab walkforward` refuses the same way.
 3. **Idempotency.** If a judgement exists for this `(strategy_hash, timeframe)`, rewrite its
    verdict file, print it and exit 0. No new trial is created. The verdict and the printed
    header name the strategy that was judged, so a renamed byte-identical copy reports the
