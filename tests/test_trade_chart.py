@@ -384,6 +384,24 @@ def test_jump_to_trade_moves_the_window(wf_run):
     assert "exit: stop" in names and "exit: signal" not in names
 
 
+def test_jump_to_the_same_trade_again_after_picking_dates_by_hand(wf_run):
+    write_candles(wf_run.data_dir, "BTCUSDT", "4h", candles("2024-01-01", n=6 * 130))
+    at = _detail()
+    jump = "tc_jump_wf1_BTCUSDT"
+    at.selectbox(key=jump).set_value(0).run()                       # trade 0 (bar 300) exits on its stop
+    assert "exit: stop" in {d.get("name") for d in _trade_chart(at)["data"]}
+    dates = f"tc_dates_wf1_{at.session_state['tc_ver_wf1']}"
+    at.date_input(key=dates).set_value((pd.Timestamp("2024-04-01").date(), pd.Timestamp("2024-04-20").date())).run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert "exit: stop" not in {d.get("name") for d in _trade_chart(at)["data"]}   # picked by hand: elsewhere
+    assert at.selectbox(key=jump).value is None                     # no longer showing a jumped-to trade
+    at.selectbox(key=jump).set_value(0).run()                       # the same trade again
+    assert not at.exception, [e.message for e in at.exception]
+    assert "exit: stop" in {d.get("name") for d in _trade_chart(at)["data"]}
+    assert at.selectbox(key=jump).value == 0
+    assert not [w.value for w in at.warning]                       # resetting the widget's state warns of nothing
+
+
 def test_missing_candles_say_how_to_get_them(wf_run):
     at = _detail()
     assert not at.exception, [e.message for e in at.exception]

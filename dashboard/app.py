@@ -183,8 +183,9 @@ def _trade_label(t) -> str:
             f"{'long' if t.side > 0 else 'short'} · {t.exit_reason} · R {t.r_multiple:+.2f}")
 
 
-def _picked(dk, wk):
+def _picked(dk, wk, jk):
     st.session_state[wk] = st.session_state[dk]
+    st.session_state[jk] = None        # no longer a jumped-to trade, so picking it again jumps again
 
 
 def _jump(jk, wk, vk, trades, tf, span):
@@ -222,12 +223,11 @@ def trades_chart_section(r, rid, folds=None):
     fit = tuple(min(max(d, lo), hi) for d in held)
     if fit != held:                    # another symbol's span (paper): show the part that fits
         st.session_state[wk], st.session_state[vk] = fit, st.session_state[vk] + 1
-    dk = f"tc_dates_{rid}_{st.session_state[vk]}"
+    dk, jk = f"tc_dates_{rid}_{st.session_state[vk]}", f"tc_jump_{rid}_{sym}"
     c[1].date_input("Dates (UTC)", value=st.session_state[wk], min_value=lo, max_value=hi, key=dk,
-                    on_change=_picked, args=(dk, wk))
+                    on_change=_picked, args=(dk, wk, jk))
     mine = (trades[trades.symbol == sym].sort_values("entry_time").reset_index(drop=True)
             if len(trades) else trades)
-    jk = f"tc_jump_{rid}_{sym}"
     c[2].selectbox("Jump to trade", [None, *range(len(mine))], key=jk,
                    format_func=lambda i: "—" if i is None else _trade_label(mine.iloc[i]),
                    on_change=_jump, args=(jk, wk, vk, mine, r.timeframe, span))
