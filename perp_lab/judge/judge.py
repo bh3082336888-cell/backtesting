@@ -284,8 +284,9 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
 
 
 HOLDOUT_BOOT = 10_000
-BACKFILL_HINT = ("run `lab backfill --tfs {tf}` (it rebuilds a ccxt-stitched month from data.binance.vision once "
-                 "the month has closed), then `lab exam` again")
+BACKFILL_HINT = ("run `lab backfill --tfs {tf}` (it rebuilds every incomplete month from data.binance.vision, a "
+                 "closed one from its monthly file and the current one from daily files up to yesterday), then "
+                 "`lab exam` again")
 
 
 def holdout_report(j: dict, res, ok: bool, reasons: list[str], m: dict, floor_pct: float) -> str:
