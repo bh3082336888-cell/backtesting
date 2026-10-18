@@ -38,7 +38,7 @@ the proposer's record of dead ideas.
 | `holdout_start` | Unchanged: `2026-07-01`. |
 | Universe | The 17 coins below, chosen by the rule below. Fixed list, not re-chosen over time. |
 | Survivor bias | Accepted and disclosed (user, choosing B knowing it). Every report and the dashboard say the universe was chosen in 2026 from coins still liquid then. |
-| Costs | Per-coin, point-in-time slippage and per-coin margin brackets, fixed **before** any trial runs on the new data and never tuned after seeing a strategy result. |
+| Costs | Per-coin, point-in-time slippage (`costs.slippage_model`, see "Slippage model") and per-coin margin brackets, fixed **before** any trial runs on the new data and never tuned after seeing a strategy result. |
 | Earlier trials | Still count. N stays store-wide over every (plugin version, timeframe) pair, old data included. |
 
 ## The universe
@@ -157,6 +157,68 @@ test in the same PR (org rule), one concern per commit.
     then `lab backfill` for the 9 new coins and the 2020–2021 months of the 8 (about 400 MB in all;
     today's store is 142 MB). The holdout months of the new coins are downloaded like the others'
     and stay behind the existing guard.
+
+## Slippage model (calibrated 2026-10-18)
+
+**Formula.** Per bar, for a taker fill:
+
+`slip_bps = min(50, 2.0 + 2.05 × (adv / 1e8) ** -0.63)`
+
+The values live in `config/lab.yaml` `costs.slippage_model` (`adv_days: 30`, `spread_bps_at_100m: 2.05`, `alpha: 0.63`, `max_bps: 50.0`). The code is `perp_lab/engine/slippage.py`; the calibration is `docs/research/slippage-calibration/` (`calibrate.py`, `calibration.csv`).
+
+**`adv` and the cap.** `adv` is the mean daily quote volume (USDT) over the 30 full UTC days before the bar's day, skipping days with no volume data. The cap `max_bps = 50` applies in two cases: the formula exceeds 50 (`adv` below about 1.3 million USDT a day), and `adv` is unknown or not above zero (a coin's first bars), where the bar pays 50 outright.
+
+**Why the floor is additive.** The 2 bp floor is today's latency-and-impact buffer. BTC's quoted half-spread is about 0.02 bp, so the 2 bp was never spread. Adding each coin's quoted half-spread on top of the floor keeps BTC and ETH near 2 bp, makes thinner coins and thinner years pay more, and means no coin or date ever pays less than today.
+
+**Decision of the user, 2026-10-18.** The pooled p90 curve puts BTC and ETH at about 2.1 bp (2.10 and 2.12 on 2026-06-30) rather than exactly 2.0, while their measured half-spreads are about 0.02 bp. The extra ~0.1 bp (about 5% above today's 2 bp) is accepted as the price of one pessimistic pooled curve. It is never kinder than today.
+
+**Source.** data.binance.vision `futures/um/daily/bookTicker`, 17 coins (the universe) on 2023-06-15, 2023-09-15, 2023-12-15 and 2024-03-15: 68 coin-days. That dataset starts 2023-05-16. Every file, and every `adv` window (monthly `1d` klines), is dated before the holdout (2026-07-01); the script asserts it.
+
+**Half-spread.** `(ask - bid) / (ask + bid)` in bp, time-weighted over the UTC day from the first quote until midnight, each quote weighing the time until the next one. Quotes with a bid not above zero or an ask not above the bid are dropped.
+
+**Fit.** OLS of log half-spread on log `adv / 1e8` over the 68 points. `alpha` is minus the slope, rounded to 0.01 (0.63). The intercept is then lifted so that the curve lies above 90% of the points: the 90th percentile of the residuals (computed with the rounded `alpha`), rounded up to 0.01 bp (2.05 at 100 million USDT a day). The fit is pessimistic on purpose.
+
+**Result** (`slippage_bps`, floor 2.0, a bar on the date; adv from the 30 days before it; "–" = no volume yet, so the bar pays 50):
+
+| coin | 2020-08-01 | 2022-02-01 | 2026-06-30 |
+|---|---|---|---|
+| BTC | 2.33 | 2.09 | 2.10 |
+| ETH | 2.82 | 2.16 | 2.12 |
+| SOL | – | 2.49 | 2.33 |
+| BNB | 5.82 | 2.66 | 2.76 |
+| XRP | 4.45 | 2.83 | 2.65 |
+| DOGE | 9.55 | 2.62 | 2.87 |
+| AVAX | – | 2.76 | 3.86 |
+| LINK | 3.21 | 2.55 | 4.02 |
+| ADA | 3.67 | 2.48 | 3.34 |
+| DOT | – | 2.65 | 4.63 |
+| LTC | 5.00 | 3.03 | 4.61 |
+| BCH | 4.51 | 3.96 | 3.98 |
+| FIL | – | 3.43 | 3.94 |
+| AAVE | – | 3.46 | 4.07 |
+| XLM | 4.82 | 4.00 | 3.36 |
+| ATOM | 6.75 | 2.43 | 8.29 |
+| ETC | 6.98 | 3.72 | 7.18 |
+
+Median measured half-spread per coin (four days) against the model's spread term at the median `adv`, in bp. The curve sits above most coins, and below a few (ADA, XRP); that is what a pooled p90 fit does.
+
+| coin | measured | model | coin | measured | model |
+|---|---|---|---|---|---|
+| BTC | 0.016 | 0.103 | LTC | 0.688 | 0.981 |
+| ETH | 0.026 | 0.165 | BCH | 0.227 | 1.123 |
+| SOL | 0.171 | 0.383 | FIL | 1.219 | 1.545 |
+| BNB | 0.207 | 0.781 | AAVE | 0.698 | 3.225 |
+| XRP | 0.902 | 0.585 | XLM | 0.414 | 2.902 |
+| DOGE | 0.665 | 0.699 | ATOM | 0.517 | 1.679 |
+| AVAX | 0.310 | 0.927 | ETC | 0.286 | 1.703 |
+| LINK | 0.573 | 1.050 | ADA | 1.361 | 0.870 |
+| DOT | 0.912 | 1.462 | | | |
+
+**Limits.**
+- 2020 is extrapolated by volume alone: the data starts in 2023, and a 2020 bar with a given `adv` pays what a 2023 coin of that volume paid.
+- A spread in bp also depends on tick size relative to price, which the model ignores (ADA and XRP sit above the curve for that reason).
+- The model applies to taker fills only (market entries and exits, stop-market). Targets stay maker and pay no slippage.
+- The model is fixed before any trial on the new data. Changing any of its values changes the `costs` section and so every run's data identity (Task 8), and no run on the old model is paired with one on a new model.
 
 ## What happens to existing results
 
