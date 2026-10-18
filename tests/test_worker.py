@@ -571,7 +571,6 @@ sys.exit(worker.main(sys.argv[1:]))
 """
 
 
-@pytest.mark.sandbox
 def _unavailable(r) -> str:
     """The message of the "unavailable" error a worker run by hand reported, or the test fails."""
     assert r.returncode == worker.UNAVAILABLE_EXIT, (r.returncode, r.stderr)
