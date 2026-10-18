@@ -25,7 +25,12 @@ backfill:
 costs:
   taker: 0.0005
   maker: 0.0002
+  # The floor: today's flat cost, and the fallback for bars without a `slippage` column.
   slippage_bps: 2.0          # applied to taker fills (market entry/exit, stop-market)
+  # Per-coin, per-bar slippage = min(max_bps, floor + spread_bps_at_100m * (adv/1e8)^-alpha).
+  # Calibrated 2026-10-18, fixed before any trial on the new data; see the spec section
+  # "Slippage model" in docs/superpowers/specs/2026-10-18-wider-data-design.md.
+  slippage_model: {adv_days: 30, spread_bps_at_100m: 2.05, alpha: 0.63, max_bps: 50.0}
 
 account:
   initial_equity: 10000.0
