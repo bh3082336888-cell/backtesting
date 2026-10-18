@@ -183,6 +183,21 @@ def _px(x) -> str:
     return "—" if x is None or pd.isna(x) else f"{x:,.6g}"
 
 
+def _levels(r):
+    """One trade's (times, stops, targets) as plain lists, or None when it recorded no levels (a run made
+    before they were logged: column missing, None or empty). Parquet hands list columns back as arrays."""
+    lt = r.get("level_time")
+    if lt is None or not hasattr(lt, "__len__") or len(lt) == 0:
+        return None
+    nan = lambda v: np.nan if v is None else float(v)       # noqa: E731  (parquet may store a NaN as null)
+    return ([int(v) for v in lt], [nan(v) for v in r["level_stop"]], [nan(v) for v in r["level_target"]])
+
+
+def has_levels(t: pd.DataFrame) -> bool:
+    """Whether any trade in the frame recorded the stop and target as they moved."""
+    return any(_levels(r) is not None for r in t.to_dict("records"))
+
+
 def hover_text(t: pd.DataFrame) -> list[str]:
     out = []
     for r in t.to_dict("records"):
@@ -200,20 +215,46 @@ def hover_text(t: pd.DataFrame) -> list[str]:
             f"exit {_utc(r['exit_time']):%Y-%m-%d %H:%M} @ {_px(r['exit_price'])}",
             f"initial stop {_px(r['stop_init'])} · initial target {_px(r['target'])}",
         ]
+        lv = _levels(r)
+        if lv:
+            lines.append(f"stop at exit {_px(lv[1][-1])} · target at exit {_px(lv[2][-1])}")
         if "fold" in r and pd.notna(r["fold"]):
             lines.append(f"fold {int(r['fold'])} · {r.get('combo') or ''}")
         out.append("<br>".join(lines))
     return out
 
 
-def _segments(x0, x1, y) -> tuple[list, list]:
-    """Horizontal segments as one trace: None between them breaks the line."""
-    xs, ys = [], []
-    for a, b, v in zip(x0, x1, y):
-        if pd.notna(v):
-            xs += [a, b, None]
-            ys += [v, v, None]
-    return xs, ys
+def _steps(rows, which: int) -> tuple[list, list]:
+    """Stop (which=1) or target (2) as step lines in one trace, None between trades and across a NaN.
+    `rows` holds (entry_ms, exit_ms, levels-or-None, initial value). A level runs from its time to the
+    next one's, the last to the exit. Times never go backwards: a paper level can be stamped before the
+    entry fill, so each is clamped to the previous vertex."""
+    ms, ys = [], []        # x in epoch ms, converted to times in one call below; None marks a break
+
+    def cut():
+        if ms and ms[-1] is not None:
+            ms.append(None)
+            ys.append(None)
+
+    for entry, exit_, lv, init in rows:
+        if lv is None:
+            times, vals = [entry], [init]
+        else:
+            times, vals = lv[0], lv[which]
+        at = np.maximum.accumulate(np.array([entry, *times], dtype="int64"))[1:]
+        at = np.append(at, max(at[-1], exit_)).tolist()
+        for k, v in enumerate(vals):
+            if pd.isna(v):
+                cut()
+                continue
+            ms += [at[k], at[k + 1]]
+            ys += [v, v]
+        cut()
+    keep = np.array([m is not None for m in ms], dtype=bool)
+    xs = np.empty(len(ms), dtype=object)
+    xs[~keep] = None
+    xs[keep] = list(_x(_utc(np.array([m for m in ms if m is not None], dtype="int64"))))
+    return xs.tolist(), ys
 
 
 def _draw_trades(fig: go.Figure, t: pd.DataFrame, candles: pd.DataFrame, p: dict) -> None:
@@ -222,13 +263,15 @@ def _draw_trades(fig: go.Figure, t: pd.DataFrame, candles: pd.DataFrame, p: dict
     hov = np.array(hover_text(t), dtype=object)
     skip = dict(hoverinfo="skip")
 
-    xs, ys = _segments(ent_x, ext_x, t.stop_init)
-    fig.add_scatter(x=xs, y=ys, mode="lines", name="initial stop", line=dict(color=p["neg"], width=1, dash="dot"),
-                    **skip)
-    xs, ys = _segments(ent_x, ext_x, t.target)
-    if xs:
-        fig.add_scatter(x=xs, y=ys, mode="lines", name="initial target",
-                        line=dict(color=p["s1"], width=1, dash="dot"), **skip)
+    recs = t.to_dict("records")
+    lvs = [_levels(r) for r in recs]
+    moved = any(lv is not None for lv in lvs)
+    for which, col, name, color in ((1, "stop_init", "stop", p["neg"]), (2, "target", "target", p["s1"])):
+        rows = [(int(r["entry_time"]), int(r["exit_time"]), lv, r[col]) for r, lv in zip(recs, lvs)]
+        xs, ys = _steps(rows, which)
+        if xs:
+            fig.add_scatter(x=xs, y=ys, mode="lines", name=name if moved else f"initial {name}",
+                            line=dict(color=color, width=1, dash="dot"), **skip)
 
     # The signal bar's close, taken from the run's own bars, so it stays exact when coarser candles are drawn.
     close_at = pd.Series(candles.close.to_numpy(), index=candles.open_time.astype("int64").to_numpy())
@@ -301,7 +344,7 @@ def _shade(fig: go.Figure, lo, hi, p: dict, folds: pd.DataFrame | None, warmup_e
 def trade_figure(candles: pd.DataFrame, trades: pd.DataFrame, tf: str, *, palette: dict | None = None,
                  folds: pd.DataFrame | None = None) -> go.Figure:
     """Candles (coarser if the window is long) with each trade in [first bar, last bar + tf):
-    entry at the fill, the signal bar, exit coloured by reason, the initial stop and target.
+    entry at the fill, the signal bar, exit coloured by reason, the stop and target (as they moved, or the initial ones for older runs).
     Walk-forward: test folds shaded in turn and labelled. Paper: the warmup shaded."""
     p = {**PALETTE, **(palette or {})}
     shown = display_tf(tf, len(candles))
