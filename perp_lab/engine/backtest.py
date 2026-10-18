@@ -274,7 +274,9 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
                         stop = ns
                 if sig.target is not None:
                     target = sig.target
-                if not (same_level(stop, lv_stop[-1]) and same_level(target, lv_target[-1])):
+                # A hold with neither a stop nor a target changes nothing; the stop is never NaN.
+                if (ns is not None or sig.target is not None) and not (
+                        stop == lv_stop[-1] and same_level(target, lv_target[-1])):
                     # decided at this close, in force from the next open
                     lv_time.append(int(T[i + 1])); lv_stop.append(stop); lv_target.append(target)
             continue
