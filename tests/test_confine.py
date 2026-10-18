@@ -387,10 +387,10 @@ def test_the_seal_pins_every_rule():
 
 
 # The page cache of files a worker has mapped (its libraries): what it may not see or steer.
-MADV_DENIED = {"MADV_WILLNEED": 3, "MADV_COLD": 20, "MADV_PAGEOUT": 21, "MADV_POPULATE_READ": 22,
-               "MADV_POPULATE_WRITE": 23, "MADV_COLLAPSE": 25}
+MADV_DENIED = {"MADV_WILLNEED": 3, "MADV_HUGEPAGE": 14, "MADV_COLD": 20, "MADV_PAGEOUT": 21,
+               "MADV_POPULATE_READ": 22, "MADV_POPULATE_WRITE": 23, "MADV_COLLAPSE": 25}
 MADV_ALLOWED = {"MADV_NORMAL": 0, "MADV_RANDOM": 1, "MADV_SEQUENTIAL": 2, "MADV_DONTNEED": 4, "MADV_FREE": 8,
-                "MADV_HUGEPAGE": 14, "MADV_NOHUGEPAGE": 15, "MADV_DONTDUMP": 16, "MADV_DODUMP": 17}
+                "MADV_NOHUGEPAGE": 15, "MADV_DONTDUMP": 16, "MADV_DODUMP": 17}
 
 
 def test_the_seal_denies_reading_or_steering_the_page_cache():

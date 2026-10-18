@@ -72,10 +72,15 @@ This retires the 3a caveat that its guarantees "hold for honest plugin code only
   libraries (libarrow alone is about 11,000 pages) and could fault chosen pages in or push them
   out, for a later worker or process to read the pattern back. The seal narrows this (Confinement,
   step 8): a worker can't query residency (`mincore`, `cachestat`) or evict or prefetch pages
-  (`madvise` with `MADV_PAGEOUT`, `MADV_COLD`, `MADV_WILLNEED`, `MADV_POPULATE_READ`,
-  `MADV_POPULATE_WRITE` or `MADV_COLLAPSE`), so it can only bring pages in, by touching them.
-  `MADV_RANDOM`, `MADV_SEQUENTIAL` and `mlock` stay allowed: they let it touch exactly the pages
-  it chooses (no readahead around them), though they evict nothing. After each batch of an exam,
+  (`madvise` with `MADV_PAGEOUT`, `MADV_COLD`, `MADV_WILLNEED`, `MADV_HUGEPAGE`,
+  `MADV_POPULATE_READ`, `MADV_POPULATE_WRITE` or `MADV_COLLAPSE`), so it can only bring pages in,
+  by touching them. `MADV_HUGEPAGE` is prefetch on a file mapping: a fault there reads the whole
+  2 MiB, PMD-aligned stretch around it in as one large folio (512 pages, against 32–48 for a plain
+  fault, measured on this machine's ext4), and a live process that maps any page of a folio keeps
+  all of it resident past `POSIX_FADV_DONTNEED`; a worker could pick whole 2 MiB stretches to
+  survive the eviction. `MADV_RANDOM`, `MADV_SEQUENTIAL` and `mlock` stay allowed. They change how
+  much a touch brings in (32 pages here with either advice: the file system's large folios), but
+  they evict nothing. After each batch of an exam,
   whatever its outcome and once its workers are gone, and before the next batch's workers start,
   the parent evicts every file those workers mapped (`POSIX_FADV_DONTNEED`, files
   read from `/proc/<pid>/maps`); so does a batch's rerun before it starts. Batch 1's workers have
@@ -279,8 +284,9 @@ library imported. Until step 9 ends, only trusted code has run in it.
    which updates their access times, before Landlock refuses anything. Once sealed the worker
    opens, stats and reads no file, follows no symlink and names no path; it holds its pipes and
    what it has loaded, and gets the rest through the pipe. The same filter denies `mincore`,
-   `cachestat`, and `madvise` with advice that evicts or prefetches pages (R7); other advice, which
-   allocators use (`MADV_DONTNEED`, `MADV_FREE`, `MADV_HUGEPAGE`), keeps working. `fstat` on a
+   `cachestat`, and `madvise` with advice that evicts or prefetches pages, `MADV_HUGEPAGE`
+   included (R7); other advice, which allocators use (`MADV_DONTNEED`, `MADV_FREE`), keeps
+   working. numpy's `MADV_HUGEPAGE` hint for large arrays is refused, which numpy ignores. `fstat` on a
    descriptor keeps working where libc makes it with the `fstat` syscall (glibc 2.39 and later);
    older glibc makes it with `newfstatat`, so step 9 fails there and the sandbox is unavailable
    (`probe()` reports it up front). `seal()` refuses unless a seccomp filter (stage 1) is already
@@ -596,7 +602,8 @@ Each test is written first and seen failing. Tests that need the kernel features
   what the worker preloaded and print a frame, and importing a module it didn't preload is
   `plugin_error: exception: ModuleNotFoundError`; so is `perp_lab.holdout`, so no token can be
   minted inside a worker. A sealed plugin's `mincore` and its eviction and prefetch `madvise`
-  calls get `EPERM` (`MADV_COLLAPSE` too, in the filter), while `MADV_DONTNEED` and allocation work;
+  calls get `EPERM` (`MADV_HUGEPAGE` too, and `MADV_COLLAPSE` in the filter), while `MADV_DONTNEED`
+  and allocation work, a 64 MiB numpy array included;
   a worker whose maps can't be read is logged. The exam evicts every file a batch's
   workers mapped once they are closed, passed or failed, before the next batch's first spawn, and
   a rerun starts only once the lost attempt's files are evicted (with the twin and a spy); it does

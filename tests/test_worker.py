@@ -439,8 +439,10 @@ def test_a_plugin_can_import_only_what_the_worker_preloaded(cfg):
 @pytest.mark.sandbox
 def test_a_sealed_plugin_can_neither_see_nor_steer_the_page_cache(cfg):
     # Which pages of a mapped library are resident is a channel to a later reader (mincore, or
-    # fault timing): no residency query, no eviction or prefetch advice. Freeing memory and plain
-    # allocation still work.
+    # fault timing): no residency query, no eviction or prefetch advice. MADV_HUGEPAGE is prefetch
+    # on a file mapping (a fault reads a whole 2 MiB folio in, which a live mapping of any of its
+    # pages then keeps resident past the eviction). Freeing memory and plain allocation still work,
+    # large arrays included: numpy's MADV_HUGEPAGE hint on them is refused, and numpy ignores that.
     src = plugin("pagecache", """
         import ctypes, errno
         libc = ctypes.CDLL(None, use_errno=True)
@@ -455,13 +457,13 @@ def test_a_sealed_plugin_can_neither_see_nor_steer_the_page_cache(cfg):
         def call(fn, *args):
             return "OK" if fn(*args) == 0 else errno.errorcode[ctypes.get_errno()]
         out = [call(libc.mincore, lib, page, ctypes.create_string_buffer(1))]
-        out += [call(libc.madvise, lib, page, a) for a in (21, 20, 3)]      # PAGEOUT, COLD, WILLNEED
+        out += [call(libc.madvise, lib, page, a) for a in (21, 20, 3, 14)]  # PAGEOUT, COLD, WILLNEED, HUGEPAGE
         out += [call(libc.madvise, anon, page, a) for a in (22, 23)]        # POPULATE_READ, POPULATE_WRITE
         out += [call(libc.madvise, anon, page, 4)]                          # DONTNEED
         out.append("OK" if np.ones(1 << 23).sum() == 1 << 23 else "BAD")    # 64 MiB, allocated and freed
         raise RuntimeError(" ".join(out))""")
     e = plugin_error(batch_run, cfg, src)
-    assert e.message == "EPERM EPERM EPERM EPERM EPERM EPERM OK OK", e.reason()
+    assert e.message == "EPERM EPERM EPERM EPERM EPERM EPERM EPERM OK OK", e.reason()
 
 
 @pytest.mark.sandbox

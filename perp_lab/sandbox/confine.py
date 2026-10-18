@@ -161,13 +161,17 @@ _NEWER_PATHNAME = _NEWER_METADATA + ["open_tree_attr"]    # every newer metadata
 # Stage 2 also covers the page cache of the files a worker has mapped (its libraries): which of
 # their pages are resident is visible to a later process (mincore, or how long a fault takes), so
 # a sealed worker may not query residency (mincore, cachestat) or evict or prefetch pages:
-# madvise with these advice values. Other advice (DONTNEED, FREE, HUGEPAGE: what allocators use)
-# stays. It can still fault pages in by touching them; after each batch of an exam the parent
-# evicts every file its workers mapped (`client.evict_page_cache`). That narrows the channel but
-# doesn't close it (spec R7: fault-around by a live process can keep a touched page resident).
+# madvise with these advice values. HUGEPAGE is prefetch on a file mapping: a fault there reads a
+# whole 2 MiB, PMD-aligned stretch in as one large folio, and a live process mapping any page of a
+# folio keeps all of it resident past the eviction (numpy's hint for large arrays is refused too,
+# and numpy ignores that). Other advice (DONTNEED, FREE, NOHUGEPAGE: what allocators use) stays.
+# It can still fault pages in by touching them; after each batch of an exam the parent evicts
+# every file its workers mapped (`client.evict_page_cache`). That narrows the channel but doesn't
+# close it (spec R7: fault-around by a live process can keep a touched page resident).
 _PAGE_CACHE = ["mincore", "cachestat"]
-_MADV_DENIED = {"MADV_WILLNEED": 3, "MADV_COLD": 20, "MADV_PAGEOUT": 21, "MADV_POPULATE_READ": 22,
-                "MADV_POPULATE_WRITE": 23, "MADV_COLLAPSE": 25}      # COLLAPSE reads a whole huge page in
+_MADV_DENIED = {"MADV_WILLNEED": 3, "MADV_HUGEPAGE": 14, "MADV_COLD": 20, "MADV_PAGEOUT": 21,
+                "MADV_POPULATE_READ": 22, "MADV_POPULATE_WRITE": 23,
+                "MADV_COLLAPSE": 25}                                 # COLLAPSE reads a whole huge page in
 _SEAL_RULES = (
     [(_EPERM, name, ()) for name in _PATHNAME + _NEWER_PATHNAME + _PAGE_CACHE]
     # madvise's advice is an int: its low 32 bits, as for prctl, ioctl and fcntl.
