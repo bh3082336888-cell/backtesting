@@ -1,5 +1,7 @@
 # Strategy research, 2026-10-18: one hypothesis to implement
 
+2026-10-19: the numbers below are for 8 coins from 2022-01-01. The research data now runs from 2020-01-01 over 17 coins (`docs/superpowers/specs/2026-10-18-wider-data-design.md`); a dated addendum re-derives the data-dependent numbers before `flow_shock_fade` runs.
+
 Status: research note, written by us without an outside brief. Section 5 is the spec that the
 next task implements, as written. Implementing the plugin spends no trial. Running its
 walk-forward does: N goes from 6 to 7 store-wide, so that run is the user's call. Section 6 gives
