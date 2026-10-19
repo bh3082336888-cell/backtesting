@@ -1,6 +1,8 @@
 import json
 import sqlite3
 
+import pytest
+import sqlalchemy as sa
 import yaml
 
 from perp_lab.config import Config, load_config
@@ -52,6 +54,43 @@ def test_an_existing_store_gains_the_data_id_column(cfg):
     assert db.run_row(cfg, "old")["data_id"] is None                 # added back, empty for old runs
     fake_run(cfg, "new")
     assert db.run_row(cfg, "new")["data_id"] == data_id(data_identity(cfg, U))
+
+
+def stale_inspect(monkeypatch, times):
+    """sa.inspect that hides runs.data_id from its first `times` callers, as a process that looked
+    before another one added the column would see it. Returns the list of calls made."""
+    real, calls = sa.inspect, []
+
+    class Stale:
+        def __init__(self, inspector):
+            self.inspector = inspector
+
+        def get_columns(self, table):
+            return [c for c in self.inspector.get_columns(table) if c["name"] != "data_id"]
+
+    def inspect(eng):
+        calls.append(eng)
+        return Stale(real(eng)) if len(calls) <= times else real(eng)
+    monkeypatch.setattr(sa, "inspect", inspect)
+    return calls
+
+
+def test_a_store_migrated_by_another_process_meanwhile_opens(cfg, monkeypatch):
+    # Two processes open an old store at once: both see no data_id, one adds it, and the other's
+    # ALTER then fails on a column that now exists. That is not an error.
+    fake_run(cfg, "r1")
+    db._engine.cache_clear()
+    calls = stale_inspect(monkeypatch, times=1)
+    assert db.run_row(cfg, "r1")["data_id"] == data_id(data_identity(cfg, U))
+    assert len(calls) == 2                                  # the columns were looked at again
+
+
+def test_a_failed_migration_still_fails_when_the_column_is_missing(cfg, monkeypatch):
+    fake_run(cfg, "r1")
+    db._engine.cache_clear()
+    stale_inspect(monkeypatch, times=2)
+    with pytest.raises(sa.exc.OperationalError, match="data_id"):
+        db.run_row(cfg, "r1")
 
 
 def test_a_parent_run_on_other_data_is_not_matched(cfg):

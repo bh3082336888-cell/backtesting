@@ -147,15 +147,23 @@ def _now():
     return datetime.now(timezone.utc)
 
 
+def _has_data_id(eng: sa.Engine) -> bool:
+    return "data_id" in {c["name"] for c in sa.inspect(eng).get_columns("runs")}
+
+
 @lru_cache(maxsize=8)
 def _engine(url: str) -> sa.Engine:
     if url.startswith("sqlite:///"):
         Path(url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
     eng = sa.create_engine(url, future=True)
     md.create_all(eng)
-    if "data_id" not in {c["name"] for c in sa.inspect(eng).get_columns("runs")}:
-        with eng.begin() as c:      # create_all never adds a column to an existing table
-            c.execute(sa.text("ALTER TABLE runs ADD COLUMN data_id VARCHAR(16)"))
+    if not _has_data_id(eng):
+        try:
+            with eng.begin() as c:      # create_all never adds a column to an existing table
+                c.execute(sa.text("ALTER TABLE runs ADD COLUMN data_id VARCHAR(16)"))
+        except sa.exc.OperationalError:
+            if not _has_data_id(eng):   # another process opening the store added it meanwhile: fine
+                raise
     return eng
 
 
