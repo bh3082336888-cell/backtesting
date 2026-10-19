@@ -26,6 +26,10 @@ NEW = {"ADAUSDT": 0.010, "DOTUSDT": 0.010, "LTCUSDT": 0.010, "BCHUSDT": 0.010, "
        "AAVEUSDT": 0.010, "XLMUSDT": 0.015, "ATOMUSDT": 0.010, "ETCUSDT": 0.010}
 
 
+def test_the_universe_is_the_17_coins_from_2020():
+    assert RAW["universe"] == COINS
+    assert (RAW["history_start"], RAW["holdout_start"]) == ("2020-01-01", "2026-07-01")
+
 
 def test_every_coin_has_its_own_bracket_and_none_is_kinder_than_before():
     br = RAW["margin_brackets"]

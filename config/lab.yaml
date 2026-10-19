@@ -4,7 +4,7 @@ data_dir: ./data
 runs_dir: ./runs
 
 # Binance USDⓈ-M perps. Base assets; quote is always USDT.
-universe: [BTC, ETH, SOL, BNB, XRP, DOGE, AVAX, LINK]
+universe: [BTC, ETH, SOL, BNB, XRP, DOGE, AVAX, LINK, ADA, DOT, LTC, BCH, FIL, AAVE, XLM, ATOM, ETC]
 quote: USDT
 
 # Shown wherever results are shown (walk-forward report, dashboard sidebar).
@@ -12,7 +12,7 @@ universe_rule: "Universe: 17 Binance USDⓈ-M USDT perpetuals, chosen 2026-10-18
 timeframes: [15m, 1h, 4h]
 
 # Research data starts here. Everything is measured from this date.
-history_start: "2022-01-01"
+history_start: "2020-01-01"
 
 # FIXED holdout start. This is a calendar date on purpose: it must never drift
 # forward with "now", or new data would silently become research data.
