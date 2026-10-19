@@ -612,4 +612,5 @@ def holdout_caption() -> str:
 
 st.sidebar.caption(f"store: {CFG.get('store', {}).get('url')}  \nholdout from {CFG.holdout_start.date()} (locked)")
 st.sidebar.caption(holdout_caption())
+st.sidebar.caption(CFG["universe_rule"])
 PAGES[page]()

@@ -223,3 +223,9 @@ def test_an_edit_during_validation_does_not_change_what_is_recorded(tmp_path, pl
     rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
     assert PluginSource.read("donchian_atr").hash != h0
     assert rec["strategy_hash"] == h0 == db.run_row(cfg, rec["run_id"])["strategy_hash"]
+
+
+def test_the_report_states_the_universe_rule(tmp_path, plugins):
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    rec, report = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    assert cfg["universe_rule"] in report and rec["universe_rule"] == cfg["universe_rule"]

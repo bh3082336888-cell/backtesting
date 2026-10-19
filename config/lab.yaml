@@ -6,6 +6,9 @@ runs_dir: ./runs
 # Binance USDⓈ-M perps. Base assets; quote is always USDT.
 universe: [BTC, ETH, SOL, BNB, XRP, DOGE, AVAX, LINK]
 quote: USDT
+
+# Shown wherever results are shown (walk-forward report, dashboard sidebar).
+universe_rule: "Universe: 17 Binance USDⓈ-M USDT perpetuals, chosen 2026-10-18 as those that traded in every sampled month 2021-01 to 2026-06 and ranked top 50 by volume in at least 5 of 7 samples. Survivor bias: coins that died or faded before 2026 are not in it."
 timeframes: [5m, 15m, 1h, 4h]
 
 # Research data starts here. Everything is measured from this date.

@@ -33,6 +33,7 @@ def render_report(rec: dict, regime: pd.DataFrame, monthly: pd.DataFrame) -> str
          f"run `{rec['run_id']}` · plugin `{rec['strategy_hash'][:10]}` · {rec['date_start']} → {rec['date_end']} "
          f"(holdout from {rec['holdout_start']} untouched) · {len(rec['folds'])} folds "
          f"({rec['wf_train_months']}m train / {rec['wf_test_months']}m test)", "",
+         rec["universe_rule"], "",
          f"## Verdict: **{rec['status'].upper()}**", ""]
     L += [f"- {x}" for x in rec["fail_reasons"]] or ["- all checks passed (now go look for the bug)"]
     L += ["", "## OOS (headline)", "",
@@ -97,7 +98,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
         "run_id": rid, "strategy": name, "strategy_hash": src.hash,
         "hypothesis": src.meta.hypothesis, "repo_commit": repo_commit(),
         "params": {"grid": src.meta.grid, "defaults": src.meta.params},
-        "universe": wf.symbols, "timeframes": [tf],
+        "universe": wf.symbols, "universe_rule": cfg["universe_rule"], "timeframes": [tf],
         "date_start": str(wf.folds[0]["train_start"].date()), "date_end": str(ob.date()),
         "oos_start": str(oa.date()), "holdout_start": str(cfg.holdout_start.date()),
         "validation_mode": "walkforward",
