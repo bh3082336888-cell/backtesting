@@ -227,19 +227,22 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if psrc is not None and lookahead_failures(cfg, psrc):
         raise JudgeRefused(f"parent {parent} fails the lookahead check; fix or judge it first")
 
+    def run_parent(syms):
+        try:
+            prec, _ = validate(cfg, parent, tf, syms, workers=workers, lineage_id=family, src=psrc)
+        except PluginError as e:
+            log.warning("parent %s failed in the sandbox: %s\n%s", parent, e.reason(),
+                        e.stderr.decode("utf-8", "replace"))
+            raise JudgeRefused(f"parent {parent} fails in the sandbox; fix or judge it first") from e
+        return db.run_row(cfg, prec["run_id"])
+
     universe = symbols or cfg.symbols
     parent_row = None
     if parent is not None:
         parent_row = db.latest_wf_run(cfg, parent, tf, psrc.hash, universe,
                                      data_id=data_id(data_identity(cfg, universe)), lineage_id=family)
         if parent_row is None:
-            try:
-                prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family, src=psrc)
-            except PluginError as e:
-                log.warning("parent %s failed in the sandbox: %s\n%s", parent, e.reason(),
-                            e.stderr.decode("utf-8", "replace"))
-                raise JudgeRefused(f"parent {parent} fails in the sandbox; fix or judge it first") from e
-            parent_row = db.run_row(cfg, prec["run_id"])
+            parent_row = run_parent(symbols)
 
     try:
         rec, _ = validate(cfg, name, tf, symbols, workers=workers,
@@ -252,6 +255,15 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
             "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
     child = db.run_row(cfg, rec["run_id"])
+    if parent_row is not None and parent_row["data_id"] != child["data_id"]:
+        # Found by the requested universe, but the child's run skipped coins without bars: never
+        # compare runs on different data (spec change 6), so the parent runs on the child's coins.
+        log.warning("parent %s ran on %s, its child %s on %s; re-running the parent on the child's coins",
+                    parent, ",".join(parent_row["universe"] or []), name, ",".join(child["universe"] or []))
+        parent_row = run_parent(child["universe"])
+        if parent_row["data_id"] != child["data_id"]:
+            raise JudgeRefused(f"parent {parent} ran on {','.join(parent_row['universe'] or [])}, not on the "
+                               f"data its child ran on ({','.join(child['universe'] or [])}); nothing compared")
     n, _ = db.trial_stats(cfg)          # N store-wide; the spread is the no-edge one (gates)
     cr = oos_portfolio(child["run_dir"])
     d = gates.deflated_sharpe(cr, n)
