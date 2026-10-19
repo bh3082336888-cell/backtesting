@@ -32,3 +32,7 @@ def test_every_coin_has_its_own_bracket_and_none_is_kinder_than_before():
     assert {f"{c}USDT" for c in COINS} <= set(br)
     assert {s: br[s]["mmr"] for s in BEFORE} == BEFORE and {s: br[s]["mmr"] for s in NEW} == NEW
     assert all(br[s]["mmr"] >= br["default"]["mmr"] for s in NEW) and all(br[s]["cum"] == 0.0 for s in NEW)
+
+
+def test_5m_is_not_a_research_timeframe():
+    assert RAW["timeframes"] == ["15m", "1h", "4h"]
