@@ -174,7 +174,7 @@ The values live in `config/lab.yaml` `costs.slippage_model` (`adv_days: 30`, `sp
 
 **Half-spread.** `(ask - bid) / (ask + bid)` in bp, time-weighted over the UTC day from the first quote until midnight, each quote weighing the time until the next one. Quotes with a bid not above zero or an ask not above the bid are dropped.
 
-**Fit.** OLS of log half-spread on log `adv / 1e8` over the 68 points. `alpha` is minus the slope, rounded to 0.01 (0.63). The intercept is then lifted so that the curve lies above 90% of the points: the 90th percentile of the residuals (computed with the rounded `alpha`), rounded up to 0.01 bp (2.05 at 100 million USDT a day). The fit is pessimistic on purpose.
+**Fit.** OLS of log half-spread on log `adv / 1e8` over the 68 points. `alpha` is minus the slope, rounded to 0.01 (0.63). The intercept is then lifted so that the curve lies above about 90% of the points (61 of the 68, 89.7%, because the percentile interpolates between residuals): the 90th percentile of the residuals (computed with the rounded `alpha`), rounded up to 0.01 bp (2.05 at 100 million USDT a day). The fit is pessimistic on purpose.
 
 **Result** (`slippage_bps`, floor 2.0, a bar on the date; adv from the 30 days before it; "–" = no volume yet, so the bar pays 50):
 
