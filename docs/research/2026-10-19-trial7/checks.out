@@ -1,0 +1,109 @@
+verdict flow_shock_fade @ 1h @ ad03f7afe8: KILL
+  - OOS Sharpe -1.26 <= 0
+  - does not beat random-entry p95 OOS
+  - Deflated Sharpe 0.00 < 0.95 (N=7)
+  Deflated Sharpe 4.04e-07, N = 7, sr0 = 0.0296 (daily); holdout n/a (n/a)
+
+run 20261019-065932-b571ea, plugin ad03f7afe8, OOS 2020-07-01 .. 2026-07-01, 36 folds, 17 coins, walk-forward status noise
+  OOS: Sharpe -1.26, return -16.9%, max DD -17.0%, PF 0.79, win 48.0%, avg R -0.089, trades 3385
+  IS (selected params' train windows): Sharpe -0.59
+  random entry (200 seeds, params {'flow_x': 1.0, 'hold_bars': 24}): mean -0.86, p95 -0.19, strategy at the 19% percentile
+  narrow island: None (n/a: base Sharpe <= 0, nothing to be an island of); sensitivity base Sharpe -0.81
+  buy and hold: Sharpe 0.72
+  combo picked per fold: flow_x=1.0,hold_bars=24 x17, flow_x=1.0,hold_bars=12 x10, flow_x=0.5,hold_bars=24 x5, flow_x=1.0,hold_bars=6 x3, flow_x=0.5,hold_bars=12 x1
+
+3385 OOS trades, signal 2020-07-01 .. exit 2026-06-30 23:00:00+00:00; oos_daily 2020-07-01 .. 2026-06-30
+totals: pnl_gross -17,194.11  fees 8,190.52  funding 129.94  pnl -25,514.57
+
+1. trades < 64 (broken data path): 3385 -> pass
+2. gross <= 0: -17,194.11 -> FAIL
+3. gross > 0 but net < 0: gross -17,194.11, net -25,514.57 -> pass
+4. IS - OOS Sharpe > ~1: IS -0.591, OOS -1.256, gap 0.665 -> pass
+
+5. sides (either side's gross <= 0 fails):
+      trades   pnl_gross         pnl  share  gross_per_trade
+side                                                        
+-1       938 -10,632.000 -12,975.156  0.277          -11.335
+ 1      2447  -6,562.114 -12,539.419  0.723           -2.682
+   -> FAIL
+
+6. concentration (one symbol or one 2-month fold > half of OOS net P&L fails):
+   by symbol:
+          trades  pnl_gross        pnl  share_of_net
+symbol                                              
+XLMUSDT      208  1,191.762    644.426        -0.025
+AVAXUSDT     103    437.735    196.399        -0.008
+XRPUSDT      197    304.130   -222.261         0.009
+SOLUSDT      111   -566.493   -737.991         0.029
+DOTUSDT      171   -827.757 -1,156.031         0.045
+BCHUSDT      269   -572.755 -1,177.673         0.046
+ETCUSDT      226   -840.182 -1,381.861         0.054
+AAVEUSDT     166 -1,062.189 -1,396.591         0.055
+LINKUSDT     132 -1,137.364 -1,405.824         0.055
+FILUSDT      248   -950.378 -1,483.827         0.058
+DOGEUSDT     261   -977.731 -1,638.169         0.064
+BNBUSDT      236   -873.995 -1,644.810         0.064
+LTCUSDT      235 -1,115.054 -1,780.615         0.070
+ATOMUSDT     162 -1,553.498 -1,853.711         0.073
+ADAUSDT      158 -1,633.213 -1,974.056         0.077
+ETHUSDT      227 -3,330.968 -3,951.878         0.155
+BTCUSDT      275 -3,686.164 -4,550.102         0.178
+   -> top symbol XLMUSDT: net 644.43; total net is -25,514.57 <= 0, so no share is defined
+   symbols with net > 0: 2 of 17
+   by fold:
+                  test                    combo  trades  pnl_gross        pnl  share_of_net
+fold                                                                                       
+3     2021-01..2021-03  flow_x=1.0,hold_bars=12      54  1,897.647  1,795.981        -0.070
+21    2024-01..2024-03  flow_x=0.5,hold_bars=24     181  1,553.898  1,117.227        -0.044
+16    2023-03..2023-05  flow_x=1.0,hold_bars=12      75  1,292.964  1,108.792        -0.043
+4     2021-03..2021-05  flow_x=1.0,hold_bars=12      38  1,180.636  1,106.124        -0.043
+27    2025-01..2025-03  flow_x=1.0,hold_bars=24      47    839.742    769.017        -0.030
+20    2023-11..2024-01  flow_x=1.0,hold_bars=24      46    555.112    452.843        -0.018
+6     2021-07..2021-09  flow_x=1.0,hold_bars=12       9    274.798    253.586        -0.010
+32    2025-11..2026-01  flow_x=1.0,hold_bars=24      71    224.409     79.951        -0.003
+34    2026-03..2026-05  flow_x=1.0,hold_bars=24      63    202.572     43.829        -0.002
+25    2024-09..2024-11  flow_x=1.0,hold_bars=12      48    102.744    -24.890         0.001
+5     2021-05..2021-07  flow_x=1.0,hold_bars=12      18    -73.414    -90.339         0.004
+12    2022-07..2022-09   flow_x=1.0,hold_bars=6      22    -63.791    -97.353         0.004
+14    2022-11..2023-01  flow_x=1.0,hold_bars=24      65    -16.057   -153.198         0.006
+11    2022-05..2022-07  flow_x=1.0,hold_bars=24      16   -195.955   -222.599         0.009
+10    2022-03..2022-05  flow_x=1.0,hold_bars=24      34   -172.844   -237.232         0.009
+28    2025-03..2025-05  flow_x=1.0,hold_bars=24      29   -175.245   -243.291         0.010
+30    2025-07..2025-09  flow_x=1.0,hold_bars=24      33   -206.366   -290.903         0.011
+23    2024-05..2024-07  flow_x=1.0,hold_bars=12      62   -223.165   -363.495         0.014
+29    2025-05..2025-07  flow_x=1.0,hold_bars=24      38   -584.513   -660.671         0.026
+17    2023-05..2023-07   flow_x=1.0,hold_bars=6     126   -378.311   -740.451         0.029
+35    2026-05..2026-07  flow_x=1.0,hold_bars=24     114   -451.474   -740.610         0.029
+26    2024-11..2025-01  flow_x=1.0,hold_bars=24      42   -737.496   -813.501         0.032
+0     2020-07..2020-09   flow_x=1.0,hold_bars=6     196   -238.095   -858.792         0.034
+18    2023-07..2023-09  flow_x=1.0,hold_bars=24      94   -812.996 -1,107.633         0.043
+24    2024-07..2024-09  flow_x=1.0,hold_bars=12      51 -1,023.965 -1,111.550         0.044
+31    2025-09..2025-11  flow_x=1.0,hold_bars=24      76 -1,101.404 -1,263.433         0.050
+33    2026-01..2026-03  flow_x=1.0,hold_bars=24     107 -1,077.758 -1,310.938         0.051
+13    2022-09..2022-11  flow_x=1.0,hold_bars=24      49 -1,270.137 -1,408.615         0.055
+15    2023-01..2023-03  flow_x=1.0,hold_bars=12      48 -1,414.415 -1,545.367         0.061
+2     2020-11..2021-01  flow_x=0.5,hold_bars=24     362 -1,117.489 -1,955.472         0.077
+9     2022-01..2022-03  flow_x=1.0,hold_bars=24      35 -1,956.742 -2,016.726         0.079
+22    2024-03..2024-05  flow_x=0.5,hold_bars=24     161 -1,809.029 -2,077.424         0.081
+7     2021-09..2021-11  flow_x=1.0,hold_bars=12      66 -2,352.864 -2,478.387         0.097
+1     2020-09..2020-11  flow_x=0.5,hold_bars=24     380 -1,983.186 -3,081.667         0.121
+19    2023-09..2023-11  flow_x=0.5,hold_bars=24     308 -2,246.642 -3,265.406         0.128
+8     2021-11..2022-01  flow_x=0.5,hold_bars=12     221 -3,635.287 -4,081.982         0.160
+   -> top fold 3: net 1,795.98; total net is -25,514.57 <= 0, so no share is defined
+   folds with net > 0: 9 of 36
+
+7. crash months (net pnl outside the eight months, by exit_time UTC month, <= 0 rules out any child):
+   inside :   279 trades, pnl_gross -5,387.84, pnl -5,878.68
+   outside:  3106 trades, pnl_gross -11,806.27, pnl -19,635.89
+   per crash month:
+           trades       pnl
+exit_time                  
+2021-06         4   -216.38
+2022-01        30 -2,010.59
+2022-04        20   -589.21
+2022-05        16    664.55
+2022-06         6   -394.67
+2024-04       115 -3,445.78
+2025-02        35  1,287.96
+2026-06        53 -1,174.57
+   -> outside <= 0: all the profit comes from the crash months
