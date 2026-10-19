@@ -1,8 +1,6 @@
 # Wider data: history from 2020 and 17 coins
 
-Status: chosen in conversation 2026-10-18 (option B of three); both open questions answered by
-the user the same day (see "Answered questions"); the document as a whole awaits the user's
-review. Nothing is built yet.
+Status: approved 2026-10-18; built 2026-10-19 on branch `feat/wider-data`. Change 7 is deferred to its own spec.
 Scope: the research data only: `history_start`, the coin universe, per-coin costs, and the fixes
 the code needs for coins that start (and may stop) on different dates. It comes **before** the
 Phase 3b-2 proposer and is not part of it; the proposer will run on this data.
