@@ -57,3 +57,10 @@ for m, r in crash.items():
     print(f"  {m:%Y-%m}: {r:.0%} over {int(n[m])} coins")
 rest = oos[oos > -0.20].nsmallest(5)
 print("Worst five months above the line: " + ", ".join(f"{m:%Y-%m} {r:.0%}" for m, r in rest.items()))
+
+# Added after the first run, for the addendum's blind-spot paragraph; the rule above is unchanged.
+print("\nMonths the addendum names as falling outside the rule (same measure; rank among the OOS months):")
+for mo in ["2021-05", "2022-11"]:
+    m = mean.index[mean.index.strftime("%Y-%m") == mo][0]
+    print(f"  {mo}: BTC {monthly.loc[m, 'BTCUSDT']:.1%}, mean {mean[m]:.1%}, "
+          f"rank {int((oos <= mean[m]).sum())} of {len(oos)}")

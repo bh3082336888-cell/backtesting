@@ -770,12 +770,12 @@ The research data now runs from 2020-01-01 over 17 coins (`docs/superpowers/spec
 
 This section re-derives the numbers above that depend on the data. It was written before any run of `flow_shock_fade` and from the same kinds of looks:
 - counts, distributions and unconditional market statistics;
-- no price after a trigger bar;
+- no price after a trigger bar (A3's 12-bar move is over every bar, conditioned on nothing, as in look 1);
 - no candidate's P&L or hit rate.
 
-The plugin, its grid, the command in section 6 and every kill rule in section 7 are unchanged. Where a number here differs from one above, this one holds.
+The plugin, its grid and the command in section 6 are unchanged. So are the kill rules in section 7, except where they quote a number from the data, which this section replaces. For example, the OOS trade floor is now the gate's 64, not 30. Where a number here differs from one above, this one holds.
 
-The looks are A1–A4, in [`2026-10-19-looks/`](2026-10-19-looks/). The folder holds a frozen copy of the research config and their `*.out` files. Run one from the repo root as `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python docs/research/2026-10-19-looks/<script>`. Each reads bars only through `load_bars` with no `end` and no token, and asserts that the last bar is before 2026-07-01.
+The looks are A1–A4, in [`2026-10-19-looks/`](2026-10-19-looks/). The folder holds a frozen copy of the research config and their `*.out` files. Run one from the repo root as `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python docs/research/2026-10-19-looks/<script>`. Each reads bars only through `load_bars` with no `end` and no token, so every read ends at 2026-07-01. `common.bars` also asserts that the last bar is before that date. A4's buy-and-hold goes through `load_bars` directly, with the same default end and no extra assertion.
 
 | look | what it computes | why it is not a performance measurement |
 |---|---|---|
@@ -806,7 +806,7 @@ The looks are A1–A4, in [`2026-10-19-looks/`](2026-10-19-looks/). The folder h
 | round trip per trade | 14 bp, flat | median 16.4 / 16.8 bp, mean 17.5 / 18.2 bp. By symbol the median runs from 14.2 (BTC) to 20–21 (ATOM, XLM) | A3 |
 | median absolute 12-bar move / ATR, all 1h bars | 1.23 | 1.21, so the 12-bar spread is 0.60 R | A3 |
 | buy-and-hold Sharpe over the OOS span | 0.59 | **0.72**: 1.20 over 2020-07 → 2022-07 and 0.39 over 2022-07 → 2026-07 | A4 |
-| taker data | no NaN | no NaN `taker_buy_volume` or `trades` for any of the 17 coins in any year. Each coin has one 1h bar with zero volume. | A1 |
+| taker data | no NaN | no NaN `taker_buy_volume` or `trades` for any of the 17 coins in any year. Each coin has one 1h bar with zero volume. SOL, XRP, LTC, FIL and XLM have candle gaps in late February and early April 2022 (README, "Data gaps"); the loader logs them, and they are not patched. | A1 |
 
 ### The rough sum again (section 4)
 
@@ -824,7 +824,7 @@ The looks are A1–A4, in [`2026-10-19-looks/`](2026-10-19-looks/). The folder h
 | **gross reversion per trade** (net + the mean round trip, 17.5 and 18.2 bp) | **29 bp** (0.22 ATR) | **41 bp** (0.28 ATR) |
 | the same at the median symbol's trigger-bar ATR (135 and 157 bp) | 29 bp | 43 bp |
 
-The hurdle hardly moves: 29 bp at the defaults (was 28–31) and 41–43 bp at `flow_x` 1.0 (was 44–50).
+The hurdle moves little: 29 bp at the defaults (was 28–31) and 41–43 bp at `flow_x` 1.0, a little lower than the 44–50 before.
 - The lower bar and the extra independent trades lower it.
 - The per-coin costs and the wider ATR on trigger bars raise it again.
 
@@ -842,21 +842,24 @@ The hurdle hardly moves: 29 bp at the defaults (was 28–31) and 41–43 bp at `
 
 ### Crash months (pins section 7's "2022 crash months")
 
-**Rule (fixed before look A4 ran).** A calendar month is a crash month when the mean close-to-close monthly return, over the coins with a close at the end of the previous month, is −20% or worse.
+**Rule.** It was fixed in A4's docstring before the script ran. The script and its output were committed together, so git can't show the order. The −20% threshold is a free choice. A calendar month is a crash month when the mean close-to-close monthly return, over the coins with a close at the end of the previous month, is −20% or worse.
 
 **Crash months in the OOS span:**
 - 2020–21, the counterpart asked for: 2021-06 (−21%);
 - 2022: 2022-01 (−26%), 2022-04 (−29%), 2022-05 (−28%), 2022-06 (−32%);
 - later: 2024-04 (−29%), 2025-02 (−29%), 2026-06 (−23%).
 
-The worst months above the line are 2022-12, 2023-08 and 2021-12 at −19%, then 2021-05 and 2025-11 at −18%.
+The worst months above the line are 2022-12, 2023-08 and 2021-12 at −19%, just above the line, then 2021-05 and 2025-11 at −18%. The March 2020 crash falls before the OOS span, which starts in 2020-07.
 
-**The check.** Section 7's result "All the profit comes from the 2022 crash months" now reads: **the OOS net P&L outside these eight months is ≤ 0.** As before, it kills nothing by itself and rules out any child. It is read from `oos_trades.parquet` by the month of each trade's `exit_time`, after the walk-forward, and reads no holdout data.
+**The check.** Section 7's result "All the profit comes from the 2022 crash months" now reads: **the OOS net P&L outside these eight months is ≤ 0.** As before, it kills nothing by itself and rules out any child.
 
-**Blind spot.** A close-to-close month misses a crash that recovered within the month:
-- May 2021: BTC −35% close to close, but −18% on the equal-weight mean;
-- the FTX collapse, November 2022: −15% on the mean, the 16th worst of the 72 OOS months.
+How it is read, after the walk-forward, with no holdout data:
+- the data is the walk-forward run's `oos_trades.parquet`;
+- "net P&L" is the sum of the `pnl` column (net of fees and funding) over every OOS trade whose `exit_time` (epoch ms) falls outside the eight months, by UTC calendar month;
+- trades are counted by exit month, where the P&L is realised. This differs from the walk-forward, which assigns a trade to a fold by its `signal_time`.
 
-Both were measured the same way as A4.
+**Blind spot.** The rule is one threshold on close-to-close months. It misses a crash whose month ends less than 20% down on the equal-weight mean, either because the coins fell unevenly or because they recovered part of the fall before the month ended. Two examples, from A4's output:
+- May 2021: BTC −35.4%, but the mean is −18.4%;
+- November 2022, the FTX collapse: the mean is −15.3%, the 16th worst of the 72 OOS months.
 
 The rule stays as fixed. A different rule chosen after a walk-forward result would be a choice made after seeing it.
