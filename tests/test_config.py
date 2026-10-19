@@ -12,6 +12,8 @@ def test_the_slippage_floor_is_todays_cost_and_the_model_is_set():
     m = c["slippage_model"]
     assert set(m) == {"adv_days", "spread_bps_at_100m", "alpha", "max_bps"} and m["adv_days"] == 30
     assert m["alpha"] > 0 and m["spread_bps_at_100m"] > 0 and m["max_bps"] == 50.0
+    # Calibrated 2026-10-18 and fixed before any trial on the new data: never tuned after a result.
+    assert m["alpha"] == 0.63 and m["spread_bps_at_100m"] == 2.05
 
 
 def test_the_universe_rule_states_the_survivor_bias():
