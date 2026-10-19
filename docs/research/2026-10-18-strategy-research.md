@@ -1,6 +1,6 @@
 # Strategy research, 2026-10-18: one hypothesis to implement
 
-2026-10-19: the numbers below are for 8 coins from 2022-01-01. The research data now runs from 2020-01-01 over 17 coins (`docs/superpowers/specs/2026-10-18-wider-data-design.md`); a dated addendum re-derives the data-dependent numbers before `flow_shock_fade` runs.
+2026-10-19: the numbers below are for 8 coins from 2022-01-01. The research data now runs from 2020-01-01 over 17 coins (`docs/superpowers/specs/2026-10-18-wider-data-design.md`); section 9 (addendum, 2026-10-19) re-derives the data-dependent numbers, written before `flow_shock_fade` runs. Where they differ, section 9 holds.
 
 Status: research note, written by us without an outside brief. Section 5 is the spec that the
 next task implements, as written. Implementing the plugin spends no trial. Running its
@@ -760,3 +760,106 @@ Findings that the sections above rely on:
 - **Synthetic bars.** By construction, volume is uniform on 100–1000 and never exceeds about 1.8×
   its median, so a volume-multiple trigger is unverifiable there. The net-flow statistic peaks at 0.80 in absolute value, so the
   defaults (0.5, 1.0) fire and `flow_x = 1.0` doesn't.
+
+## 9. Addendum, 2026-10-19: the numbers on the wider data
+
+The research data now runs from 2020-01-01 over 17 coins (`docs/superpowers/specs/2026-10-18-wider-data-design.md`):
+- the OOS span is 2020-07 to 2026-07, 6 years in 36 folds;
+- each bar now carries its coin's own slippage, at least 2 bp;
+- the trade-count gates now scale with the number of coins listed.
+
+This section re-derives the numbers above that depend on the data. It was written before any run of `flow_shock_fade` and from the same kinds of looks:
+- counts, distributions and unconditional market statistics;
+- no price after a trigger bar (A3's 12-bar move is over every bar, conditioned on nothing, as in look 1);
+- no candidate's P&L or hit rate.
+
+The plugin, its grid and the command in section 6 are unchanged. So are the kill rules in section 7, except where they quote a number from the data, which this section replaces. For example, the OOS trade floor is now the gate's 64, not 30. Where a number here differs from one above, this one holds.
+
+The looks are A1–A4, in [`2026-10-19-looks/`](2026-10-19-looks/). The folder holds a frozen copy of the research config and their `*.out` files. Run one from the repo root as `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python docs/research/2026-10-19-looks/<script>`. Each reads bars only through `load_bars` with no `end` and no token, so every read ends at 2026-07-01. `common.bars` also asserts that the last bar is before that date. A4's buy-and-hold goes through `load_bars` directly, with the same default end and no extra assertion.
+
+| look | what it computes | why it is not a performance measurement |
+|---|---|---|
+| A1 `lookA1_data.py` | Per symbol at 1h: the first and last bar, the bar count, NaN shares of `taker_buy_volume` and `trades` (overall and per year), and bars with zero volume or zero trades. | Data quality only. |
+| A2 `lookA2_counts.py` | Fires per symbol per year from the plugin's own `prepare()` and entry rule. Look 6's greedy lower bound for every grid combo, over the OOS span and pooled per training window, per 2-month test window and per half-year, each against the minimum its gate now asks for. | Counts of a condition on bars ≤ t. Neither bound needs to know how a trade ended. |
+| A3 `lookA3_breadth_atr_costs.py` | Breadth and distinct trigger hours. The ATR at t on trigger bars against all bars. The round trip a trigger's trade pays, at the per-coin slippage of the entry bar t+1. Look 1's unconditional ratio of the median absolute 12-bar move to the ATR. | Same-bar features and costs. The slippage at t+1 comes from volume before t+1's day. The 12-bar move is over every bar, conditioned on nothing, as in look 1. |
+| A4 `lookA4_context.py` | The Deflated Sharpe bar for N = 7 over the OOS span. Equal-weight buy-and-hold over the OOS span and its two parts. The crash months, by a rule fixed before the look ran. | Unconditional market statistics. No candidate signal appears. |
+
+### What changed
+
+| number | 2026-10-18 (8 coins from 2022) | 2026-10-19 (17 coins from 2020) | look |
+|---|---|---|---|
+| OOS span | 2022-07 → 2026-07, 4 years | 2020-07 → 2026-07, 6 years, 36 folds | A2 |
+| Deflated Sharpe bar, N = 7, normal returns | 1.52 | **1.24** (N = 6: 1.20; N = 50: 1.60) | A4 |
+| fires per symbol per year, defaults (`flow_x` 0.5) | 105 [70, 178] | 120 [69, 158] | A2 |
+| the same at `flow_x` 1.0 | 22 [11, 34] | 31 [13, 39] | A2 |
+| OOS trades, greedy lower bounds over the grid | 600–3,000 | **about 2,000–8,900** (1,976 at `flow_x` 1.0 with a 24-bar hold; 8,936 at 0.5 with a 6-bar hold) | A2 |
+| the OOS gate's minimum | 30 | 64 (3.75 per coin × 17) | — |
+| tightest training window against its minimum | 36 triggers in 2022 H1 against 20 | 60 trades against 43, for the window starting 2022-03 (`flow_x` 1.0, 24-bar hold); 350 against 43 at the defaults | A2 |
+| smallest half-year, pooled | at least 46 | 75 (`flow_x` 1.0, 2022 H1); 401 at the defaults. The smallest 2-month test window is 9 at `flow_x` 1.0 and 90 at the defaults | A2 |
+| a six-month holdout against the exam's minimum | ≥ 10 | 22 (1.25 per coin × 17). The last two half-years before the holdout held 156–288 at `flow_x` 1.0 and 648–1,120 at the defaults | A2 |
+| long share of trades | 64–68% | **70–74%** | A2 |
+| trigger hours that are distinct | 59% (defaults), 66% (1.0) | 48%, 56% | A3 |
+| triggers sharing their hour with ≥ 3 other symbols | 31%, 22% | 45%, 39% (more coins to share an hour with, so not comparable one to one) | A3 |
+| ATR at t on trigger bars over the OOS span, pooled median (all bars) | 102, 112 bp (103) | 127, 144 bp (121) | A3 |
+| the same, median of the per-symbol medians (all bars) | 121, 134 bp (109) | 135, 157 bp (125) | A3 |
+| per-symbol trigger / all-bar ATR | 0.98–1.19, 1.05–1.36 | 0.94–1.22, 0.97–1.55 | A3 |
+| round trip per trade | 14 bp, flat | median 16.4 / 16.8 bp, mean 17.5 / 18.2 bp. By symbol the median runs from 14.2 (BTC) to 20–21 (ATOM, XLM) | A3 |
+| median absolute 12-bar move / ATR, all 1h bars | 1.23 | 1.21, so the 12-bar spread is 0.60 R | A3 |
+| buy-and-hold Sharpe over the OOS span | 0.59 | **0.72**: 1.20 over 2020-07 → 2022-07 and 0.39 over 2022-07 → 2026-07 | A4 |
+| taker data | no NaN | no NaN `taker_buy_volume` or `trades` for any of the 17 coins in any year. Each coin has one 1h bar with zero volume. SOL, XRP, LTC, FIL and XLM have candle gaps in late February and early April 2022 (README, "Data gaps"); the loader logs them, and they are not patched. | A1 |
+
+### The rough sum again (section 4)
+
+`hold_bars` = 12, against the new bar of 1.24. As before, this is arithmetic, not a measurement, and the results are floors, not estimates (section 4 explains why).
+
+| step | defaults (`flow_x` = 0.5) | strict (`flow_x` = 1.0) |
+|---|---|---|
+| trades a year over the 17 books (A2 lower bound ÷ 6 years) | 1,356 | 354 |
+| share of triggers on distinct hours (A3) | 48% | 56% |
+| independent trades a year, about | 654 | 198 |
+| Sharpe per trade for 1.24 a year (1.24 ÷ √n) | 0.049 | 0.088 |
+| net edge per trade (× the 0.60 R spread) | 0.029 R = 0.09 ATR | 0.053 R = 0.16 ATR |
+| ATR on trigger bars over the OOS span, pooled median (A3) | 127 bp | 144 bp |
+| net edge per trade in bp | 11 bp | 23 bp |
+| **gross reversion per trade** (net + the mean round trip, 17.5 and 18.2 bp) | **29 bp** (0.22 ATR) | **41 bp** (0.28 ATR) |
+| the same at the median symbol's trigger-bar ATR (135 and 157 bp) | 29 bp | 43 bp |
+
+The hurdle moves little: 29 bp at the defaults (was 28–31) and 41–43 bp at `flow_x` 1.0, a little lower than the 44–50 before.
+- The lower bar and the extra independent trades lower it.
+- The per-coin costs and the wider ATR on trigger bars raise it again.
+
+### What it means for the run
+
+- **Trade counts are not a risk.**
+  - Every gate is cleared by a wide margin as a lower bound.
+  - The tightest is a training window at `flow_x` 1.0 with a 24-bar hold: 60 trades against a minimum of 43.
+  - Fewer than 64 OOS trades would still point to a broken data path, not a result (criterion 1). A1 found no missing taker data.
+- **The long bias weighs more on the new span.**
+  - 70–74% of the trades are long.
+  - Buy and hold had a Sharpe of 1.20 over the first two OOS years, against 0.39 over the four after them.
+  - So direction alone lifts the plugin against random entry more than section 4 assumed, mostly in 2020–22. The per-side check before any exam (criterion 6: each side's gross OOS P&L must be positive) matters more, not less. It is unchanged.
+- **Costs now differ by coin.** A gross reversion that clears 14 bp on BTC (14.2 bp round trip) can still lose on ATOM or XLM (about 20 bp). The concentration check (criterion 6: no symbol or 2-month fold supplies more than half of the OOS net P&L) is unchanged and covers this.
+
+### Crash months (pins section 7's "2022 crash months")
+
+**Rule.** It was fixed in A4's docstring before the script ran. The script and its output were committed together, so git can't show the order. The −20% threshold is a free choice. A calendar month is a crash month when the mean close-to-close monthly return, over the coins with a close at the end of the previous month, is −20% or worse.
+
+**Crash months in the OOS span:**
+- 2020–21, the counterpart asked for: 2021-06 (−21%);
+- 2022: 2022-01 (−26%), 2022-04 (−29%), 2022-05 (−28%), 2022-06 (−32%);
+- later: 2024-04 (−29%), 2025-02 (−29%), 2026-06 (−23%).
+
+The worst months above the line are 2022-12, 2023-08 and 2021-12 at −19%, just above the line, then 2021-05 and 2025-11 at −18%. The March 2020 crash falls before the OOS span, which starts in 2020-07.
+
+**The check.** Section 7's result "All the profit comes from the 2022 crash months" now reads: **the OOS net P&L outside these eight months is ≤ 0.** As before, it kills nothing by itself and rules out any child.
+
+How it is read, after the walk-forward, with no holdout data:
+- the data is the walk-forward run's `oos_trades.parquet`;
+- "net P&L" is the sum of the `pnl` column (net of fees and funding) over every OOS trade whose `exit_time` (epoch ms) falls outside the eight months, by UTC calendar month;
+- trades are counted by exit month, where the P&L is realised. This differs from the walk-forward, which assigns a trade to a fold by its `signal_time`.
+
+**Blind spot.** The rule is one threshold on close-to-close months. It misses a crash whose month ends less than 20% down on the equal-weight mean, either because the coins fell unevenly or because they recovered part of the fall before the month ended. Two examples, from A4's output:
+- May 2021: BTC −35.4%, but the mean is −18.4%;
+- November 2022, the FTX collapse: the mean is −15.3%, the 16th worst of the 72 OOS months.
+
+The rule stays as fixed. A different rule chosen after a walk-forward result would be a choice made after seeing it.
