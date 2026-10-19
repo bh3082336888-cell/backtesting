@@ -39,7 +39,11 @@ def random_entry(cfg, wf: WFResult, seeds: int | None = None, workers=None) -> d
         return {"note": "strategy took no OOS trades; benchmark undefined", "beats_random": False}
     res = run_many(cfg, wf.src, jobs, workers, wf.stderr_dir)
     oa, ob = wf.raw["oos_span"]
-    by_seed: dict[int, dict] = {}
+    # A coin the strategy never traded gets no job, but it stays in every random portfolio as
+    # zeros on its listed days, so the portfolio averages the same coins on the same days.
+    idle = {s: pd.Series(0.0, index=_window(wf.oos_daily[s], oa, ob).index)
+            for s in wf.symbols if probs[s] == 0}
+    by_seed: dict[int, dict] = {seed: dict(idle) for seed in range(seeds)}
     trades_by_seed: dict[int, int] = {}
     for r in res:
         by_seed.setdefault(r["seed"], {})[r["symbol"]] = _window(r["daily"], oa, ob)

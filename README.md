@@ -15,7 +15,7 @@ lab backtest donchian_atr --tf 4h     # single fixed-param run (IN-SAMPLE, label
 lab dashboard                         # Streamlit on localhost: strategies, detail, pairs, lineage (--address 0.0.0.0 to expose)
 lab ingest                            # record any run dir not yet in the store
 lab link PARENT_RUN CHILD_RUN --decision kill --reason "..."   # hand-made lineage edge
-lab paper RUN_ID                      # only runs approved for paper in the dashboard
+lab paper RUN_ID                      # only runs approved for paper in the dashboard; refuses more coins than `client.max_workers` (pass --symbols)
 lab paper-refresh PAPER_RUN_ID        # recount regime changes → paper_eligible
 lab holdout-init                      # once: create the holdout read log (the judge refuses without it)
 lab judge donchian_atr_wide --tf 4h   # promote or kill against PARENT; a promotion waits for `lab exam`
@@ -143,6 +143,10 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | A strategy must beat random-entry (same exits, matched frequency) p95 OOS | `validate/benchmarks.py` |
 | A walk-forward (`lab walkforward`, `lab judge`, a judge's parent run) runs only at a timeframe the plugin declares; any other is refused before it can count as a trial | `plugins.py::require_timeframe`, `tests/test_judge.py`, `tests/test_walkforward_sandbox.py` |
 | Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days | `judge/budget.py`, `tests/test_budget.py` |
+| No slippage below 2 bp, for any coin or date | `engine/slippage.py`, `tests/test_slippage.py`, `tests/test_config.py` |
+| A parent run is reused only on the same data (a run records the identity of the bars it read) | `tests/test_data_identity.py` |
+| Gates scale with the coins listed in the window: `min_train_trades_per_coin` and `holdout_min_trades_per_coin`, the exam never below `holdout_min_trades` | `tests/test_coin_gates.py` |
+| A coin without research bars is skipped, not an error | `tests/test_late_listing.py` |
 | Plugin code runs only in a confined, sealed worker: Landlock, seccomp and rlimits, then a seal under which no path resolves; it reads no file (no data, store, log or verdict, and once sealed not even its own modules' files), writes no file or file metadata (access times included), opens no socket | `sandbox/confine.py`, `sandbox/worker.py`, `tests/test_confine.py`, `tests/test_worker.py` |
 | Scores come from the trusted engine replaying the plugin's decisions, never from numbers the plugin reports | `sandbox/replay.py`, `tests/test_replay.py` |
 | The exam streams the holdout one bar at a time, symbols in lockstep, so a plugin never holds a later bar | `sandbox/stream.py`, `tests/test_stream.py` |
@@ -156,9 +160,20 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 
 ## Modelling choices (and their bias)
 
-- **Liquidation**: isolated, one-way, tier-1 maintenance margin from config (approximate public values —
-  exact brackets need an authenticated endpoint). Checked against last-price high/low, which wicks
-  further than mark price → slightly pessimistic.
+- **Universe**: 17 Binance USDⓈ-M USDT perpetuals, chosen 2026-10-18 as those that traded in every sampled
+  month 2021-01 to 2026-06 and ranked top 50 by volume in at least 5 of 7 samples (`universe_rule` in
+  `config/lab.yaml`, shown wherever results are shown). Survivor bias: coins that died or faded before 2026 are not in it.
+  Research history starts 2020-01-01, but the coins started trading on different dates; each is used from its first bar.
+- **Costs**: slippage is per coin and point in time: `min(50, 2.0 + 2.05 × (adv / 1e8) ** -0.63)` bp, where `adv` is the
+  mean daily quote volume over the 30 full UTC days before the bar (`costs.slippage_model`). The 2 bp
+  (`slippage_bps`) is the floor and 50 bp the cap, which also applies when `adv` is unknown (a coin's first bars).
+  The curve is the pooled p90 of measured half-spreads; the user accepted it on 2026-10-18, so BTC and ETH pay about
+  2.1 bp rather than exactly 2.0. It depends on a coin's liquidity, not the year: most thinner coins paid more in 2020,
+  but ETC and ATOM have thinned recently and pay more now than in 2020. Calibration:
+  `docs/superpowers/specs/2026-10-18-wider-data-design.md`, section "Slippage model".
+- **Liquidation**: isolated, one-way, one maintenance-margin bracket per coin (`margin_brackets`): the bracket our
+  notionals reach (up to 10,000 × 3 = 30,000 USDT), not Binance's tier 1, read 2026-10-18 from Binance's public brackets
+  endpoint. Checked against last-price high/low, which wicks further than mark price → slightly pessimistic.
 - **Portfolio**: each symbol is an independent book with equal capital; portfolio = mean of daily returns.
 - **Walk-forward**: each grid combo is run continuously and windows are sliced (prepare() is proven causal),
   so a position opened just before a test window can carry into it. Its entry used only pre-test data.
@@ -166,4 +181,5 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 - **Regimes**: computed on native 4h bars for every TF so labels are consistent across TFs and pairs.
 - **Paper**: fills at live bid/ask (spread replaces the slippage param); warmup comes from the exchange,
   not the research loader.
-- **Data gaps**: data.binance.vision is missing a few days for SOL/XRP in Feb/Mar 2022; logged, not patched.
+- **Data gaps** (checked 2026-10-19, 15m/1h/4h): data.binance.vision is missing 2022-02-26..2022-02-28 and
+  2022-04-01..2022-04-02 for SOL, XRP, LTC, FIL and XLM; logged, not patched. No other gaps in the 17 coins.

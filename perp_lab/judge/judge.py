@@ -25,7 +25,7 @@ from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, wind
 from perp_lab.plugins import PluginMetaError, PluginSource, UndeclaredTimeframe, require_timeframe
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
-from perp_lab.runs import new_run_id, repo_commit, write_run
+from perp_lab.runs import data_id, data_identity, new_run_id, per_coin_min, repo_commit, write_run
 from perp_lab.store import db
 from perp_lab.strategy import list_plugins, plugin_hash
 from perp_lab.validate.causality import causality_failures, synthetic_bars
@@ -69,6 +69,12 @@ def write_verdict(cfg, j: dict) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(out, indent=1, default=str))
     return p
+
+
+def holdout_min_trades(cfg, n_coins: int) -> int:
+    """The exam's trade minimum: 1.25 per coin in the exam, never below the configured floor."""
+    jc = cfg["judge"]
+    return max(jc["holdout_min_trades"], per_coin_min(jc["holdout_min_trades_per_coin"], n_coins))
 
 
 def finish(cfg, jid: int) -> dict:
@@ -221,18 +227,22 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if psrc is not None and lookahead_failures(cfg, psrc):
         raise JudgeRefused(f"parent {parent} fails the lookahead check; fix or judge it first")
 
+    def run_parent(syms):
+        try:
+            prec, _ = validate(cfg, parent, tf, syms, workers=workers, lineage_id=family, src=psrc)
+        except PluginError as e:
+            log.warning("parent %s failed in the sandbox: %s\n%s", parent, e.reason(),
+                        e.stderr.decode("utf-8", "replace"))
+            raise JudgeRefused(f"parent {parent} fails in the sandbox; fix or judge it first") from e
+        return db.run_row(cfg, prec["run_id"])
+
     universe = symbols or cfg.symbols
     parent_row = None
     if parent is not None:
-        parent_row = db.latest_wf_run(cfg, parent, tf, psrc.hash, universe, lineage_id=family)
+        parent_row = db.latest_wf_run(cfg, parent, tf, psrc.hash, universe,
+                                     data_id=data_id(data_identity(cfg, universe)), lineage_id=family)
         if parent_row is None:
-            try:
-                prec, _ = validate(cfg, parent, tf, symbols, workers=workers, lineage_id=family, src=psrc)
-            except PluginError as e:
-                log.warning("parent %s failed in the sandbox: %s\n%s", parent, e.reason(),
-                            e.stderr.decode("utf-8", "replace"))
-                raise JudgeRefused(f"parent {parent} fails in the sandbox; fix or judge it first") from e
-            parent_row = db.run_row(cfg, prec["run_id"])
+            parent_row = run_parent(symbols)
 
     try:
         rec, _ = validate(cfg, name, tf, symbols, workers=workers,
@@ -245,6 +255,15 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
             "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
     child = db.run_row(cfg, rec["run_id"])
+    if parent_row is not None and parent_row["data_id"] != child["data_id"]:
+        # Found by the requested universe, but the child's run skipped coins without bars: never
+        # compare runs on different data (spec change 6), so the parent runs on the child's coins.
+        log.warning("parent %s ran on %s, its child %s on %s; re-running the parent on the child's coins",
+                    parent, ",".join(parent_row["universe"] or []), name, ",".join(child["universe"] or []))
+        parent_row = run_parent(child["universe"])
+        if parent_row["data_id"] != child["data_id"]:
+            raise JudgeRefused(f"parent {parent} ran on {','.join(parent_row['universe'] or [])}, not on the "
+                               f"data its child ran on ({','.join(child['universe'] or [])}); nothing compared")
     n, _ = db.trial_stats(cfg)          # N store-wide; the spread is the no-edge one (gates)
     cr = oos_portfolio(child["run_dir"])
     d = gates.deflated_sharpe(cr, n)
@@ -491,9 +510,10 @@ def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable, d
             log.warning("exam of judgement %s: the plugin failed; see holdout run %s", jid, hrid)
             db.update_holdout(cfg, jid, "failed", "plugin_error", hrid)
         else:
+            n_coins = sum(len(d) > 0 for d in res.daily.values())
             ok, reasons, detail = gates.holdout_consistent(
                 res.portfolio, len(res.trades), oos_portfolio(child["run_dir"]),
-                min_trades=jc["holdout_min_trades"], floor_pct=jc["holdout_floor_pct"],
+                min_trades=holdout_min_trades(cfg, n_coins), floor_pct=jc["holdout_floor_pct"],
                 block=jc["bootstrap_block_days"], n_boot=HOLDOUT_BOOT, seed=gates.seed_from(child["run_id"]))
             hrid = _record_holdout_run(cfg, j, s, res, ok, reasons, detail)
             db.update_holdout(cfg, jid, "passed" if ok else "failed", "passed" if ok else "failed", hrid)

@@ -55,6 +55,7 @@ runs = sa.Table(
     sa.Column("run_dir", sa.Text),
     sa.Column("parent_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=True),
     sa.Column("lineage_id", sa.String(64), index=True),
+    sa.Column("data_id", sa.String(16)),
     sa.Column("repo_commit", sa.String(64)),
     sa.Column("created_at", sa.DateTime(timezone=True)),
     sa.Column("notes", sa.Text),
@@ -146,12 +147,23 @@ def _now():
     return datetime.now(timezone.utc)
 
 
+def _has_data_id(eng: sa.Engine) -> bool:
+    return "data_id" in {c["name"] for c in sa.inspect(eng).get_columns("runs")}
+
+
 @lru_cache(maxsize=8)
 def _engine(url: str) -> sa.Engine:
     if url.startswith("sqlite:///"):
         Path(url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
     eng = sa.create_engine(url, future=True)
     md.create_all(eng)
+    if not _has_data_id(eng):
+        try:
+            with eng.begin() as c:      # create_all never adds a column to an existing table
+                c.execute(sa.text("ALTER TABLE runs ADD COLUMN data_id VARCHAR(16)"))
+        except sa.exc.OperationalError:
+            if not _has_data_id(eng):   # another process opening the store added it meanwhile: fine
+                raise
     return eng
 
 
@@ -224,6 +236,7 @@ def record_run(cfg, rec: dict, run_dir: str | Path | None = None) -> None:
         "run_dir": str(run_dir) if run_dir else rec.get("run_dir"),
         "parent_run_id": rec.get("parent_run_id"),
         "lineage_id": rec.get("lineage_id") or (None if rec.get("parent_run_id") else rec["run_id"]),
+        "data_id": rec.get("data_id"),
         "repo_commit": rec.get("repo_commit"),
         "created_at": _ts(rec.get("created_at")) or _now(),
         "notes": rec.get("notes"),
@@ -387,15 +400,17 @@ def run_row(cfg, run_id: str) -> dict | None:
 
 
 def latest_wf_run(cfg, strategy: str, timeframe: str, strategy_hash: str, universe: list[str], *,
-                  lineage_id: str | None = None) -> dict | None:
-    """Most recent walk-forward run of exactly this plugin version, timeframe and symbol universe
-    (and, when given, family)."""
+                  data_id: str, lineage_id: str | None = None) -> dict | None:
+    """Most recent walk-forward run of exactly this plugin version, timeframe, symbol universe and
+    data identity (and, when given, family). Runs from before data ids (NULL) never match."""
     with engine(cfg).connect() as c:
         rows = c.execute(sa.select(runs).where(sa.and_(
             runs.c.strategy == strategy, runs.c.timeframe == timeframe,
             runs.c.strategy_hash == strategy_hash, runs.c.validation_mode == "walkforward"))
             .order_by(runs.c.created_at.desc())).all()
     for r in rows:
+        if r.data_id != data_id:
+            continue
         if lineage_id is not None and r.lineage_id != lineage_id:
             continue
         if list(r.universe or []) == list(universe):

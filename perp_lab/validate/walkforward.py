@@ -6,7 +6,8 @@ Mechanics (and why):
     continuous run is equivalent to re-running each window with warmup — and
     ~#folds times cheaper.
   * Fold k: score every combo on its TRAIN window (pooled: mean per-symbol daily
-    Sharpe; combos with < min_train_trades pooled entries score -inf). Pick the
+    Sharpe; combos with fewer pooled entries than min_train_trades_per_coin ×
+    coins listed in the train window score -inf). Pick the
     best. One param set for the whole universe per fold — per-symbol selection
     triples the overfitting surface for little gain.
   * OOS for fold k = the selected combo's daily returns on the TEST window, and
@@ -35,10 +36,11 @@ import numpy as np
 import pandas as pd
 
 from perp_lab.config import Config, load_config
-from perp_lab.data.store import load_bars
+from perp_lab.data.store import load_bars, research_symbols
 from perp_lab.engine.backtest import BacktestResult, EngineParams
 from perp_lab.engine.metrics import daily_returns, portfolio_returns, sharpe, summarize
 from perp_lab.plugins import PluginSource
+from perp_lab.runs import per_coin_min
 from perp_lab.sandbox import client
 
 log = logging.getLogger(__name__)
@@ -203,9 +205,16 @@ class WFResult:
     raw: dict = field(repr=False, default_factory=dict)
 
 
+def listed_coins(daily: dict[str, pd.Series], a, b) -> int:
+    """Coins with at least one daily return in [a, b): the ones that could trade there."""
+    return sum(len(_window(d, a, b)) > 0 for d in daily.values())
+
+
 def walkforward(cfg: Config, src: PluginSource, tf: str, symbols: list[str] | None = None,
                 workers: int | None = None, stderr_dir: Path | None = None) -> WFResult:
-    symbols = symbols or cfg.symbols
+    symbols = research_symbols(cfg, symbols or cfg.symbols, tf)
+    if not symbols:
+        raise ValueError(f"no coin has {tf} research bars; run `lab backfill`")
     wf = cfg["walkforward"]
     combos = grid_combos(src.meta.grid)
     log.info("walkforward %s %s: %d combos x %d symbols", src.name, tf, len(combos), len(symbols))
@@ -226,9 +235,11 @@ def walkforward(cfg: Config, src: PluginSource, tf: str, symbols: list[str] | No
     for f in folds:
         a, b = f["train_start"], f["train_end"]
         best_k, best_score, best_n = None, -np.inf, 0
+        min_train = per_coin_min(wf["min_train_trades_per_coin"],
+                                 listed_coins({s: R[(keys[0], s)]["daily"] for s in symbols}, a, b))
         for k in keys:
             n_tr = sum(len(_trades_in(R[(k, s)]["trades"], a, b)) for s in symbols)
-            if n_tr < wf["min_train_trades"]:
+            if n_tr < min_train:
                 score = -np.inf
             else:
                 score = float(np.mean([sharpe(_window(R[(k, s)]["daily"], a, b)) for s in symbols]))

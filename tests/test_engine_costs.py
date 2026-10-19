@@ -189,7 +189,7 @@ def test_level_path_survives_a_run_file_round_trip(tmp_path):
     r = run(b, {5: Signal("long", stop=90.0), 8: Signal("hold", stop=95.0), 10: Signal("hold", target=110.0),
                 12: EXIT, 20: Signal("short", stop=110.0, target=90.0), 30: EXIT})
     assert len(r.trades) == 2
-    d = write_run(cfg, {"run_id": "r1", "strategy": "scripted"}, {"oos_trades": pd.DataFrame(r.trades)})
+    d = write_run(cfg, {"run_id": "r1", "strategy": "scripted", "universe": ["X"]}, {"oos_trades": pd.DataFrame(r.trades)})
     back = pd.read_parquet(d / "oos_trades.parquet")
     assert len(back) == 2 and [len(t["level_time"]) for t in r.trades] == [3, 1]
     for want, (_, got) in zip(r.trades, back.iterrows()):
@@ -209,3 +209,21 @@ def test_level_records_of_the_same_trade_compare_equal_whichever_nan_withdrew_th
     a, b, c = (trades(nan) for nan in (math.nan, float("nan"), np.float64("nan")))
     assert len(a[0]["level_target"]) == 2
     assert a == b == c
+
+
+def test_fills_use_each_bars_own_slippage():
+    b = ramp_bars()
+    b["slippage"] = 0.0002
+    b.loc[b.index[6], "slippage"] = 0.001
+    b.loc[b.index[11], "slippage"] = 0.003
+    t = run(b, {5: Signal("long", stop=90.0), 10: EXIT}).trades[0]
+    assert t["entry_price"] == pytest.approx(106.0 * 1.001)
+    assert t["exit_price"] == pytest.approx(111.0 * (1 - 0.003))
+
+
+def test_a_stop_fills_with_its_bars_slippage():
+    b = ramp_bars()
+    b["slippage"] = 0.0002
+    b.loc[b.index[8], ["low", "slippage"]] = [103.0, 0.002]
+    t = run(b, {5: Signal("long", stop=104.0)}).trades[0]
+    assert t["exit_reason"] == "stop" and t["exit_price"] == pytest.approx(104.0 * (1 - 0.002))

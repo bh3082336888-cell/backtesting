@@ -17,6 +17,7 @@ from perp_lab.holdout import HoldoutViolation, check_token
 
 log = logging.getLogger(__name__)
 _gap_warned: set[tuple[str, str]] = set()
+_tail_warned: set[tuple[str, str]] = set()
 
 
 def _read_dir(d: Path) -> pd.DataFrame | None:
@@ -38,6 +39,25 @@ def _resolve_end(cfg: Config, end: pd.Timestamp | None, holdout) -> pd.Timestamp
     return end
 
 
+def _drop_dead_tail(df: pd.DataFrame, symbol: str, tf: str) -> pd.DataFrame:
+    """Drop the run after the last traded candle when all of it has no trades and no volume.
+
+    A delisted coin's archive keeps flat zero-trade candles; they are absent, not data.
+    Zero-trade candles between real trades stay, and NaN trades (ccxt-stitched) never drop.
+    """
+    traded = np.flatnonzero((df.trades > 0).values)
+    if not len(traded):
+        return df
+    tail = df.iloc[traded[-1] + 1:]
+    if len(tail) and (tail.trades == 0).all() and (tail.volume == 0).all():
+        if (symbol, tf) not in _tail_warned:
+            _tail_warned.add((symbol, tf))
+            log.warning("%s %s: dropped %d zero-trade candles after the last trade (%s)", symbol, tf,
+                        len(tail), pd.to_datetime(tail.open_time.iloc[0], unit="ms", utc=True))
+        return df.iloc[: traded[-1] + 1].reset_index(drop=True)
+    return df
+
+
 def load_candles(cfg: Config, symbol: str, tf: str, start: pd.Timestamp | None = None,
                  end: pd.Timestamp | None = None, holdout=None) -> pd.DataFrame:
     """Closed candles with open_time in [start, end). end defaults to holdout_start."""
@@ -49,6 +69,7 @@ def load_candles(cfg: Config, symbol: str, tf: str, start: pd.Timestamp | None =
     df = df.drop_duplicates("open_time").sort_values("open_time")
     s_ms, e_ms = int(start.value // 10**6), int(end.value // 10**6)
     df = df[(df.open_time >= s_ms) & (df.open_time < e_ms)].reset_index(drop=True)
+    df = _drop_dead_tail(df, symbol, tf)
     step = TF_MS[tf]
     gaps = np.flatnonzero(np.diff(df.open_time.values) != step)
     if len(gaps) and (symbol, tf) not in _gap_warned:
@@ -58,6 +79,24 @@ def load_candles(cfg: Config, symbol: str, tf: str, start: pd.Timestamp | None =
     df.index = pd.to_datetime(df.open_time, unit="ms", utc=True)
     df.index.name = "time"
     return df
+
+
+def research_symbols(cfg: Config, symbols: list[str], tf: str) -> list[str]:
+    """`symbols` in order, minus each coin with no `tf` candle in [history_start, holdout_start).
+
+    A coin listed late still qualifies; only a coin with nothing to research on is dropped.
+    Reads the `open_time` column only.
+    """
+    s_ms, e_ms = int(cfg.history_start.value // 10**6), int(cfg.holdout_start.value // 10**6)
+    keep = []
+    for sym in symbols:
+        files = sorted((cfg.data_dir / sym / tf).glob("*.parquet"))
+        if any(pd.read_parquet(f, columns=["open_time"]).open_time.between(s_ms, e_ms, inclusive="left").any()
+               for f in files):
+            keep.append(sym)
+        else:
+            log.warning("%s %s: no research bars before %s; skipped", sym, tf, cfg.holdout_start.date())
+    return keep
 
 
 def load_funding(cfg: Config, symbol: str) -> pd.DataFrame:
@@ -127,12 +166,30 @@ def align_metrics(candles: pd.DataFrame, metrics: pd.DataFrame | None,
     return out
 
 
+def attach_slippage(cfg: Config, candles: pd.DataFrame) -> pd.DataFrame:
+    """Add `slippage` (a fraction): each bar's point-in-time cost, from the volume before its day."""
+    from perp_lab.engine.slippage import slippage_bps, trailing_adv
+
+    costs = cfg["costs"]
+    model = costs["slippage_model"]
+    adv = trailing_adv(candles.open_time.to_numpy(), candles.quote_volume.to_numpy(dtype="float64"),
+                       model["adv_days"])
+    out = candles.copy()
+    out["slippage"] = slippage_bps(adv, costs["slippage_bps"], model) / 1e4
+    return out
+
+
 def load_bars(cfg: Config, symbol: str, tf: str, start=None, end=None, holdout=None,
               with_regime: bool = True, with_metrics: bool = True) -> pd.DataFrame:
     """Candles + funding + OI + regime label, all strictly causal."""
     from perp_lab.validate.regime import attach_regime
 
-    c = load_candles(cfg, symbol, tf, start, end, holdout)
+    lead = (cfg["costs"]["slippage_model"]["adv_days"] + 1) * 86_400_000
+    c = load_candles(cfg, symbol, tf, None if start is None else start - pd.Timedelta(milliseconds=lead),
+                     end, holdout)
+    c = attach_slippage(cfg, c)
+    if start is not None:
+        c = c[c.open_time >= int(start.value // 10**6)]
     c = align_funding(c, load_funding(cfg, symbol), tf)
     if with_metrics:
         c = align_metrics(c, load_metrics(cfg, symbol))

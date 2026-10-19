@@ -107,6 +107,23 @@ def test_a_failing_exam_is_recorded_with_its_reasons(cfg, plugins):
     assert h["verdict"] == "failed" and h["fail_reasons"][0].startswith("holdout Sharpe")
 
 
+def test_the_exam_needs_its_trades_per_coin_that_traded(cfg, plugins):
+    # Every one of the 17 coins has a holdout daily return: 1.25 per coin is 22 trades, so 15 trades
+    # (enough for the floor of 10) is not enough evidence. Everything else passes.
+    budget.init_log(cfg)
+    one, asked = stub_run(0.003, n_trades=15), []
+
+    def run(cfg, src, tf, symbols, params, token, end, stderr_dir=None):
+        asked.append(symbols)
+        res = one(cfg, src, tf, symbols, params, token, end, stderr_dir)
+        return ExamResult(res.start, res.end, res.params, {s: res.portfolio for s in symbols},
+                          res.portfolio, res.trades)
+    j = judged(cfg, "donchian_atr", ROOT_STRONG, run)
+    assert [len(s) for s in asked] == [17]
+    assert (j["holdout_status"], j["holdout_reason"]) == ("failed", "failed")
+    assert db.run_row(cfg, j["holdout_run_id"])["fail_reasons"] == ["not enough evidence: 15 holdout trades < 22"]
+
+
 def test_a_family_gets_one_exam(cfg, plugins):
     budget.init_log(cfg)
     outcomes = {"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)}

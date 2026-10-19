@@ -223,3 +223,43 @@ def test_an_edit_during_validation_does_not_change_what_is_recorded(tmp_path, pl
     rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
     assert PluginSource.read("donchian_atr").hash != h0
     assert rec["strategy_hash"] == h0 == db.run_row(cfg, rec["run_id"])["strategy_hash"]
+
+
+def test_the_report_states_the_universe_rule(tmp_path, plugins):
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    rec, report = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    assert cfg["universe_rule"] in report and rec["universe_rule"] == cfg["universe_rule"]
+
+
+def test_the_verdict_counts_the_coins_listed_in_the_oos_span(tmp_path, plugins, monkeypatch):
+    # The OOS trade minimum is per coin: the verdict gets the coins with a daily return in the OOS
+    # span (listed_coins over the run's own OOS daily returns), here both coins of the market.
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    listed, judged, real = [], [], pipeline.verdict
+
+    def listed_spy(daily, a, b):
+        n = wfm.listed_coins(daily, a, b)
+        listed.append((sorted(daily), a, b, n))
+        return n
+
+    def verdict_spy(oos, rnd, sens, n_coins):
+        judged.append(n_coins)
+        return real(oos, rnd, sens, n_coins)
+    monkeypatch.setattr(pipeline, "listed_coins", listed_spy)
+    monkeypatch.setattr(pipeline, "verdict", verdict_spy)
+    rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    [(coins, a, b, n)] = listed
+    assert judged == [n] == [2] and coins == sorted(cfg.symbols)
+    assert (str(a.date()), str(b.date())) == (rec["oos_start"], rec["date_end"])
+
+
+def test_a_config_without_a_universe_rule_fails_before_the_walk_forward(tmp_path, plugins, monkeypatch):
+    # The report must state the survivor bias: a config without the rule fails at once, before a
+    # walk-forward job runs, not after hours of compute.
+    cfg = market_config(tmp_path)
+    del cfg.raw["universe_rule"]
+    monkeypatch.setattr(pipeline, "walkforward", lambda *a, **k: pytest.fail("walked forward"))
+    monkeypatch.setattr(wfm, "run_many", lambda *a, **k: pytest.fail("ran a walk-forward job"))
+    with pytest.raises(KeyError, match="universe_rule"):
+        pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    assert db.read_table(cfg, db.runs).empty

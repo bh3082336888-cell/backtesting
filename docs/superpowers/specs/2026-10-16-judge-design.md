@@ -27,7 +27,7 @@ Resolved by the 3b-1 sandbox: `docs/superpowers/specs/2026-10-17-plugin-sandbox-
 | Holdout pass | Positive, and consistent with the child's own walk-forward record. |
 | Paper gate | Every strategy (hand-written included) needs a passed holdout exam to be approved for paper. |
 | Shape | A synchronous `lab judge` command plus a `perp_lab/judge/` package. No queue or daemon. |
-| Short holdout | No exam until the holdout window is at least 180 days of complete data. History start stays 2022-01-01. |
+| Short holdout | No exam until the holdout window is at least 180 days of complete data. History start moved to 2020-01-01 by `2026-10-18-wider-data-design.md`. |
 
 Rejected: a single 70/30 split instead of walk-forward (less OOS data than the current
 4 years of rolling OOS), and moving `holdout_start` earlier (it would put already-seen data,

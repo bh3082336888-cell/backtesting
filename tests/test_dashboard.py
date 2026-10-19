@@ -2,6 +2,7 @@
 
 import pytest
 import streamlit as st
+import yaml
 from streamlit.testing.v1 import AppTest
 
 from perp_lab.judge import budget
@@ -115,3 +116,22 @@ def test_dashboard_listens_on_localhost_by_default(monkeypatch):
 def test_dashboard_address_can_be_opened_up_explicitly(monkeypatch):
     args = _launch_args(monkeypatch, "--address", "0.0.0.0")
     assert args[args.index("--server.address") + 1] == "0.0.0.0"
+
+
+def test_sidebar_states_the_universe_rule(populated):
+    at = AppTest.from_file("../dashboard/app.py", default_timeout=60)
+    at.run()
+    assert any(populated["universe_rule"] in c.value for c in at.sidebar.caption)
+
+
+def test_sidebar_without_a_universe_rule_says_it_is_not_stated(populated, tmp_path, monkeypatch):
+    raw = yaml.safe_load(open(populated.path))
+    del raw["universe_rule"]
+    p = tmp_path / "no_rule.yaml"
+    p.write_text(yaml.safe_dump(raw))
+    monkeypatch.setenv("PERP_LAB_CONFIG", str(p))
+    at = AppTest.from_file("../dashboard/app.py", default_timeout=60)
+    at.run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert any(c.value == "Universe rule not set in this config: survivor bias not stated."
+               for c in at.sidebar.caption)

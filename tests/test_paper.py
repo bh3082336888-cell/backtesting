@@ -1,7 +1,9 @@
 import asyncio
+import json
 import math
 import time
 
+import ccxt
 import numpy as np
 import pandas as pd
 import pytest
@@ -361,10 +363,7 @@ def test_cli_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins, command):
     assert "sandbox unavailable: Landlock ABI 5 < 6" in r.output
 
 
-def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
-    from typer.testing import CliRunner
-
-    from perp_lab.cli import app
+def approved_paper_run(tmp_path):
     from perp_lab.store import db
     from tests.test_store import fake_run
     cfg = market_config(tmp_path)
@@ -375,6 +374,14 @@ def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
         "holdout_status": "pending", "holdout_reason": "awaiting_exam"})
     db.update_holdout(cfg, jid, "passed", "passed")
     db.approve_paper(cfg, "c1", "me")
+    return cfg
+
+
+def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    cfg = approved_paper_run(tmp_path)
 
     async def run(self, max_bars=None):          # as the runner's first spawn would
         client.spawn(self.cfg, self.src)
@@ -383,3 +390,110 @@ def test_cli_paper_without_a_sandbox_says_so(tmp_path, monkeypatch, plugins):
     r = CliRunner().invoke(app, ["paper", "c1", "--config", str(cfg.path)])
     assert (r.exit_code, type(r.exception)) == (1, SystemExit), r.exception
     assert "sandbox unavailable: Landlock ABI 5 < 6" in r.output
+
+
+def test_a_paper_run_records_its_data(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    from perp_lab.runs import data_id, data_identity
+    from perp_lab.store import db
+    cfg = approved_paper_run(tmp_path)
+    monkeypatch.setattr(client, "max_workers", lambda c: 8)      # Task 9's refusal must not apply here
+    monkeypatch.setattr(PaperRunner, "run", lambda self, max_bars=None: asyncio.sleep(0))
+    r = CliRunner().invoke(app, ["paper", "c1", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+    p = db.read_table(cfg, db.runs, db.runs.c.validation_mode == "paper")
+    assert p.data_id.tolist() == [data_id(data_identity(cfg, ["BTCUSDT", "ETHUSDT"]))]
+
+
+class GoneEx(FakeEx):
+    """ETH is no longer listed: every call for it raises BadSymbol, as ccxt does after a delisting."""
+    GONE = {"ETH/USDT:USDT"}
+
+    def _check(self, sym):
+        if set(sym if isinstance(sym, list) else [sym]) & self.GONE:
+            raise ccxt.BadSymbol(f"binance does not have market symbol {sym}")
+
+    async def fetch_ohlcv(self, sym, tf, since=None, limit=None):
+        self._check(sym)
+        return await super().fetch_ohlcv(sym, tf, since, limit)
+
+    async def watch_ohlcv(self, sym, tf):
+        self._check(sym)
+        return await super().watch_ohlcv(sym, tf)
+
+    async def watch_bids_asks(self, symbols):
+        self._check(symbols)
+        return await super().watch_bids_asks(symbols)
+
+    async def fetch_funding_rate(self, sym):
+        self._check(sym)
+        return await super().fetch_funding_rate(sym)
+
+
+def test_paper_drops_a_coin_the_exchange_no_longer_lists(tmp_path):
+    from perp_lab.config import load_config
+    r = PaperRunner(load_config(), PluginSource.from_text("always", ALWAYS), {}, "1h", ["BTCUSDT", "ETHUSDT"],
+                    tmp_path, exchange=GoneEx())
+    asyncio.run(r.run(max_bars=3))
+    assert set(r.dropped) == {"ETHUSDT"} and r.books["BTCUSDT"].pos is not None
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["ETHUSDT"]["dropped"].startswith("BadSymbol: ") and "dropped" not in state["BTCUSDT"]
+
+
+def test_paper_still_stops_on_a_failure_after_a_coin_was_dropped(tmp_path):
+    from perp_lab.config import load_config
+
+    class SlowGone(GoneEx, SlowFakeEx):
+        pass
+    r = PaperRunner(load_config(), PluginSource.from_text("overflows", OVERFLOWS), {}, "1h",
+                    ["BTCUSDT", "ETHUSDT"], tmp_path, exchange=SlowGone())
+    with pytest.raises(PluginError) as e:
+        asyncio.run(r.run(max_bars=8))
+    assert e.value.kind == "mismatch" and set(r.dropped) == {"ETHUSDT"}
+
+
+def test_paper_fails_when_every_coin_is_dropped(tmp_path):
+    from perp_lab.config import load_config
+
+    class AllGone(GoneEx):
+        GONE = {"ETH/USDT:USDT", "BTC/USDT:USDT"}
+    r = PaperRunner(load_config(), PluginSource.from_text("always", ALWAYS), {}, "1h", ["BTCUSDT", "ETHUSDT"],
+                    tmp_path, exchange=AllGone())
+    with pytest.raises(RuntimeError, match="every coin"):
+        asyncio.run(r.run(max_bars=3))
+
+
+def test_cli_paper_refuses_more_coins_than_workers(tmp_path, monkeypatch, plugins):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    from perp_lab.store import db
+    cfg = approved_paper_run(tmp_path)                  # helper from Task 8
+    monkeypatch.setattr(client, "max_workers", lambda c: 1)
+    monkeypatch.setattr(PaperRunner, "run", lambda self, max_bars=None: asyncio.sleep(0))
+    r = CliRunner().invoke(app, ["paper", "c1", "--config", str(cfg.path)])
+    assert r.exit_code == 2 and "refused: 2 coins need 2 paper workers" in r.output
+    assert db.read_table(cfg, db.runs, db.runs.c.validation_mode == "paper").empty
+    r = CliRunner().invoke(app, ["paper", "c1", "--symbols", "BTC", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+
+
+def test_cli_tail_carries_on_past_a_failing_coin(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from perp_lab.cli import app
+    from perp_lab.data import live
+    cfg = market_config(tmp_path)
+
+    def tail(c, s, tf, ex):
+        if s == "ETHUSDT":
+            raise ccxt.BadSymbol("binance does not have market symbol ETH/USDT:USDT")
+        return 3
+    monkeypatch.setattr(live, "make_exchange", lambda: object())
+    monkeypatch.setattr(live, "tail", tail)
+    r = CliRunner().invoke(app, ["tail", "--symbols", "BTC,ETH,SOL", "--tfs", "1h", "--config", str(cfg.path)])
+    assert r.exit_code == 1
+    assert "BTCUSDT 1h: +3" in r.output and "ETHUSDT 1h: failed: BadSymbol" in r.output
+    assert "SOLUSDT 1h: +3" in r.output and "tail failed for: ETHUSDT 1h" in r.output

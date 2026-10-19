@@ -61,10 +61,19 @@ def tail(symbols: Optional[str] = None, tfs: Optional[str] = None, config: Optio
     from perp_lab.data.live import make_exchange, tail as do_tail
     cfg = load_config(config)
     ex = make_exchange()
+    failed = []
     for s in _syms(cfg, symbols):
         for tf in (tfs.split(",") if tfs else cfg["timeframes"]):
-            n = do_tail(cfg, s, tf, ex)
+            try:
+                n = do_tail(cfg, s, tf, ex)
+            except Exception as e:
+                typer.secho(f"{s} {tf}: failed: {type(e).__name__}: {e}", fg="red")
+                failed.append(f"{s} {tf}")
+                continue
             typer.echo(f"{s} {tf}: +{n} candles")
+    if failed:
+        typer.secho("tail failed for: " + ", ".join(failed), fg="red")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -82,7 +91,7 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
              params: str = typer.Option("{}", help='JSON params, e.g. \'{"n": 40}\''),
              config: Optional[str] = CfgOpt):
     """Single fixed-param backtest over the research span. This is IN-SAMPLE by definition."""
-    from perp_lab.data.store import load_bars
+    from perp_lab.data.store import load_bars, research_symbols
     from perp_lab.engine.backtest import EngineParams
     from perp_lab.engine.metrics import daily_returns, portfolio_returns, summarize
     from perp_lab.plugins import PluginSource
@@ -93,7 +102,7 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
     src = PluginSource.read(strategy)
     p = json.loads(params)
     per, trades = {}, []
-    for s in _syms(cfg, symbols):
+    for s in research_symbols(cfg, _syms(cfg, symbols), tf):
         bars = load_bars(cfg, s, tf)
         with _sandbox_required(), client.Batch(cfg, src, s, tf, bars) as batch:
             r = batch.backtest({**src.meta.params, **p}, EngineParams.from_config(cfg, s))
@@ -150,7 +159,8 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
     import sqlalchemy as sa
 
     from perp_lab.paper.runner import PaperRunner
-    from perp_lab.runs import new_run_id, repo_commit
+    from perp_lab.sandbox import client
+    from perp_lab.runs import data_id, data_identity, new_run_id, repo_commit
     from perp_lab.store.db import current_status, engine, record_run, runs
     from perp_lab.plugins import PluginSource
     cfg = load_config(config)
@@ -168,9 +178,16 @@ def paper(from_run: str = typer.Argument(..., help="walk-forward run_id approved
     rid = new_run_id()
     out = cfg.runs_dir / rid
     syms = _syms(cfg, symbols) if symbols else r["universe"]
+    held = client.max_workers(cfg)
+    if len(syms) > held:
+        # One paper worker per coin. Which real fix to pick waits until a strategy first passes an exam.
+        typer.secho(f"refused: {len(syms)} coins need {len(syms)} paper workers of {cfg['sandbox']['memory_mb']} MB; "
+                    f"this machine holds {held}. Pass --symbols with at most {held} coins.", fg="red")
+        raise typer.Exit(2)
     started = datetime.now(timezone.utc)
     record_run(cfg, {"run_id": rid, "strategy": r["strategy"], "strategy_hash": src.hash,
                      "hypothesis": src.meta.hypothesis, "params": params, "universe": syms,
+                     "data": data_identity(cfg, syms), "data_id": data_id(data_identity(cfg, syms)),
                      "timeframes": [r["timeframe"]], "validation_mode": "paper", "repo_commit": repo_commit(),
                      "parent_run_id": from_run, "lineage_id": r["lineage_id"], "created_at": started.isoformat(),
                      "paper_started_at": started.isoformat(), "metrics": {},

@@ -10,9 +10,9 @@ import pandas as pd
 from perp_lab.plugins import PluginSource, require_timeframe
 from perp_lab.runs import new_run_id, repo_commit, verdict, write_run
 from perp_lab.validate.benchmarks import buy_and_hold, random_entry, regime_split
-from perp_lab.validate.montecarlo import mc_drawdown
+from perp_lab.validate.montecarlo import coins_per_day, mc_drawdown
 from perp_lab.validate.sensitivity import sensitivity
-from perp_lab.validate.walkforward import walkforward
+from perp_lab.validate.walkforward import listed_coins, walkforward
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ def render_report(rec: dict, regime: pd.DataFrame, monthly: pd.DataFrame) -> str
          f"run `{rec['run_id']}` · plugin `{rec['strategy_hash'][:10]}` · {rec['date_start']} → {rec['date_end']} "
          f"(holdout from {rec['holdout_start']} untouched) · {len(rec['folds'])} folds "
          f"({rec['wf_train_months']}m train / {rec['wf_test_months']}m test)", "",
+         rec["universe_rule"], "",
          f"## Verdict: **{rec['status'].upper()}**", ""]
     L += [f"- {x}" for x in rec["fail_reasons"]] or ["- all checks passed (now go look for the bug)"]
     L += ["", "## OOS (headline)", "",
@@ -81,23 +82,24 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     if src.name != name:
         raise ValueError(f"source of {src.name} given to validate {name}")
     require_timeframe(src, tf)                  # a trial at a timeframe it doesn't declare: nothing runs
+    rule = cfg["universe_rule"]                 # the report states the survivor bias: no rule, nothing runs
     rid = new_run_id()
     wf = walkforward(cfg, src, tf, symbols, workers, cfg.runs_dir / rid / "sandbox_stderr")
     log.info("walkforward done; OOS Sharpe %.2f", wf.oos_summary["sharpe"])
     sens = sensitivity(cfg, wf, workers)
     rnd = random_entry(cfg, wf, seeds, workers)
-    mc = mc_drawdown(wf.oos_trades, len(wf.symbols), cfg["validation"]["mc_iterations"])
+    mc = mc_drawdown(wf.oos_trades, coins_per_day(wf.oos_daily), cfg["validation"]["mc_iterations"])
     oa, ob = wf.raw["oos_span"]
     bh = buy_and_hold(cfg, wf.symbols, tf, oa, ob)
     reg = regime_split(wf.oos_trades)
     monthly = monthly_table(wf.oos_portfolio)
-    status, fails = verdict(wf.oos_summary, rnd, sens)
+    status, fails = verdict(wf.oos_summary, rnd, sens, listed_coins(wf.oos_daily, oa, ob))
 
     rec = {
         "run_id": rid, "strategy": name, "strategy_hash": src.hash,
         "hypothesis": src.meta.hypothesis, "repo_commit": repo_commit(),
         "params": {"grid": src.meta.grid, "defaults": src.meta.params},
-        "universe": wf.symbols, "timeframes": [tf],
+        "universe": wf.symbols, "universe_rule": rule, "timeframes": [tf],
         "date_start": str(wf.folds[0]["train_start"].date()), "date_end": str(ob.date()),
         "oos_start": str(oa.date()), "holdout_start": str(cfg.holdout_start.date()),
         "validation_mode": "walkforward",

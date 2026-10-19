@@ -4,12 +4,15 @@ data_dir: ./data
 runs_dir: ./runs
 
 # Binance USDⓈ-M perps. Base assets; quote is always USDT.
-universe: [BTC, ETH, SOL, BNB, XRP, DOGE, AVAX, LINK]
+universe: [BTC, ETH, SOL, BNB, XRP, DOGE, AVAX, LINK, ADA, DOT, LTC, BCH, FIL, AAVE, XLM, ATOM, ETC]
 quote: USDT
-timeframes: [5m, 15m, 1h, 4h]
+
+# Shown wherever results are shown (walk-forward report, dashboard sidebar).
+universe_rule: "Universe: 17 Binance USDⓈ-M USDT perpetuals, chosen 2026-10-18 as those that traded in every sampled month 2021-01 to 2026-06 and ranked top 50 by volume in at least 5 of 7 samples. Survivor bias: coins that died or faded before 2026 are not in it."
+timeframes: [15m, 1h, 4h]
 
 # Research data starts here. Everything is measured from this date.
-history_start: "2022-01-01"
+history_start: "2020-01-01"
 
 # FIXED holdout start. This is a calendar date on purpose: it must never drift
 # forward with "now", or new data would silently become research data.
@@ -25,7 +28,12 @@ backfill:
 costs:
   taker: 0.0005
   maker: 0.0002
+  # The floor: today's flat cost, and the fallback for bars without a `slippage` column.
   slippage_bps: 2.0          # applied to taker fills (market entry/exit, stop-market)
+  # Per-coin, per-bar slippage = min(max_bps, floor + spread_bps_at_100m * (adv/1e8)^-alpha).
+  # Calibrated 2026-10-18, fixed before any trial on the new data; see the spec section
+  # "Slippage model" in docs/superpowers/specs/2026-10-18-wider-data-design.md.
+  slippage_model: {adv_days: 30, spread_bps_at_100m: 2.05, alpha: 0.63, max_bps: 50.0}
 
 account:
   initial_equity: 10000.0
@@ -33,8 +41,13 @@ account:
   risk_per_trade: 0.01       # fraction of wallet balance risked to the stop
   max_margin_frac: 1.0       # isolated margin may not exceed this fraction of wallet
 
-# Maintenance margin, tier 1 only (our notionals stay in tier 1 at default equity).
-# APPROXIMATE public values — the exact table is /fapi/v1/leverageBracket and needs a key.
+# Maintenance margin. One bracket per coin, with cum 0: the mmr is the highest maintenance
+# rate Binance lists for any notional up to initial equity x leverage (10,000 x 3 = 30,000 USDT).
+# Binance's own tier 1 caps at 10,000 USDT for most coins, so this is the bracket our
+# positions actually reach, not tier 1. Read 2026-10-18 from the public endpoint
+# https://www.binance.com/bapi/futures/v1/public/future/common/brackets (POST, body {}).
+# Never lower a value: costs are never kinder than before. The exact per-account table is
+# /fapi/v1/leverageBracket and needs a key.
 # Liquidation: isolated, one-way mode. mmr = maintenance margin rate, cum = maint amount.
 margin_brackets:
   default: {mmr: 0.010, cum: 0.0}
@@ -46,12 +59,21 @@ margin_brackets:
   DOGEUSDT: {mmr: 0.0065, cum: 0.0}
   AVAXUSDT: {mmr: 0.010, cum: 0.0}
   LINKUSDT: {mmr: 0.010, cum: 0.0}
+  ADAUSDT: {mmr: 0.010, cum: 0.0}
+  DOTUSDT: {mmr: 0.010, cum: 0.0}
+  LTCUSDT: {mmr: 0.010, cum: 0.0}
+  BCHUSDT: {mmr: 0.010, cum: 0.0}
+  FILUSDT: {mmr: 0.015, cum: 0.0}
+  AAVEUSDT: {mmr: 0.010, cum: 0.0}
+  XLMUSDT: {mmr: 0.015, cum: 0.0}
+  ATOMUSDT: {mmr: 0.010, cum: 0.0}
+  ETCUSDT: {mmr: 0.010, cum: 0.0}
 
 walkforward:
   train_months: 6
   test_months: 2
   selection_metric: sharpe    # pooled: mean per-symbol Sharpe over the train window
-  min_train_trades: 20        # pooled across universe; combos below this score -inf
+  min_train_trades_per_coin: 2.5   # pooled; × coins listed in the train window (20 at 8 coins)
 
 validation:
   sensitivity_steps: [-0.2, -0.1, 0.1, 0.2]
@@ -88,7 +110,8 @@ judge:
   bootstrap_block_days: 10
   holdout_max_reads: 10       # global cap on holdout reads
   min_holdout_days: 180       # no exam until the holdout has this many days of complete data
-  holdout_min_trades: 10
+  holdout_min_trades: 10      # the floor
+  holdout_min_trades_per_coin: 1.25   # × coins in the exam, never below holdout_min_trades
   holdout_floor_pct: 5        # holdout return must reach this percentile of the walk-forward record
   holdout_log: runs/holdout_log.jsonl
   verdicts_dir: runs/verdicts # public verdicts: the proposer's only input; never holdout numbers

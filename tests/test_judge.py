@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from perp_lab.cli import app
+from perp_lab.config import Config
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, judge, lookahead_failures
@@ -486,3 +487,55 @@ def test_end_to_end_judge_through_the_real_sandbox(tmp_path, plugins, fresh_wf_c
     child = db.run_row(cfg, j["child_run_id"])
     assert child["validation_mode"] == "walkforward" and len(db.read_table(cfg, db.run_folds)) == 6
     assert set(json.loads(Path(j["verdict_path"]).read_text())) == VERDICT_KEYS
+
+
+def test_the_parent_is_re_run_when_its_run_used_other_data(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)})
+    elsewhere = Config(raw={**cfg.raw, "history_start": "2019-01-01"}, path=cfg.path)
+    old, _ = v(elsewhere, "donchian_atr", "4h", lineage_id="family:donchian_atr")
+    j = judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    assert v.calls == ["donchian_atr", "donchian_atr", "donchian_atr_wide"] and j["parent_run_id"] != old["run_id"]
+
+
+class SkippingValidate(StubValidate):
+    """A walk-forward that skips coins with no bars, as research_symbols does: `skip` maps a plugin
+    to the coins its run drops from the universe it is asked for. Records what each call asked for."""
+
+    def __init__(self, outcomes: dict, skip: dict):
+        super().__init__(outcomes)
+        self.skip, self.asked = skip, []
+
+    def __call__(self, cfg, name, tf, symbols=None, **kw):
+        self.asked.append((name, symbols))
+        ran = [s for s in (symbols or cfg.symbols) if s not in self.skip.get(name, ())]
+        return super().__call__(cfg, name, tf, ran, **kw)
+
+
+def test_the_parent_is_re_run_on_the_childs_data_when_the_child_skips_a_coin(cfg, plugins):
+    # The parent's run on the full universe is found by the requested universe, but the child's run
+    # dropped a coin: comparing them would pair two different data sets (spec change 6).
+    v = SkippingValidate({"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)},
+                         skip={"donchian_atr_wide": ("ETCUSDT",)})
+    old, _ = v(cfg, "donchian_atr", "4h", lineage_id="family:donchian_atr")
+    j = judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    child = db.run_row(cfg, j["child_run_id"])
+    assert child["universe"] == [s for s in cfg.symbols if s != "ETCUSDT"] and len(child["universe"]) == 16
+    assert v.calls == ["donchian_atr", "donchian_atr_wide", "donchian_atr"]
+    assert v.asked[-1] == ("donchian_atr", child["universe"])
+    assert j["parent_run_id"] not in (None, old["run_id"])
+    parent = db.run_row(cfg, j["parent_run_id"])
+    assert parent["data_id"] == child["data_id"] and parent["universe"] == child["universe"]
+    assert j["decision"] == "promote" and j["beats_parent_frac"] == 1.0
+    e = db.read_table(cfg, db.lineage_edges)
+    assert e.parent_run_id.tolist() == [j["parent_run_id"]] and e.child_run_id.tolist() == [j["child_run_id"]]
+
+
+def test_the_judge_refuses_when_the_parent_cannot_run_on_the_childs_data(cfg, plugins):
+    # The parent's re-run on the child's coins drops another one: the two runs still differ, so
+    # nothing is compared and no judgement or lineage edge is recorded.
+    v = SkippingValidate({"donchian_atr": ("candidate", STRONG), "donchian_atr_wide": ("candidate", STRONG + 0.001)},
+                         skip={"donchian_atr_wide": ("ETCUSDT",), "donchian_atr": ("ATOMUSDT",)})
+    with pytest.raises(JudgeRefused, match="parent donchian_atr .* on the data its child ran on"):
+        judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    assert v.calls == ["donchian_atr", "donchian_atr_wide", "donchian_atr"]
+    assert db.read_table(cfg, db.judgements).empty and db.read_table(cfg, db.lineage_edges).empty

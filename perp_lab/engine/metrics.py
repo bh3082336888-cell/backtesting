@@ -13,7 +13,7 @@ ANN = 365.0
 def daily_returns(equity: np.ndarray, time_ms: np.ndarray) -> pd.Series:
     """Daily close-to-close returns of an equity curve sampled at bar closes."""
     if len(equity) == 0:
-        return pd.Series(dtype=float)
+        return pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
     s = pd.Series(equity, index=pd.to_datetime(time_ms, unit="ms", utc=True))
     d = s.resample("1D").last().dropna()
     # first day's return measured from the starting equity (first bar's pre-trade value)
