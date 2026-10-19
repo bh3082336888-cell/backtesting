@@ -4,7 +4,9 @@ Status: draft, 2026-10-19. The goal and the record of ideas were agreed in conve
 2026-10-18. On 2026-10-19 the user skipped the remaining questions ("write the design"), so every
 other decision below is the author's call and open to review. The ones most worth a second look
 are marked ★, and the last section lists them. An independent builder's review, checked against
-the code, raised nine questions and three contradictions. All are settled in this text.
+the code, raised nine questions and three contradictions. All are settled in this text. Revised
+the same day after the user said that their only model access is their Claude Code login: the
+model runs through Claude Code headless (`claude -p`), not the API.
 
 Scope: the loop that proposes strategies and gets them judged, the harness changes it needs, and
 where the user reads the result. The judge's bar is unchanged.
@@ -67,12 +69,12 @@ From the 3a spec ("Requirements carried into the Phase 3b proposer spec") and th
 
 | requirement | how it is met |
 |---|---|
-| model training cutoff before `holdout_start` (2026-07-01) | config guard; the loop refuses to start otherwise (Model) |
+| model training cutoff before `holdout_start` (2026-07-01) | config guard on a pinned model ID, checked against the model each call reports; the loop refuses to start otherwise (Model) |
 | no read access to `runs/` except `runs/verdicts/`, nor to `lab.db` or the holdout log | the model reads nothing; the orchestrator reads only verdict contents and its own state (import-boundary and path tests) |
 | never imports `perp_lab.judge` or `perp_lab.holdout` | AST test on `perp_lab/proposer/` |
 | submits only by writing a plugin to `strategies/` and running `lab judge` as a subprocess | the orchestrator does exactly that; the model returns text only |
 | writes only to `strategies/`, never to `perp_lab/`, `config/`, `tests/`, `.venv/` | the orchestrator writes new files in `strategies/` and its own state dir, nothing else (test) |
-| no read access to `data/`, and can't `stat()` it | the model has no process; the orchestrator never touches `data/` (path guard in tests) |
+| no read access to `data/`, and can't `stat()` it | the model's process is `claude -p` with no tools, started in an empty directory outside the repo, and killed at once if its first message shows any tool; the orchestrator never touches `data/` (path guard in tests) |
 | sees only `lab judge`'s exit code and the verdict file, never stdout or stderr | judge output goes to a human-only log that no prompt reads |
 | learns of exam failures only as reason codes; no file timestamps, nothing that dates an exam | prompts render whitelisted verdict fields, no times; exam outcomes enter only at session start |
 | never runs `lab exam` or `lab withdraw` | no code path; the subprocess argv allowlist is `lab judge` and `lab preflight` |
@@ -83,8 +85,9 @@ From the 3a spec ("Requirements carried into the Phase 3b proposer spec") and th
 
 | question | decision |
 |---|---|
-| Shape ★ | A trusted orchestrator, `lab propose`, in `perp_lab/proposer/`. The model is called through the API **with no tools**: text in, one typed proposal out. It reads no file and runs nothing. |
-| Model ★ | Set in config, together with its training-data cutoff as the provider publishes it. The loop refuses to start unless the cutoff is before `holdout_start`. Default `claude-opus-5-5`, cutoff to be checked by the user. |
+| Shape ★ | A trusted orchestrator, `lab propose`, in `perp_lab/proposer/`. The model is called **with no tools**: text in, one typed proposal out. It reads no file and runs nothing. |
+| Model access | Claude Code headless (`claude -p`) on the user's own login, the only model access the user has. No API key, no SDK, no new pip dependency. |
+| Model | `claude-opus-5-5`, pinned by full ID. Its published training-data cutoff is June 2026 (Anthropic's models page, read 2026-10-19), so config sets 2026-06-30. The loop refuses to start unless the cutoff is before `holdout_start`, and refuses any call that reports another model. |
 | Autonomy | Unattended. Exams, withdrawals and paper approval stay human. |
 | Memory | Each proposal starts from a fresh context holding the record. The record is the model's only memory, so it can be audited. |
 | What a trial is ★ | As today, plus one rule: a kill for a plugin error after plugin code ran on real research bars counts as a trial. |
@@ -104,7 +107,7 @@ From the 3a spec ("Requirements carried into the Phase 3b proposer spec") and th
 ```
 lab propose  (trusted harness code, perp_lab/proposer/)
   1. builds the prompt from: static harness context + the record (verdict contents + idea cards)
-  2. calls the model (API, no tools)  ->  one proposal: an idea card + plugin source (JSON)
+  2. calls the model (claude -p, no tools)  ->  one proposal: an idea card + plugin source (JSON)
   3. checks it in code: schema, idea rules, AST           -- fails -> back to the model (bounded)
   4. lab preflight <staged file> --tf TF   (sandbox, synthetic bars only)
                                                          -- fails -> back to the model (bounded)
@@ -120,8 +123,10 @@ Why this shape:
   restrictions are inherited by child processes, so that confinement would also stop the
   `lab judge` it starts. Working around it means a broker process. And the model would gain
   nothing it needs, since it may not read data or run backtests anyway.
-- With no tools, the model can't break any of these rules. The orchestrator is ordinary harness
-  code, tested like the judge, and every rule is a check in it or in the harness. This follows
+- With no tools, the model can't break any of these rules. Its process is a `claude -p` that the
+  orchestrator starts, feeds and reads. That process doesn't start `lab judge`, so nothing stops
+  it being confined later (Out of scope). The orchestrator is ordinary harness code, tested like
+  the judge, and every rule is a check in it or in the harness. This follows
   "code over prompts for safety-critical behaviour" (ADR 0006). Nothing relies on telling the
   model a rule.
 - Typed contracts generate the prompt's output description, the JSON schema and the validation
@@ -171,8 +176,8 @@ Rejected:
    its report goes back to the model, within the same fix-up budget.
 7. **Copy** to `strategies/<name>.py`, refusing if the name exists. From here the loop never edits
    or deletes the file: its git blob hash is the plugin version.
-8. **Judge**: `lab judge <name> --tf TF`, with the API key removed from the environment, stdout and
-   stderr to `proposer/logs/<name>.log`. Exit codes:
+8. **Judge**: `lab judge <name> --tf TF`, stdout and stderr to `proposer/logs/<name>.log`. Exit
+   codes:
    - 0: judged; go on to step 9.
    - 2: refused. Recorded as `broken`; preflight should have caught it.
    - 1: infrastructure error. Recorded as `broken`; it counts toward the day's trials (Pace).
@@ -215,9 +220,10 @@ reach the model is the time of a judge run, an exam, or a file.
 
 ## What the model returns
 
-One JSON object, from a dataclass in `perp_lab/proposer/contract.py`. The API call's structured
-output schema, the prompt's description of it and the validation are all generated from that
-dataclass.
+One JSON object, from a dataclass in `perp_lab/proposer/contract.py`. The schema passed to
+`claude -p --json-schema`, the prompt's description of it and the validation are all generated
+from that dataclass. The CLI validates the reply against the schema, and the orchestrator validates
+it again.
 
 - `kind`: `new`, `refinement` or `port`.
 - `idea` (new): `title`; `mechanism` (what happens, and who pays); `why_it_persists`; `signal` (in
@@ -424,8 +430,8 @@ Caps (config):
   decision.
 - **`proposals_per_idea`: 4** judged plugins.
 - **`fixups_per_proposal`: 3.**
-- **Token caps per day**, input and output. An optional price per million tokens lets the digest
-  estimate spend.
+- **Token caps per day**, input and output, from the CLI's reported `usage`. They keep the loop
+  from eating the user's whole Claude Code allowance.
 - One session at a time (a lock file in `proposer/`), and one judge at a time.
 
 Why pace at all: the total cap is what protects the bar. Pace spreads the trials so the user can
@@ -435,15 +441,19 @@ Stop conditions:
 - a cap;
 - 3 infrastructure errors in a row;
 - 5 proposals in a row dropped at the schema or preflight stage (the model is stuck);
-- the API failing after retries (see Failures);
+- the model call failing after retries (see Failures);
 - SIGINT or SIGTERM. The first one lets a running judge finish and then stops. The second kills it
   and records the proposal as `broken` / `interrupted`; it counts toward the day's quota.
 
 Rough size: a 1h judgement took about 2 minutes. The model call takes a few minutes. So 12 trials
-take a few hours of a day. Per call, the static context is about 30–40k tokens (cached), and the
+take a few hours of a day. With `--system-prompt`, Claude Code's own prompt is replaced: the probe's
+whole cached prefix was about 2,500 tokens. Per call, the static context is about 30–40k tokens
+(cached), and the
 record adds about 5k tokens per open idea (card, verdicts, diagnostics, the champion's source) and
 about 60 per closed idea. Output is 5–15k tokens with thinking. At about 1.5 calls per trial, a day of 12 trials is about 18 calls: roughly 1–2M input
-tokens (mostly cached) and 0.2M output. The digest reports actual tokens.
+tokens (mostly cached) and 0.2M output. That share of a Claude Code plan's limits is a guess
+until measured. The first session's digest gives the real figure, and `trials_per_day` is the
+knob.
 
 ## Exams and the human
 
@@ -465,21 +475,72 @@ tokens (mostly cached) and 0.2M output. The digest reports actual tokens.
 
 ## Model
 
-- **Config:** `proposer.model`, plus `proposer.model_training_cutoff` (YYYY-MM-DD). The cutoff
-  comes from the provider's published model documentation; the harness can't verify it, so the
-  human enters it. The loop refuses to start when it is missing or not before `holdout_start`.
-  Each session and proposal records the model and the cutoff.
-- **Default:** `claude-opus-5-5`, the strongest model available. Before the first session the user
-  checks its published training-data cutoff against 2026-07-01. If it isn't earlier, use an earlier
-  model.
-- **What the rule doesn't fix:** any model that meets it still knows the market history of the
-  whole OOS span, 2020–2026. So the walk-forward is not out of sample for the proposer, and a
-  promotion is a hypothesis until its holdout exam. That is why the cutoff rule exists and why
-  exams stay scarce.
-- **API key:** read from `ANTHROPIC_API_KEY`. It is never written to the record, transcripts or
-  logs. The `lab judge` and `lab preflight` subprocesses get an environment without it.
-- **Dependency:** the `anthropic` SDK, as an optional extra `[proposer]`. Whether calls use
-  extended thinking, and how prompt caching is set up, is left to the builder.
+**Which model.**
+- `claude-opus-5-5`. Anthropic's models overview (read 2026-10-19) gives Opus 5.5 a reliable
+  knowledge cutoff and a training-data cutoff of "Jun 2026". So `model_training_cutoff` is
+  2026-06-30, one day before `holdout_start`. The rule is met with no margin: the model may have
+  seen data up to the eve of the holdout, but none inside it.
+- Every current Claude model has the same June 2026 cutoff. Any later model will fail the guard,
+  so the proposer stays on Opus 5.5. Anthropic commits to keeping it until at least 2027-09-22.
+- Config names the model by its full pinned ID, never an alias. The alias `opus` would move to a
+  newer model with a later cutoff.
+- The cutoff is entered by the human from the published documentation; the harness can't verify
+  it. The loop refuses to start when it is missing or not before `holdout_start`. Each session and
+  proposal records the model and the cutoff.
+
+**What the rule doesn't fix.** Any model that meets it still knows the market history of the whole
+OOS span, 2020–2026. So the walk-forward is not out of sample for the proposer, and a promotion is
+a hypothesis until its holdout exam. That is why the cutoff rule exists and why exams stay scarce.
+
+**How it is called.** One `claude -p` subprocess per model call, on the user's Claude Code login.
+The user has no API key and no other model access. The command line:
+
+```
+claude -p --model claude-opus-5-5 --effort <proposer.effort>
+       --tools "" --strict-mcp-config --safe-mode --disable-slash-commands
+       --no-session-persistence --permission-prompts none
+       --system-prompt <the static harness context>
+       --json-schema <the contract's schema>
+       --output-format stream-json --verbose --include-hook-events
+```
+
+- **Input:** the record and the round's instruction go in on stdin.
+- **Working directory:** a fresh empty directory outside the repo, so no `CLAUDE.md`, project
+  memory or git state is picked up.
+- **Environment:** a minimal one with what the CLI needs for the login (`HOME`, `PATH`), and none
+  of the user's other variables.
+- **What each flag does:**
+  - `--tools ""` removes every built-in tool;
+  - `--strict-mcp-config` with no `--mcp-config` loads no MCP server;
+  - `--safe-mode` drops CLAUDE.md, skills, plugins and hooks but keeps the login, unlike `--bare`,
+    which accepts only an API key;
+  - `--system-prompt` replaces Claude Code's own system prompt with the static context.
+- **Probe, 2026-10-19,** on this machine with CLI 2.1.303: the first stream message (`system` /
+  `init`) reported model `claude-opus-5-5`, tools `["StructuredOutput"]` (the `--json-schema`
+  mechanism), no MCP servers, no skills and no slash commands. The reply arrived as validated JSON
+  in `structured_output`, with `usage` and a `rate_limit_event` in the stream.
+
+**Checked in code, not trusted to flags** (ADR 0006). The orchestrator reads the stream line by
+line. It kills the process the moment the `init` message shows any of these:
+- a model other than the configured one;
+- any tool but `StructuredOutput`;
+- any MCP server, skill or slash command;
+- or any hook event later in the stream.
+
+The init message comes before the model's first turn, so a misconfigured call is stopped before
+the model can act. Its output is discarded, and the session stops with reason `model_config`.
+Every session also starts with a one-line probe call that must pass the same check.
+
+**Usage limits.** The calls run on the user's Claude Code plan and share its usage limits with the
+user's own sessions.
+- When the stream reports a limit, the loop sleeps until the reset time it gives, or backs off
+  hourly if none is given. It doesn't stop. The digest notes the pause.
+- The result's `usage` feeds the daily token caps.
+- Its `total_cost_usd` is recorded as the API-equivalent cost; on a subscription it isn't billed.
+
+**No credentials** pass through the orchestrator: the CLI holds the login. Stream output is stored
+in the transcripts as is. A test checks it carries no token-like strings. `lab judge` and
+`lab preflight` run with the user's normal environment, as they do today.
 
 ## Where the user reads the record
 
@@ -502,8 +563,10 @@ today.
 
 ```yaml
 proposer:
-  model: claude-opus-5-5
-  model_training_cutoff: null        # YYYY-MM-DD from the provider's docs; required, < holdout_start
+  model: claude-opus-5-5             # full pinned ID, never an alias
+  model_training_cutoff: 2026-06-30  # Anthropic models page, "Jun 2026" (read 2026-10-19); < holdout_start
+  claude_bin: claude                 # the Claude Code CLI, logged in as the user
+  effort: high
   state_dir: proposer                # record.db, staging/, logs/, transcripts/, sessions/, cache/
   timeframes: [15m, 1h, 4h]
   trials_per_day: 12
@@ -514,7 +577,6 @@ proposer:
   overlap_max: 0.5
   max_input_tokens_per_day: 4000000
   max_output_tokens_per_day: 500000
-  price_per_mtok: {input: null, output: null}   # optional, for the digest's spend estimate
 ```
 
 `proposer/` is added to `.gitignore`.
@@ -528,7 +590,12 @@ proposer:
 
 ## Failures
 
-- **API errors:** retry with backoff, 5 tries. Then the session stops (reason `api`).
+- **Model-call errors:**
+  - A usage limit sleeps until it resets (Model).
+  - Other failures (the CLI exits non-zero, times out, or returns `is_error`) are retried with
+    backoff, 5 tries. Then the session stops (reason `model_call`).
+  - A failed init check stops the session at once (reason `model_config`).
+  - If the CLI is missing or logged out, the session refuses to start.
 - **Invalid model output:** fix-ups, then the proposal is dropped (no trial).
 - **Preflight infrastructure error** (exit 1): the session stops after 3 in a row.
 - **Record or state-dir errors:** fail closed; the session stops.
@@ -547,15 +614,23 @@ proposer:
   re-run over a secret stretch of real OOS data) is recommended before the first exam of a
   proposer-written plugin.
 - **The model knows the OOS history** (Model). The holdout is the only clean test.
+- **Admin-managed policy settings still apply** to a `--safe-mode` run. If the user's organisation
+  injects instructions, they reach the proposer's context. They come from the user's own account,
+  not from the lab, so they leak nothing. They do add tokens and may add instructions that don't
+  fit the task. The transcripts show exactly what was sent.
+- **The CLI is trusted code.** It reads its own config and login under `~`, and with
+  `--safe-mode` it skips the repo's files. The model can't direct it to read anything, because it
+  has no tools.
 
 ## Testing
 
-Each test is written first and seen failing. No test calls the network; the orchestrator's tests
-use a fake model client.
+Each test is written first and seen failing. No test calls the network or uses the user's
+allowance. The orchestrator's tests put a fake `claude` executable first on `PATH`
+(`proposer.claude_bin`). It records its argv, stdin and environment, and prints canned stream-json.
 
 The orchestrator:
 - **Prompt sources:** sentinels planted in `lab.db`, a run's `report.md`, the holdout log, `data/`
-  and the judge's stdout never appear in anything sent to the model client, over a full round.
+  and the judge's stdout never appear in anything sent to the model (the fake CLI's stdin and argv), over a full round.
 - **No times:** distinctive times planted in verdict files' modification times, run ids, the
   holdout log and the judge's output never appear in anything sent to the model.
 - **Boundaries:** `perp_lab/proposer/` imports none of `perp_lab.judge`, `perp_lab.holdout`,
@@ -573,8 +648,15 @@ The orchestrator:
   duplicate. `budget_spent` refuses the next start.
 - **Session:** the daily quota sleeps; the total cap refuses to start; the cutoff guard refuses;
   SIGINT once and twice; 3 infrastructure errors stop.
-- **Secrets:** the API key never appears in the record, transcripts or logs, and the subprocess
-  environment lacks it.
+- **The model call:**
+  - the argv carries every flag in Model, the pinned model ID and the contract's schema;
+  - the working directory is empty and outside the repo;
+  - the environment is the minimal one;
+  - an init message with another model, any tool but `StructuredOutput`, any MCP server, skill or
+    slash command, or a later hook event kills the process before any output is used, and stops
+    the session;
+  - a usage-limit message sleeps until its reset;
+  - the alias `opus` in config refuses to start.
 
 The harness:
 - **Preflight:** never calls `load_bars` and never opens `data/`. A lookahead plugin fails
@@ -608,7 +690,7 @@ The record shows the right piles and the digest is written.
    - the judge–exam lock;
    - the dated lookahead span pinned to the day;
    - `lab preflight`.
-2. The orchestrator: contract, record store, prompt builder, model client, the loop, the CLI.
+2. The orchestrator: contract, record store, prompt builder, the `claude -p` caller with its init check, the loop, the CLI.
 3. The Ideas page and the digest.
 4. Seed the record and refresh the seven trials' diagnostics.
 
@@ -633,7 +715,10 @@ The record shows the right piles and the digest is written.
 - A review mode, where the human approves each idea before its trial.
 - The change-7 spec (the exam rule for coins that stop trading), still due before the first exam,
   about 2026-12-28.
-- Other model providers.
+- Confining the `claude -p` process itself with Landlock: read access only to its install and
+  `~/.claude`, nothing in the repo. It is defense in depth on top of the init check. Unlike an
+  agent that starts `lab judge`, this process starts nothing that needs the repo.
+- Other model providers, should the user get access to one.
 - Git: the loop never commits. The record keeps every plugin's bytes, and the human commits what
   they want.
 
@@ -650,7 +735,9 @@ The record shows the right piles and the digest is written.
 6. **"Before costs"** means zero fees and slippage with funding kept (Random entry).
 7. **The seed:** six ideas from the seven trials, piled from fresh walk-forward runs on today's
    data (no new trial), plus candidates B, C and D, with E excluded (The record).
-8. **Default model `claude-opus-5-5`**, its cutoff to be checked by the user (Model).
+8. **The model runs through Claude Code headless on the user's login**, as `claude-opus-5-5`
+   pinned. Its training-data cutoff was checked on Anthropic's models page (June 2026). The tools
+   are removed by flags, and that is verified in code from each call's first message (Model).
 9. **Ideas are (family, timeframe) pairs.** A refinement keeps the timeframe and names the
    champion as `PARENT`. The same idea on another timeframe is a port: a new family, allowed only
    from a signal-before-costs or close-call idea (Ideas and timeframes, The record).
