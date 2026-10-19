@@ -41,8 +41,13 @@ account:
   risk_per_trade: 0.01       # fraction of wallet balance risked to the stop
   max_margin_frac: 1.0       # isolated margin may not exceed this fraction of wallet
 
-# Maintenance margin, tier 1 only (our notionals stay in tier 1 at default equity).
-# APPROXIMATE public values — the exact table is /fapi/v1/leverageBracket and needs a key.
+# Maintenance margin. One bracket per coin, with cum 0: the mmr is the highest maintenance
+# rate Binance lists for any notional up to initial equity x leverage (10,000 x 3 = 30,000 USDT).
+# Binance's own tier 1 caps at 10,000 USDT for most coins, so this is the bracket our
+# positions actually reach, not tier 1. Read 2026-10-18 from the public endpoint
+# https://www.binance.com/bapi/futures/v1/public/future/common/brackets (POST, body {}).
+# Never lower a value: costs are never kinder than before. The exact per-account table is
+# /fapi/v1/leverageBracket and needs a key.
 # Liquidation: isolated, one-way mode. mmr = maintenance margin rate, cum = maint amount.
 margin_brackets:
   default: {mmr: 0.010, cum: 0.0}
@@ -54,6 +59,15 @@ margin_brackets:
   DOGEUSDT: {mmr: 0.0065, cum: 0.0}
   AVAXUSDT: {mmr: 0.010, cum: 0.0}
   LINKUSDT: {mmr: 0.010, cum: 0.0}
+  ADAUSDT: {mmr: 0.010, cum: 0.0}
+  DOTUSDT: {mmr: 0.010, cum: 0.0}
+  LTCUSDT: {mmr: 0.010, cum: 0.0}
+  BCHUSDT: {mmr: 0.010, cum: 0.0}
+  FILUSDT: {mmr: 0.015, cum: 0.0}
+  AAVEUSDT: {mmr: 0.010, cum: 0.0}
+  XLMUSDT: {mmr: 0.015, cum: 0.0}
+  ATOMUSDT: {mmr: 0.010, cum: 0.0}
+  ETCUSDT: {mmr: 0.010, cum: 0.0}
 
 walkforward:
   train_months: 6
