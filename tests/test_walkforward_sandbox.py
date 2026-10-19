@@ -229,3 +229,25 @@ def test_the_report_states_the_universe_rule(tmp_path, plugins):
     cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
     rec, report = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
     assert cfg["universe_rule"] in report and rec["universe_rule"] == cfg["universe_rule"]
+
+
+def test_the_verdict_counts_the_coins_listed_in_the_oos_span(tmp_path, plugins, monkeypatch):
+    # The OOS trade minimum is per coin: the verdict gets the coins with a daily return in the OOS
+    # span (listed_coins over the run's own OOS daily returns), here both coins of the market.
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    listed, judged, real = [], [], pipeline.verdict
+
+    def listed_spy(daily, a, b):
+        n = wfm.listed_coins(daily, a, b)
+        listed.append((sorted(daily), a, b, n))
+        return n
+
+    def verdict_spy(oos, rnd, sens, n_coins):
+        judged.append(n_coins)
+        return real(oos, rnd, sens, n_coins)
+    monkeypatch.setattr(pipeline, "listed_coins", listed_spy)
+    monkeypatch.setattr(pipeline, "verdict", verdict_spy)
+    rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    [(coins, a, b, n)] = listed
+    assert judged == [n] == [2] and coins == sorted(cfg.symbols)
+    assert (str(a.date()), str(b.date())) == (rec["oos_start"], rec["date_end"])
