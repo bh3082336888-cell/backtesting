@@ -251,3 +251,15 @@ def test_the_verdict_counts_the_coins_listed_in_the_oos_span(tmp_path, plugins, 
     [(coins, a, b, n)] = listed
     assert judged == [n] == [2] and coins == sorted(cfg.symbols)
     assert (str(a.date()), str(b.date())) == (rec["oos_start"], rec["date_end"])
+
+
+def test_a_config_without_a_universe_rule_fails_before_the_walk_forward(tmp_path, plugins, monkeypatch):
+    # The report must state the survivor bias: a config without the rule fails at once, before a
+    # walk-forward job runs, not after hours of compute.
+    cfg = market_config(tmp_path)
+    del cfg.raw["universe_rule"]
+    monkeypatch.setattr(pipeline, "walkforward", lambda *a, **k: pytest.fail("walked forward"))
+    monkeypatch.setattr(wfm, "run_many", lambda *a, **k: pytest.fail("ran a walk-forward job"))
+    with pytest.raises(KeyError, match="universe_rule"):
+        pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    assert db.read_table(cfg, db.runs).empty

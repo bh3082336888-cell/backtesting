@@ -82,6 +82,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     if src.name != name:
         raise ValueError(f"source of {src.name} given to validate {name}")
     require_timeframe(src, tf)                  # a trial at a timeframe it doesn't declare: nothing runs
+    rule = cfg["universe_rule"]                 # the report states the survivor bias: no rule, nothing runs
     rid = new_run_id()
     wf = walkforward(cfg, src, tf, symbols, workers, cfg.runs_dir / rid / "sandbox_stderr")
     log.info("walkforward done; OOS Sharpe %.2f", wf.oos_summary["sharpe"])
@@ -98,7 +99,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
         "run_id": rid, "strategy": name, "strategy_hash": src.hash,
         "hypothesis": src.meta.hypothesis, "repo_commit": repo_commit(),
         "params": {"grid": src.meta.grid, "defaults": src.meta.params},
-        "universe": wf.symbols, "universe_rule": cfg["universe_rule"], "timeframes": [tf],
+        "universe": wf.symbols, "universe_rule": rule, "timeframes": [tf],
         "date_start": str(wf.folds[0]["train_start"].date()), "date_end": str(ob.date()),
         "oos_start": str(oa.date()), "holdout_start": str(cfg.holdout_start.date()),
         "validation_mode": "walkforward",
