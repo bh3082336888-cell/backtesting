@@ -1,6 +1,6 @@
 # Strategy research, 2026-10-18: one hypothesis to implement
 
-2026-10-19: the numbers below are for 8 coins from 2022-01-01. The research data now runs from 2020-01-01 over 17 coins (`docs/superpowers/specs/2026-10-18-wider-data-design.md`); section 9 (addendum, 2026-10-19) re-derives the data-dependent numbers, written before `flow_shock_fade` runs. Where they differ, section 9 holds.
+2026-10-19: the numbers below are for 8 coins from 2022-01-01. The research data now runs from 2020-01-01 over 17 coins (`docs/superpowers/specs/2026-10-18-wider-data-design.md`); section 9 (addendum, 2026-10-19) re-derives the data-dependent numbers, written before `flow_shock_fade` runs. Where they differ, section 9 holds. Section 10 (result, 2026-10-19): trial 7 killed `flow_shock_fade`, and this line of research ends.
 
 Status: research note, written by us without an outside brief. Section 5 is the spec that the
 next task implements, as written. Implementing the plugin spends no trial. Running its
@@ -863,3 +863,56 @@ How it is read, after the walk-forward, with no holdout data:
 - November 2022, the FTX collapse: the mean is −15.3%, the 16th worst of the 72 OOS months.
 
 The rule stays as fixed. A different rule chosen after a walk-forward result would be a choice made after seeing it.
+
+## 10. Result, 2026-10-19: trial 7 killed `flow_shock_fade`
+
+`lab judge flow_shock_fade --tf 1h` ran once, on `main` at f2c3de0, with section 9 already merged. The plugin was unchanged since it was added (blob `ad03f7afe8`). Before the run, all of these held:
+- there was no judgement of this plugin at any timeframe;
+- the sandbox probe passed;
+- the full suite passed (651 tests);
+- N was 6.
+
+The run's directory is git-ignored. Every number below comes from [`2026-10-19-trial7/checks.out`](2026-10-19-trial7/checks.out), written by `checks.py` in the same folder. The script reads the run directory and the verdict file, applies the checks of sections 7 and 9 as fixed there, and asserts that every timestamp it reads is before 2026-07-01. P&L is in USDT: each coin's backtest starts with 10,000 USDT, and the sums run over all 17 coins.
+
+**The verdict** (judgement 7, walk-forward run `20261019-065932-b571ea`): **kill**.
+- The reasons: OOS Sharpe −1.26 ≤ 0; it doesn't beat random-entry p95; Deflated Sharpe 0.00 < 0.95 at N = 7.
+- sr0 is 0.0296 (daily). The holdout is n/a: nothing was queued, so criterion 6 never arises.
+- N is now 7 store-wide.
+
+| | |
+|---|---|
+| OOS Sharpe, 2020-07 → 2026-07 | **−1.26**: return −16.9%, max drawdown −17.0%, profit factor 0.79, win rate 48.0% |
+| OOS trades | 3,385 (section 9: about 2,000–8,900) |
+| long share | 72.3% (section 9: 70–74%) |
+| random entry, same exits, 200 seeds | mean −0.86, p95 −0.19; the plugin is at the 19th percentile |
+| narrow island | none: the base Sharpe is −0.81, so there is nothing to be an island of |
+| IS Sharpe of the selected params | −0.59 |
+| buy and hold | Sharpe 0.72 |
+| combo picked per fold | `flow_x` 1.0 in 30 of 36 folds |
+
+**The pre-registered checks:**
+
+| check (section 7, or 9 where it differs) | numbers | result |
+|---|---|---|
+| < 64 OOS trades | 3,385 | pass |
+| gross ≤ 0 (criterion 2) | `pnl_gross` −17,194 (after slippage, before fees and funding) | **fails** |
+| gross > 0 but net < 0 (criterion 3) | gross is negative; fees 8,191, funding 130, net −25,515 | does not apply |
+| IS − OOS Sharpe > about 1 (criterion 5) | −0.59 − (−1.26) = 0.67 | pass |
+| sides (criterion 6) | short: 938 trades, gross −10,632 (−11.3 a trade). Long: 2,447 trades, gross −6,562 (−2.7 a trade) | **fails**: both sides ≤ 0 |
+| concentration (criterion 6) | total net is negative, so no share of a profit is defined. 2 of 17 coins net positive (XLM +644, AVAX +196); 9 of 36 folds net positive (the best: 2021-01 → 2021-03, +1,796) | does not apply |
+| crash months (section 9) | outside the eight months: 3,106 trades, net −19,636. Inside: 279 trades, net −5,879 (only 2022-05 and 2025-02 positive) | outside ≤ 0 |
+
+**What it means.**
+- Criteria 1 and 2 both fire. The reversion isn't there: fading the shock lost before fees and funding, on both sides.
+- The longs lost less per trade than the shorts. That fits a long bias softening the loss in a market that drifted up, not a symmetric reversion. But no side made money gross, so section 7's drift case (longs positive, shorts not) doesn't arise either.
+- Against random entries with the same exits, the plugin is below the median but not below p5. The test shows no timing edge it can tell from luck, in either direction.
+- Section 4 expected a kill at the random-entry or Deflated Sharpe gate, from a gross reversion near zero. The kill came at both gates, and gross was negative, not near zero.
+- The trade count and the long share fell inside section 9's ranges, so the data path behaved as predicted.
+- The crash-month condition is met: the net outside the eight months is ≤ 0. That isn't because the crash months paid, since they lost too. By section 9 it rules out any child on its own.
+
+**This line of research ends here** (section 7):
+- no sign-flipped continuation child (criterion 2). Choosing E after seeing A's result would pick the sign from an OOS outcome (section 4).
+- no move to another timeframe (criterion 3's reasoning);
+- no new thresholds or holds.
+
+What it teaches: on these 17 coins over 2020-07 → 2026-07, an hour of extreme net taker flow that moved price is not followed by a reversion from the next 1h open that shows even before fees and funding.
