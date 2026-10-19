@@ -1,0 +1,26 @@
+2026-10-19 07:22:38,027 WARNING perp_lab.data.store: SOLUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:22:38,372 WARNING perp_lab.data.store: XRPUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:22:39,557 WARNING perp_lab.data.store: LTCUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:22:39,948 WARNING perp_lab.data.store: FILUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:22:40,282 WARNING perp_lab.data.store: XLMUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:22:47,094 WARNING perp_lab.data.store: SOLUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-19 07:22:47,739 WARNING perp_lab.data.store: XRPUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-19 07:22:49,614 WARNING perp_lab.data.store: LTCUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-19 07:22:50,240 WARNING perp_lab.data.store: FILUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-19 07:22:50,870 WARNING perp_lab.data.store: XLMUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+OOS span 2020-07-01 -> 2026-07-01 (2191 days)
+Deflated Sharpe bar (DSR 0.95, normal returns): N=7 1.24; for reference N=6 1.20, N=50 1.60, and N=7 over 4 years 1.52
+Buy and hold, equal weight, 2020-07-01 -> 2026-07-01: Sharpe 0.72, total return 357%, max drawdown -81%
+Buy and hold, equal weight, 2020-07-01 -> 2022-07-01: Sharpe 1.20, total return 293%, max drawdown -80%
+Buy and hold, equal weight, 2022-07-01 -> 2026-07-01: Sharpe 0.39, total return 16%, max drawdown -73%
+
+Crash months over the OOS span (equal-weight mean monthly return <= -20%): 8
+  2021-06: -21% over 17 coins
+  2022-01: -26% over 17 coins
+  2022-04: -29% over 17 coins
+  2022-05: -28% over 17 coins
+  2022-06: -32% over 17 coins
+  2024-04: -29% over 17 coins
+  2025-02: -29% over 17 coins
+  2026-06: -23% over 17 coins
+Worst five months above the line: 2022-12 -19%, 2023-08 -19%, 2021-12 -19%, 2021-05 -18%, 2025-11 -18%

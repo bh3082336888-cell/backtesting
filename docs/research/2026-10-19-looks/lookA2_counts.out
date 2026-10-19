@@ -1,0 +1,25 @@
+2026-10-19 07:23:12,399 WARNING perp_lab.data.store: SOLUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:23:12,542 WARNING perp_lab.data.store: SOLUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-19 07:23:12,950 WARNING perp_lab.data.store: XRPUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:23:13,103 WARNING perp_lab.data.store: XRPUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-19 07:23:14,525 WARNING perp_lab.data.store: LTCUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:23:14,713 WARNING perp_lab.data.store: LTCUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-19 07:23:15,136 WARNING perp_lab.data.store: FILUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:23:15,304 WARNING perp_lab.data.store: FILUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+2026-10-19 07:23:15,703 WARNING perp_lab.data.store: XLMUSDT 1h: 2 gaps in candle series (first at 2022-02-25 23:00:00+00:00)
+2026-10-19 07:23:15,888 WARNING perp_lab.data.store: XLMUSDT 4h: 2 gaps in candle series (first at 2022-02-25 20:00:00+00:00)
+OOS span 2020-07-01 -> 2026-07-01, 36 folds
+
+flow_x=0.5: fires per symbol per year, median 120 [69, 158]
+flow_x=1.0: fires per symbol per year, median 31 [13, 39]
+
+Greedy lower bound (OOS totals and windows pooled over symbols); upper bound = every trigger:
+ flow_x  hold per_sym_lower per_sym_upper  oos_lower  oos_gate  long_share            worst_train  test2m_min halfyear_min  2025H2/2026H1
+    0.5     6 513 [332,763] 631 [397,961]       8936        64        0.70 416 vs 43 (2021-03-01)         109 501 (2022H1) 826/1120 vs 22
+    0.5    12 457 [306,686] 631 [397,961]       8134        64        0.70 395 vs 43 (2021-03-01)         100 462 (2022H1) 760/1014 vs 22
+    0.5    24 393 [263,558] 631 [397,961]       6921        64        0.70 350 vs 43 (2021-03-01)          90 401 (2022H1)  648/851 vs 22
+    1.0     6  137 [65,194]  152 [74,225]       2240        64        0.73  66 vs 43 (2021-03-01)           9  84 (2022H1)  169/288 vs 22
+    1.0    12  132 [61,179]  152 [74,225]       2122        64        0.73  63 vs 43 (2022-03-01)           9  78 (2022H1)  165/272 vs 22
+    1.0    24  123 [54,167]  152 [74,225]       1976        64        0.74  60 vs 43 (2022-03-01)           9  75 (2022H1)  156/253 vs 22
+
+worst_train: the fold whose train window has the smallest margin over ceil(2.5 x coins listed), as 'trades vs minimum (train start)'.
