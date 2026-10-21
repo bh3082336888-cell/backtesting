@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from perp_lab.plugins import PluginSource, require_timeframe
-from perp_lab.runs import new_run_id, repo_commit, verdict, write_run
+from perp_lab.runs import MIN_OOS_TRADES_PER_COIN, new_run_id, per_coin_min, repo_commit, verdict, write_run
 from perp_lab.store import db
 from perp_lab.validate.benchmarks import buy_and_hold, random_entry, regime_split
+from perp_lab.validate.gross import before_costs
 from perp_lab.validate.montecarlo import coins_per_day, mc_drawdown
 from perp_lab.validate.sensitivity import sensitivity
 from perp_lab.validate.walkforward import listed_coins, walkforward
@@ -29,6 +30,7 @@ def _f(x, pct=False):
 def render_report(rec: dict, regime: pd.DataFrame, monthly: pd.DataFrame) -> str:
     o, i, r, s, m, b = (rec["metrics"], rec["is_metrics"], rec["random_entry"], rec["sensitivity"],
                         rec["monte_carlo"], rec["buy_and_hold"])
+    g = rec["before_costs"]
     L = [f"# {rec['strategy']} @ {rec['timeframes'][0]} — walk-forward OOS",
          "", f"**Hypothesis:** {rec['hypothesis']}", "",
          f"run `{rec['run_id']}` · plugin `{rec['strategy_hash'][:10]}` · {rec['date_start']} → {rec['date_end']} "
@@ -52,6 +54,8 @@ def render_report(rec: dict, regime: pd.DataFrame, monthly: pd.DataFrame) -> str
           f"mean Sharpe {_f(r.get('random_sharpe_mean'))}, p{r.get('percentile', '')} "
           f"{_f(r.get('random_sharpe_p' + str(r.get('percentile', ''))))}; strategy sits at the "
           f"{_f(r.get('strategy_pctile_vs_random'), 1)} percentile → beats random: **{r.get('beats_random')}**", "",
+          f"- Before costs (zero fees and slippage, funding kept): Sharpe {_f(g['sharpe'])}, "
+          f"random p95 {_f(g['random_p95'])}", "",
           "## Robustness", "",
           f"- Sensitivity (fixed modal params {s['base_params']}): base Sharpe {_f(s['base_sharpe'])}, "
           f"narrow island: **{s['narrow_island']}** {s.get('note', '')}",
@@ -90,12 +94,14 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     log.info("walkforward done; OOS Sharpe %.2f", wf.oos_summary["sharpe"])
     sens = sensitivity(cfg, wf, workers)
     rnd = random_entry(cfg, wf, seeds, workers)
+    gross = before_costs(cfg, wf, seeds, workers)
     mc = mc_drawdown(wf.oos_trades, coins_per_day(wf.oos_daily), cfg["validation"]["mc_iterations"])
     oa, ob = wf.raw["oos_span"]
     bh = buy_and_hold(cfg, wf.symbols, tf, oa, ob)
     reg = regime_split(wf.oos_trades)
     monthly = monthly_table(wf.oos_portfolio)
-    status, fails = verdict(wf.oos_summary, rnd, sens, listed_coins(wf.oos_daily, oa, ob))
+    n_coins = listed_coins(wf.oos_daily, oa, ob)
+    status, fails = verdict(wf.oos_summary, rnd, sens, n_coins)
 
     rec = {
         "run_id": rid, "strategy": name, "strategy_hash": src.hash,
@@ -108,6 +114,8 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
         "wf_train_months": cfg["walkforward"]["train_months"], "wf_test_months": cfg["walkforward"]["test_months"],
         "metrics": wf.oos_summary, "is_metrics": wf.is_summary, "by_symbol": wf.oos_by_symbol,
         "sensitivity": sens, "random_entry": {k: v for k, v in rnd.items() if k != "sharpes"},
+        "before_costs": gross,
+        "min_oos_trades": per_coin_min(MIN_OOS_TRADES_PER_COIN, n_coins),
         "monte_carlo": mc, "buy_and_hold": bh["portfolio"],
         "regime_split": reg.reset_index().to_dict("records") if len(reg) else [],
         "folds": [{k: v for k, v in f.items()} for f in wf.selected],

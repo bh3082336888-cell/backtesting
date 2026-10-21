@@ -263,3 +263,17 @@ def test_a_config_without_a_universe_rule_fails_before_the_walk_forward(tmp_path
     with pytest.raises(KeyError, match="universe_rule"):
         pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
     assert db.read_table(cfg, db.runs).empty
+
+
+@pytest.mark.sandbox
+def test_a_run_records_before_costs_and_its_trade_minimum(tmp_path, plugins):
+    import json
+    import math
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    rec, report = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
+    s = json.loads((Path(rec["run_dir"]) / "summary.json").read_text())
+    assert set(s["before_costs"]) == {"sharpe", "random_mean", "random_p95", "pctile", "long_share"}
+    assert math.isfinite(s["before_costs"]["sharpe"]) and math.isfinite(s["metrics"]["sharpe"])
+    assert s["before_costs"]["sharpe"] != s["metrics"]["sharpe"]      # the run had trades; costs moved it
+    assert s["min_oos_trades"] > 0
+    assert "Before costs (zero fees and slippage, funding kept)" in report
