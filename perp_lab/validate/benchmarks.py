@@ -40,7 +40,8 @@ def random_entry(cfg, wf: WFResult, seeds: int | None = None, workers=None, *,
     jobs = [(params, s, wf.tf, overrides, seed, (probs[s], long_share))
             for seed in range(seeds) for s in wf.symbols if probs[s] > 0]
     if not jobs:
-        return {"note": "strategy took no OOS trades; benchmark undefined", "beats_random": False}
+        return {"note": "strategy took no OOS trades; benchmark undefined", "beats_random": False,
+                "long_share": long_share}
     res = run_many(cfg, wf.src, jobs, workers, wf.stderr_dir)
     oa, ob = wf.raw["oos_span"]
     # A coin the strategy never traded gets no job, but it stays in every random portfolio as

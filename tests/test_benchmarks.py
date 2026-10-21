@@ -109,3 +109,10 @@ def test_the_benchmark_takes_overrides_and_a_strategy_sharpe(cfg, monkeypatch):
     monkeypatch.setattr(benchmarks, "run_many", run_many)
     out = benchmarks.random_entry(cfg, make_wf(), seeds=2, overrides={"slippage_scale": 0.0}, strat_sharpe=99.0)
     assert all(j[3] == {"slippage_scale": 0.0} for j in captured) and out["strategy_oos_sharpe"] == 99.0
+
+
+def test_a_no_trade_benchmark_still_carries_a_long_share(cfg):
+    wf = make_wf()
+    wf.oos_trades = wf.oos_trades.iloc[0:0]
+    out = benchmarks.random_entry(cfg, wf, seeds=2)
+    assert out["beats_random"] is False and out["long_share"] == 0.5
