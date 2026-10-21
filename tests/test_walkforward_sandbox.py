@@ -94,14 +94,14 @@ def test_run_many_matches_a_direct_backtest(tmp_path, workers):
     src = PluginSource.from_text("donchian_atr", DONCHIAN)
     cls = load_class("donchian_atr")
     jobs = [(c, s, "4h", None, None, None) for c in wfm.grid_combos(src.meta.grid) for s in cfg.symbols]
-    jobs += [({"n": 20}, s, "4h", None, seed, 0.02) for seed in (0, 1) for s in cfg.symbols]
+    jobs += [({"n": 20}, s, "4h", None, seed, (0.02, 0.7)) for seed in (0, 1) for s in cfg.symbols]
     res = wfm.run_many(cfg, src, jobs, workers, keep_levels=True)
     assert [(r["params"], r["symbol"], r["seed"]) for r in res] == [(j[0], j[1], j[4]) for j in jobs]
-    for (params, s, tf, _, seed, prob), r in zip(jobs, res):
+    for (params, s, tf, _, seed, rand), r in zip(jobs, res):
         bars = load_bars(cfg, s, tf)
         strat = cls(**params)
         if seed is not None:
-            strat = RandomEntry(strat, prob, seed)
+            strat = RandomEntry(strat, rand[0], seed, rand[1])
         ref = run_backtest(strat, bars, strat.prepare(bars), symbol=s, tf=tf, ep=EngineParams.from_config(cfg, s))
         assert len(ref.trades) > 0
         pd.testing.assert_series_equal(r["daily"], daily_returns(ref.equity, ref.time))

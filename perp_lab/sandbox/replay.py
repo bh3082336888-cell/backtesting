@@ -11,10 +11,10 @@ from perp_lab.sandbox.errors import PluginError
 from perp_lab.strategy import HOLD, Ctx, Signal, Strategy
 
 
-def random_draw(n: int, seed: int, prob: float) -> tuple[np.ndarray, np.ndarray]:
+def random_draw(n: int, seed: int, prob: float, long_share: float = 0.5) -> tuple[np.ndarray, np.ndarray]:
     """The draw RandomEntry.prepare makes: (fire bool, side +-1)."""
     u = np.random.default_rng(seed).random((n, 2))
-    return u[:, 0] < prob, np.where(u[:, 1] < 0.5, 1, -1)
+    return u[:, 0] < prob, np.where(u[:, 1] < long_share, 1, -1)
 
 
 class ScriptedStrategy(Strategy):

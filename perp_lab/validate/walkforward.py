@@ -116,9 +116,9 @@ def run_chunk(args) -> list[dict]:
     cfg = _cfg()
     out = []
     with client.Batch(cfg, src, symbol, tf, _bars(symbol, tf), stderr_dir=stderr_dir) as b:
-        for params, _, _, overrides, seed, entry_prob in jobs:
+        for params, _, _, overrides, seed, rand in jobs:
             ep = EngineParams.from_config(cfg, symbol, **(overrides or {}))
-            res = b.backtest(params, ep, random=None if seed is None else (seed, entry_prob))
+            res = b.backtest(params, ep, random=None if seed is None else (seed, *rand))
             out.append(_compact(res, symbol, params, seed, keep_levels))
     return out
 
@@ -141,8 +141,8 @@ def chunks(jobs: list[tuple], workers: int) -> list[tuple[str, str, list]]:
 
 def run_many(cfg: Config, src: PluginSource, jobs: list[tuple], workers: int | None = None,
              stderr_dir: Path | None = None, keep_levels: bool = False) -> list[dict]:
-    """Every job, a `(params, symbol, tf, overrides, seed, entry_prob)`, through the sandbox; the
-    results in job order. The pool runs trusted code only: each task is one chunk in one Batch.
+    """Every job, a `(params, symbol, tf, overrides, seed, rand)` (rand None, or
+    (entry_prob, long_share)), through the sandbox; the results in job order. The pool runs trusted code only: each task is one chunk in one Batch.
     The trades keep their stop/target path only with `keep_levels` (the walk-forward grid's, which
     become the charted OOS trades): sensitivity reads daily returns only and the random-entry
     benchmark signal_time only, and the lists would cross the pool for nothing."""

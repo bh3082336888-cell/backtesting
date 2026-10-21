@@ -412,8 +412,8 @@ class Worker:
         self._index = df.index
 
     def run(self, params: dict, ep: EngineParams, *, k: int | None = None, start_i: int = 0,
-            random: tuple[int, float] | None = None, features: bool = False) -> RunOutput:
-        """One run on the held bars (the first k, when k is set). `random` is (seed, entry_prob)
+            random: tuple[int, float, float] | None = None, features: bool = False) -> RunOutput:
+        """One run on the held bars (the first k, when k is set). `random` is (seed, entry_prob, long_share)
         for the random-entry benchmark. Features, if asked for, are indexed by the bars' index."""
         if self._index is None:
             raise RuntimeError("send the bars before a run")
@@ -480,7 +480,8 @@ class Worker:
 def run_request(params: dict, ep: EngineParams, *, k=None, start_i=0, random=None, features=False) -> dict:
     return {"op": "run", "params": dict(params), "ep": dataclasses.asdict(ep),
             "k": None if k is None else int(k), "start_i": int(start_i),
-            "random": None if random is None else {"seed": int(random[0]), "prob": float(random[1])},
+            "random": None if random is None else {"seed": int(random[0]), "prob": float(random[1]),
+                                                  "long": float(random[2])},
             "features": bool(features)}
 
 
@@ -692,11 +693,12 @@ class Batch:
             self.close()
             raise
 
-    def backtest(self, params: dict, ep: EngineParams, *, random: tuple[int, float] | None = None,
+    def backtest(self, params: dict, ep: EngineParams, *, random: tuple[int, float, float] | None = None,
                  start_i: int = 0) -> BacktestResult:
-        """The plugin's run, as the trusted replay of its decisions. `random` is (seed, entry_prob)."""
+        """The plugin's run, as the trusted replay of its decisions. `random` is (seed, entry_prob, long_share)."""
         out = _retry_once(lambda: self._run(params, ep, random, start_i))
-        draw = None if random is None else random_draw(len(self.bars), int(random[0]), float(random[1]))
+        draw = None if random is None else random_draw(len(self.bars), int(random[0]), float(random[1]),
+                                              float(random[2]))
         res = replay(self.bars, out.decisions, symbol=self.symbol, tf=self.tf, ep=ep, start_i=start_i, draw=draw)
         check_finite(res)
         check_fingerprint(res, out.fingerprint, ep)

@@ -142,6 +142,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | Entry rejected if liquidation price sits inside the stop | engine step 4 |
 | OOS is the headline; IS is shown greyed and labelled | `validate/pipeline.py` report |
 | A strategy must beat random-entry (same exits, matched frequency) p95 OOS | `validate/benchmarks.py` |
+| Random entries take the plugin's OOS long share, not 50/50 | `validate/benchmarks.py`, `tests/test_benchmarks.py` |
 | A walk-forward (`lab walkforward`, `lab judge`, a judge's parent run) runs only at a timeframe the plugin declares; any other is refused before it can count as a trial | `plugins.py::require_timeframe`, `tests/test_judge.py`, `tests/test_walkforward_sandbox.py` |
 | Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days | `judge/budget.py`, `tests/test_budget.py` |
 | No slippage below 2 bp, for any coin or date | `engine/slippage.py`, `tests/test_slippage.py`, `tests/test_config.py` |
