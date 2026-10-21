@@ -57,8 +57,8 @@ def test_an_existing_store_gains_the_data_id_column(cfg):
 
 
 def stale_inspect(monkeypatch, times):
-    """sa.inspect that hides runs.data_id from its first `times` callers, as a process that looked
-    before another one added the column would see it. Returns the list of calls made."""
+    """sa.inspect that hides runs.data_id from the first `times` lookups of the runs columns, as a
+    process that looked before another one added the column would see it. Returns those lookups."""
     real, calls = sa.inspect, []
 
     class Stale:
@@ -66,12 +66,13 @@ def stale_inspect(monkeypatch, times):
             self.inspector = inspector
 
         def get_columns(self, table):
-            return [c for c in self.inspector.get_columns(table) if c["name"] != "data_id"]
+            cols = self.inspector.get_columns(table)
+            if table != "runs":
+                return cols
+            calls.append(table)
+            return [c for c in cols if c["name"] != "data_id"] if len(calls) <= times else cols
 
-    def inspect(eng):
-        calls.append(eng)
-        return Stale(real(eng)) if len(calls) <= times else real(eng)
-    monkeypatch.setattr(sa, "inspect", inspect)
+    monkeypatch.setattr(sa, "inspect", lambda eng: Stale(real(eng)))
     return calls
 
 

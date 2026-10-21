@@ -127,6 +127,7 @@ judgements = sa.Table(
     sa.Column("lineage_id", sa.String(64), index=True),
     sa.Column("decision", sa.String(16), nullable=False),          # promote | kill
     sa.Column("reasons", sa.JSON, nullable=False),
+    sa.Column("verdict_reasons", sa.JSON),      # what the public verdict says when it differs from reasons
     sa.Column("dsr", sa.Float), sa.Column("n_trials", sa.Integer), sa.Column("sr0", sa.Float),
     sa.Column("parent_passed", sa.Boolean), sa.Column("beats_parent_frac", sa.Float),
     sa.Column("holdout_status", sa.String(16), nullable=False),    # n/a | pending | passed | failed | blocked | withdrawn
@@ -160,8 +161,15 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _has_data_id(eng: sa.Engine) -> bool:
-    return "data_id" in {c["name"] for c in sa.inspect(eng).get_columns("runs")}
+# Columns added after a table first shipped: create_all never adds a column to an existing table.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    ("runs", "data_id", "VARCHAR(16)"),
+    ("judgements", "verdict_reasons", "JSON"),
+]
+
+
+def _has_column(eng: sa.Engine, table: str, column: str) -> bool:
+    return column in {c["name"] for c in sa.inspect(eng).get_columns(table)}
 
 
 @lru_cache(maxsize=8)
@@ -170,13 +178,14 @@ def _engine(url: str) -> sa.Engine:
         Path(url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
     eng = sa.create_engine(url, future=True)
     md.create_all(eng)
-    if not _has_data_id(eng):
-        try:
-            with eng.begin() as c:      # create_all never adds a column to an existing table
-                c.execute(sa.text("ALTER TABLE runs ADD COLUMN data_id VARCHAR(16)"))
-        except sa.exc.OperationalError:
-            if not _has_data_id(eng):   # another process opening the store added it meanwhile: fine
-                raise
+    for table, column, ddl in _ADDED_COLUMNS:
+        if not _has_column(eng, table, column):
+            try:
+                with eng.begin() as c:
+                    c.execute(sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+            except sa.exc.OperationalError:
+                if not _has_column(eng, table, column):   # another process added it meanwhile: fine
+                    raise
     return eng
 
 

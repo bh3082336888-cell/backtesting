@@ -413,11 +413,29 @@ def test_a_plugin_error_in_the_walk_forward_is_a_recorded_kill(cfg, plugins, cap
     with caplog.at_level("WARNING", logger="perp_lab.judge.judge"):
         j = judge(cfg, "donchian_atr", "4h", validate=_failing(v, "donchian_atr", err))
     assert j["decision"] == "kill" and j["reasons"] == ["plugin_error: exception: ValueError: boom"]
+    assert json.loads(Path(j["verdict_path"]).read_text())["reasons"] == ["plugin_error: exception: ValueError"]
     assert j["child_run_id"] is None and (j["holdout_status"], j["holdout_reason"]) == ("n/a", "n/a")
     assert "Traceback: boom" in caplog.text
     assert db.read_table(cfg, db.judgements).shape[0] == 1
     assert "Traceback" not in Path(j["verdict_path"]).read_text()
     assert db.trial_stats(cfg)[0] == 1
+
+
+def test_the_verdict_names_a_builtin_exception_type_only(cfg, plugins):
+    err = PluginError("exception", "ValueError", "secret 123")
+    j = judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", err))
+    v = json.loads(Path(j["verdict_path"]).read_text())
+    assert v["reasons"] == ["plugin_error: exception: ValueError"] and "secret" not in json.dumps(v)
+    assert "verdict_reasons" not in v
+    assert db.get_judgement_by_id(cfg, j["id"])["reasons"] == ["plugin_error: exception: ValueError: secret 123"]
+
+
+def test_a_plugin_defined_exception_type_becomes_other():
+    assert PluginError("exception", "Btc_up_3pct", "m").public_reason() == "plugin_error: exception: other"
+
+
+def test_a_kind_without_an_exception_keeps_only_its_kind():
+    assert PluginError("protocol", "", "x").public_reason() == "plugin_error: protocol"
 
 
 def test_a_plugin_error_after_real_bars_raises_n(cfg, plugins):

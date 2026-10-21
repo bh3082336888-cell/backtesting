@@ -86,3 +86,14 @@ def test_latest_wf_run_matches_hash_and_universe(cfg):
     assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"], data_id=did(["BTCUSDT", "ETHUSDT"]), lineage_id="family:z") is None
     assert db.latest_wf_run(cfg, "q", "4h", "hq", ["BTCUSDT", "ETHUSDT"], data_id=did(["BTCUSDT", "ETHUSDT"]))["run_id"] == "fam"
     assert db.run_row(cfg, "new")["strategy_hash"] == "hp" and db.run_row(cfg, "nope") is None
+
+
+def test_an_old_store_gains_the_new_columns(cfg, tmp_path):
+    import sqlalchemy as sa
+    db.record_judgement(cfg, jrow(verdict_reasons=["y"]))
+    with db.engine(cfg).begin() as c:
+        c.execute(sa.text("ALTER TABLE judgements DROP COLUMN verdict_reasons"))
+        c.execute(sa.text("ALTER TABLE runs DROP COLUMN data_id"))
+    db._engine.cache_clear()
+    assert db.get_judgement(cfg, "h1", "4h")["verdict_reasons"] is None
+    assert "data_id" in db.read_table(cfg, db.runs).columns

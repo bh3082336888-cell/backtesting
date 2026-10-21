@@ -74,7 +74,8 @@ def write_verdict(cfg, j: dict) -> Path:
         run_dir = db.run_row(cfg, j["child_run_id"])["run_dir"]
         wf = {"run_id": j["child_run_id"], "metrics": run_summary(run_dir).get("metrics"),
               "report": str(Path(run_dir) / "report.md")}
-    out = {k: j[k] for k in VERDICT_KEYS - {"walkforward"}}
+    out = {k: j[k] for k in VERDICT_KEYS - {"walkforward", "reasons"}}
+    out["reasons"] = j["verdict_reasons"] if j.get("verdict_reasons") is not None else j["reasons"]
     out["walkforward"] = wf
     p = verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"])
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -266,7 +267,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
             "parent_run_id": None, "lineage_id": family, "decision": "kill", "reasons": [e.reason()],
-            "holdout_status": "n/a", "holdout_reason": "n/a"})
+            "verdict_reasons": [e.public_reason()], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
     child = db.run_row(cfg, rec["run_id"])
     if parent_row is not None and parent_row["data_id"] != child["data_id"]:

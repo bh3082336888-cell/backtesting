@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import builtins
+
 KINDS = ("exception", "cpu_limit", "protocol", "mismatch", "metadata", "features", "died", "timeout")
 # Kinds the machine can cause (a killed worker, a slow or loaded host), not only the plugin
 TRANSIENT_KINDS = ("died", "timeout", "cpu_limit")
+# Exception names a verdict may carry; a plugin picks its own class names, so any other becomes "other"
+BUILTIN_EXCEPTIONS = frozenset(n for n, o in vars(builtins).items()
+                               if isinstance(o, type) and issubclass(o, BaseException))
 MESSAGE_CHARS = 200                     # an error's type and message, as they may reach a verdict
 
 _BYTES = bytes(c if 0x20 <= c < 0x7F or c in (9, 10) else 0x3F for c in range(256))
@@ -42,6 +47,13 @@ class PluginError(Exception):
         r = f"plugin_error: {self.kind}"
         if self.kind == "exception":
             r += f": {self.type}: {self.message}"
+        return r
+
+    def public_reason(self) -> str:
+        """The reason a verdict may carry: the kind and a builtin exception type, never the message."""
+        r = f"plugin_error: {self.kind}"
+        if self.kind == "exception":
+            r += f": {self.type if self.type in BUILTIN_EXCEPTIONS else 'other'}"
         return r
 
     def __reduce__(self):               # every field, so it crosses a process pool intact
