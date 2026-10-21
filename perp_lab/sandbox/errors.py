@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 KINDS = ("exception", "cpu_limit", "protocol", "mismatch", "metadata", "features", "died", "timeout")
+# Kinds the machine can cause (a killed worker, a slow or loaded host), not only the plugin
+TRANSIENT_KINDS = ("died", "timeout", "cpu_limit")
 MESSAGE_CHARS = 200                     # an error's type and message, as they may reach a verdict
 
 _BYTES = bytes(c if 0x20 <= c < 0x7F or c in (9, 10) else 0x3F for c in range(256))

@@ -9,7 +9,7 @@ from perp_lab.cli import app
 from perp_lab.config import Config
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
-from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, judge, lookahead_failures
+from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, TransientFailure, judge, lookahead_failures
 from perp_lab.store import db
 from perp_lab.strategy import plugin_hash
 from tests.judge_fixtures import (CHEATER, NOISE, STRONG, WEAK, WIDE_TEXT, StubValidate, add_plugin,
@@ -449,8 +449,8 @@ def test_a_lookahead_kill_registers_no_trial(cfg, plugins):
 def test_a_plugin_error_in_a_child_with_a_parent_records_no_edge(cfg, plugins):
     v = StubValidate({"donchian_atr": ("candidate", STRONG)})
     j = judge(cfg, "donchian_atr_wide", "4h",
-              validate=_failing(v, "donchian_atr_wide", PluginError("cpu_limit")))
-    assert j["decision"] == "kill" and j["reasons"] == ["plugin_error: cpu_limit"]
+              validate=_failing(v, "donchian_atr_wide", PluginError("exception", "KeyError", "x")))
+    assert j["decision"] == "kill" and j["reasons"] == ["plugin_error: exception: KeyError: x"]
     assert j["child_run_id"] is None and db.read_table(cfg, db.lineage_edges).empty
 
 
@@ -567,3 +567,33 @@ def test_the_judge_refuses_when_the_parent_cannot_run_on_the_childs_data(cfg, pl
         judge(cfg, "donchian_atr_wide", "4h", validate=v)
     assert v.calls == ["donchian_atr", "donchian_atr_wide", "donchian_atr"]
     assert db.read_table(cfg, db.judgements).empty and db.read_table(cfg, db.lineage_edges).empty
+
+
+def test_a_transient_failure_records_nothing_but_the_trial(cfg, plugins):
+    with pytest.raises(TransientFailure):
+        judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", PluginError("died")))
+    assert db.read_table(cfg, db.judgements).empty
+    assert db.trial_attempts(cfg, plugin_hash("donchian_atr"), "4h") == 1 and db.trial_stats(cfg)[0] == 1
+
+
+def test_a_transient_failure_on_the_third_attempt_is_a_kill(cfg, plugins):
+    run = _failing(StubValidate({}), "donchian_atr", PluginError("timeout"))
+    for _ in range(2):
+        with pytest.raises(TransientFailure):
+            judge(cfg, "donchian_atr", "4h", validate=run)
+    j = judge(cfg, "donchian_atr", "4h", validate=run)
+    assert j["decision"] == "kill" and j["reasons"] == ["plugin_error: timeout"]
+
+
+def test_a_transient_failure_then_a_clean_run_is_judged(cfg, plugins):
+    with pytest.raises(TransientFailure):
+        judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", PluginError("cpu_limit")))
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    assert j["child_run_id"] is not None and db.trial_stats(cfg)[0] == 1
+
+
+def test_cli_transient_failure_exits_1(cfg, plugins, monkeypatch):
+    def boom(*a, **k): raise TransientFailure("died")
+    monkeypatch.setattr("perp_lab.judge.judge.judge", boom)
+    r = CliRunner().invoke(app, ["judge", "donchian_atr", "--tf", "4h", "--config", str(cfg.path)])
+    assert r.exit_code == 1 and "the trial is registered" in r.output

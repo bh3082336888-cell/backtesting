@@ -24,7 +24,7 @@ from perp_lab.judge import budget, gates
 from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, window_end
 from perp_lab.plugins import PluginMetaError, PluginSource, UndeclaredTimeframe, require_timeframe
 from perp_lab.sandbox import client
-from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
+from perp_lab.sandbox.errors import TRANSIENT_KINDS, PluginError, SandboxUnavailable
 from perp_lab.runs import data_id, data_identity, new_run_id, per_coin_min, repo_commit, write_run
 from perp_lab.store import db
 from perp_lab.strategy import list_plugins, plugin_hash
@@ -41,6 +41,17 @@ VERDICT_KEYS = {"strategy", "timeframe", "strategy_hash", "lineage_id", "parent_
 
 class JudgeRefused(Exception):
     """A pre-check failed; nothing was recorded."""
+
+
+TRANSIENT_MAX_ATTEMPTS = 3   # a machine-caused failure is a kill only on the 3rd attempt
+
+
+class TransientFailure(RuntimeError):
+    """A sandbox failure the machine may have caused, on an early attempt: only the trial is recorded."""
+
+    def __init__(self, kind: str):
+        super().__init__(kind)
+        self.kind = kind
 
 
 def oos_portfolio(run_dir) -> pd.Series:
@@ -250,6 +261,8 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
                           parent_run_id=parent_row["run_id"] if parent_row else None, lineage_id=family, src=src)
     except PluginError as e:
         log.warning("%s failed in the sandbox: %s\n%s", name, e.reason(), e.stderr.decode("utf-8", "replace"))
+        if e.kind in TRANSIENT_KINDS and db.trial_attempts(cfg, h, tf) < TRANSIENT_MAX_ATTEMPTS:
+            raise TransientFailure(e.kind) from e
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
             "parent_run_id": None, "lineage_id": family, "decision": "kill", "reasons": [e.reason()],
