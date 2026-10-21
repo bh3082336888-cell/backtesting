@@ -13,6 +13,7 @@ from perp_lab.cli import app
 from perp_lab.judge import budget
 from perp_lab.judge.exam import ExamResult
 from perp_lab.judge.budget import WithdrawRefused
+from perp_lab.judge.diagnostics import diagnostics
 from perp_lab.judge.judge import VERDICT_KEYS, attempt_exam, exam_pending, judge, verdict_path, withdraw
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
@@ -301,7 +302,10 @@ def _numbers(o):
 
 def test_the_verdict_never_carries_holdout_numbers(cfg, plugins):
     budget.init_log(cfg)
-    j = judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(0.003))
+    promoted_j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG))
+    judged_diag = json.loads(Path(promoted_j["verdict_path"]).read_text())["diagnostics"]
+    j = attempt_exam(cfg, promoted_j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=end_after(200),
+                     cost_fn=no_cost)
     text = Path(j["verdict_path"]).read_text()
     out = json.loads(text)
     h = db.run_row(cfg, j["holdout_run_id"])
@@ -309,6 +313,11 @@ def test_the_verdict_never_carries_holdout_numbers(cfg, plugins):
     assert set(out) == VERDICT_KEYS and out["holdout_status"] == "passed"
     assert not any(math.isclose(x, s, rel_tol=1e-9) for x in _numbers(out) for s in secret)
     assert j["holdout_run_id"] not in text
+    # the diagnostics come from the walk-forward run alone: the passed exam leaves them as judged
+    wf_dir = db.run_row(cfg, j["child_run_id"])["run_dir"]
+    assert out["diagnostics"] is not None and out["diagnostics"] == judged_diag
+    assert out["diagnostics"] == diagnostics(cfg, wf_dir, data="judged", earlier=[])
+    assert db.get_judgement_by_id(cfg, j["id"])["diagnostics_run_id"] == j["child_run_id"]
 
 
 def test_cli_exam_with_nothing_pending(cfg):

@@ -135,6 +135,10 @@ judgements = sa.Table(
     sa.Column("holdout_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True)),
     sa.Column("updated_at", sa.DateTime(timezone=True)),
+    # The verdict's diagnostics block (walk-forward data only), and the run it was computed from: the
+    # judged run, or a later walk-forward run of the same plugin version on today's data (a refresh).
+    sa.Column("diagnostics", sa.JSON),
+    sa.Column("diagnostics_run_id", sa.String(64)),
     sa.UniqueConstraint("strategy_hash", "timeframe"),
 )
 
@@ -165,6 +169,8 @@ def _now():
 _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("runs", "data_id", "VARCHAR(16)"),
     ("judgements", "verdict_reasons", "JSON"),
+    ("judgements", "diagnostics", "JSON"),
+    ("judgements", "diagnostics_run_id", "VARCHAR(64)"),
 ]
 
 
@@ -407,6 +413,26 @@ def update_holdout(cfg, jid: int, status: str, reason: str, holdout_run_id: str 
         vals["holdout_run_id"] = holdout_run_id
     with engine(cfg).begin() as c:
         c.execute(judgements.update().where(judgements.c.id == jid).values(**vals))
+
+
+def set_diagnostics(cfg, jid: int, diag: dict, run_id: str) -> None:
+    """Store a judgement's diagnostics and the walk-forward run they came from. Its decision is untouched."""
+    with engine(cfg).begin() as c:
+        c.execute(judgements.update().where(judgements.c.id == jid).values(
+            diagnostics=diag, diagnostics_run_id=run_id, updated_at=_now()))
+
+
+def earlier_runs(cfg, jid: int) -> list[dict]:
+    """The run of every judgement before `jid` that has one, oldest first: its diagnostics run (the latest
+    walk-forward run of that plugin version) or else its judged run. A kill without a run has none, and
+    only walk-forward runs count: the overlap lists never read a holdout run."""
+    rid = sa.func.coalesce(judgements.c.diagnostics_run_id, judgements.c.child_run_id)
+    with engine(cfg).connect() as c:
+        rows = c.execute(sa.select(judgements.c.strategy, judgements.c.timeframe, runs.c.run_dir)
+                         .select_from(judgements.join(runs, runs.c.run_id == rid))
+                         .where(sa.and_(judgements.c.id < jid, runs.c.validation_mode == "walkforward"))
+                         .order_by(judgements.c.id)).all()
+    return [{"strategy": r.strategy, "timeframe": r.timeframe, "run_dir": r.run_dir} for r in rows if r.run_dir]
 
 
 def pending_judgements(cfg) -> list[dict]:

@@ -9,7 +9,9 @@ from perp_lab.cli import app
 from perp_lab.config import Config
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
-from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, TransientFailure, judge, lookahead_failures
+from perp_lab.judge.diagnostics import diagnostics
+from perp_lab.judge.judge import (VERDICT_KEYS, JudgeRefused, TransientFailure, judge, lookahead_failures,
+                                  verdict_path)
 from perp_lab.store import db
 from perp_lab.strategy import plugin_hash
 from tests.judge_fixtures import (CHEATER, NOISE, STRONG, WEAK, WIDE_TEXT, StubValidate, add_plugin,
@@ -615,3 +617,47 @@ def test_cli_transient_failure_exits_1(cfg, plugins, monkeypatch):
     monkeypatch.setattr("perp_lab.judge.judge.judge", boom)
     r = CliRunner().invoke(app, ["judge", "donchian_atr", "--tf", "4h", "--config", str(cfg.path)])
     assert r.exit_code == 1 and "the trial is registered" in r.output
+
+
+def test_a_verdict_is_schema_2_with_diagnostics(cfg, plugins):
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    v = json.loads(Path(j["verdict_path"]).read_text())
+    assert v["schema"] == 2 and v["diagnostics"]["data"] == "judged"
+    assert v["diagnostics"] == diagnostics(cfg, db.run_row(cfg, j["child_run_id"])["run_dir"], data="judged",
+                                           earlier=[])
+    assert db.get_judgement_by_id(cfg, j["id"])["diagnostics_run_id"] == j["child_run_id"]
+
+
+def test_overlap_lists_earlier_judgements_only(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("noise", NOISE), "donchian_atr_wide": ("candidate", STRONG)})
+    a = judge(cfg, "donchian_atr", "4h", validate=v)
+    b = judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    first = json.loads(Path(a["verdict_path"]).read_text())["diagnostics"]["overlap"]
+    wide = json.loads(Path(b["verdict_path"]).read_text())["diagnostics"]["overlap"]
+    assert first == {"position": [], "mirror": [], "correlation": []}
+    assert wide["position"] == [{"strategy": "donchian_atr", "timeframe": "4h", "value": 1.0}]
+    assert [(x["strategy"], x["timeframe"]) for x in wide["correlation"]] == [("donchian_atr", "4h")]
+
+
+@pytest.mark.parametrize("how", ["lookahead", "plugin error"])
+def test_a_kill_without_a_run_has_no_diagnostics(cfg, plugins, how):
+    if how == "lookahead":
+        add_plugin(plugins, "cheater", CHEATER)
+        j = judge(cfg, "cheater", "4h", validate=StubValidate({}))
+    else:
+        err = PluginError("exception", "ValueError", "boom")
+        j = judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", err))
+    v = json.loads(Path(j["verdict_path"]).read_text())
+    assert j["child_run_id"] is None and set(v) == VERDICT_KEYS
+    assert v["schema"] == 2 and v["diagnostics"] is None
+
+
+def test_a_failure_in_the_diagnostics_still_writes_the_verdict(cfg, plugins, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("diagnostics")
+    monkeypatch.setattr("perp_lab.judge.judge.diagnostics", boom)
+    with pytest.raises(RuntimeError, match="diagnostics"):
+        judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    j = db.get_judgement(cfg, plugin_hash("donchian_atr"), "4h")
+    v = json.loads(verdict_path(cfg, "donchian_atr", "4h", j["strategy_hash"]).read_text())
+    assert v["decision"] == "kill" and v["diagnostics"] is None and v["schema"] == 2

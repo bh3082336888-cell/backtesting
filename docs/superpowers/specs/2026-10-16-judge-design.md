@@ -228,6 +228,11 @@ Too few trades is a fail ("not enough evidence"); the read is spent either way.
   reasons, walk-forward OOS metrics and report path, DSR, N, SR0, beats-parent fraction,
   and `holdout_status` ∈ {`n/a` (killed), `pending`, `passed`, `failed`, `blocked`} with a
   fixed reason code.
+  Since 3b-2 (`"schema": 2`) it also carries a `diagnostics` block of aggregates (gate inputs,
+  before-costs Sharpe, per-trade bp, sides, exits, regimes, breadth, IS against OOS, selection,
+  overlap with earlier judged runs; docs/superpowers/specs/2026-10-19-proposer-design.md, "Verdict
+  diagnostics"), computed from walk-forward data only, never from a holdout run; `null` for a kill
+  without a walk-forward run.
   It never contains holdout returns, Sharpe, trades or any number computed from holdout data.
   This is the proposer's only input in Phase 3b.
 - **Holdout details:** in the `runs` table and run directory like any run; shown to the human

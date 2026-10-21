@@ -2,7 +2,8 @@
 
 Spec: docs/superpowers/specs/2026-10-16-judge-design.md. Flow: pre-checks -> idempotency ->
 lookahead (the child's, then the parent's) -> parent run -> child walk-forward -> gates -> decision ->
-judgement + lineage edge -> (a promotion supersedes its parent's pending exam) -> public verdict.
+judgement + lineage edge -> (a promotion supersedes its parent's pending exam) -> diagnostics ->
+public verdict.
 
 `judge` never runs an exam: a promotion waits as `pending` (`awaiting_exam`) for `lab exam`
 (`exam_pending` -> `attempt_exam`). The proposer runs `lab judge`, so it must not be able to time
@@ -21,6 +22,7 @@ import pandas as pd
 
 from perp_lab.engine.metrics import summarize
 from perp_lab.judge import budget, gates
+from perp_lab.judge.diagnostics import diagnostics
 from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, window_end
 from perp_lab.plugins import PluginMetaError, PluginSource, UndeclaredTimeframe, require_timeframe
 from perp_lab.sandbox import client
@@ -34,9 +36,10 @@ from perp_lab.validate.pipeline import validate_strategy
 log = logging.getLogger(__name__)
 
 PARENT_BOOT = 5_000
-VERDICT_KEYS = {"strategy", "timeframe", "strategy_hash", "lineage_id", "parent_run_id", "decision",
+VERDICT_SCHEMA = 2         # 2: the diagnostics block
+VERDICT_KEYS = {"schema", "strategy", "timeframe", "strategy_hash", "lineage_id", "parent_run_id", "decision",
                 "reasons", "dsr", "n_trials", "sr0", "parent_passed", "beats_parent_frac",
-                "holdout_status", "holdout_reason", "walkforward"}
+                "holdout_status", "holdout_reason", "walkforward", "diagnostics"}
 
 
 class JudgeRefused(Exception):
@@ -68,13 +71,15 @@ def verdict_path(cfg, strategy: str, tf: str, strategy_hash: str) -> Path:
 
 def write_verdict(cfg, j: dict) -> Path:
     """The proposer's only window on a judgement. Holdout outcome as status + fixed code only:
-    never a number computed from holdout data, never the holdout run's id."""
+    never a number computed from holdout data, never the holdout run's id. The diagnostics come
+    from a walk-forward run (None for a kill without one)."""
     wf = None
     if j["child_run_id"]:
         run_dir = db.run_row(cfg, j["child_run_id"])["run_dir"]
         wf = {"run_id": j["child_run_id"], "metrics": run_summary(run_dir).get("metrics"),
               "report": str(Path(run_dir) / "report.md")}
-    out = {k: j[k] for k in VERDICT_KEYS - {"walkforward", "reasons"}}
+    out = {"schema": VERDICT_SCHEMA}
+    out.update({k: j[k] for k in VERDICT_KEYS - {"schema", "walkforward", "reasons"}})
     out["reasons"] = j["verdict_reasons"] if j.get("verdict_reasons") is not None else j["reasons"]
     out["walkforward"] = wf
     p = verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"])
@@ -315,6 +320,12 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         except Exception:
             finish(cfg, jid)   # the verdict file must exist even when this step fails
             raise
+    try:                       # last: a failure here must not skip the edge or the supersede
+        db.set_diagnostics(cfg, jid, diagnostics(cfg, child["run_dir"], data="judged",
+                                                 earlier=db.earlier_runs(cfg, jid)), child["run_id"])
+    except Exception:
+        finish(cfg, jid)
+        raise
     return finish(cfg, jid)    # a promotion stays pending (awaiting_exam): only `lab exam` examines
 
 
