@@ -11,6 +11,7 @@ import pytest
 from perp_lab.engine.metrics import sharpe
 from perp_lab.plugins import PluginSource
 from perp_lab.runs import new_run_id, write_run
+from perp_lab.store import db
 from perp_lab.strategy import plugin_hash
 
 DAYS = pd.date_range("2022-07-01", periods=1461, freq="D", tz="UTC")
@@ -78,6 +79,7 @@ class StubValidate:
         verdict, oos = self.outcomes[name]
         rid = new_run_id()
         h = src.hash if src is not None else plugin_hash(name)
+        db.register_trial(cfg, name, h, tf)   # as the real validate_strategy does
         rec = {"run_id": rid, "strategy": name, "strategy_hash": h, "hypothesis": "h",
                "params": {}, "universe": symbols or cfg.symbols, "timeframes": [tf],
                "validation_mode": "walkforward", "status": verdict,

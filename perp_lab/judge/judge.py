@@ -244,6 +244,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         if parent_row is None:
             parent_row = run_parent(symbols)
 
+    db.register_trial(cfg, name, h, tf, attempt=True)   # plugin code is about to see real bars
     try:
         rec, _ = validate(cfg, name, tf, symbols, workers=workers,
                           parent_run_id=parent_row["run_id"] if parent_row else None, lineage_id=family, src=src)

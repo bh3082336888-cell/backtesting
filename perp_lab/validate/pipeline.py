@@ -9,6 +9,7 @@ import pandas as pd
 
 from perp_lab.plugins import PluginSource, require_timeframe
 from perp_lab.runs import new_run_id, repo_commit, verdict, write_run
+from perp_lab.store import db
 from perp_lab.validate.benchmarks import buy_and_hold, random_entry, regime_split
 from perp_lab.validate.montecarlo import coins_per_day, mc_drawdown
 from perp_lab.validate.sensitivity import sensitivity
@@ -84,6 +85,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     require_timeframe(src, tf)                  # a trial at a timeframe it doesn't declare: nothing runs
     rule = cfg["universe_rule"]                 # the report states the survivor bias: no rule, nothing runs
     rid = new_run_id()
+    db.register_trial(cfg, name, src.hash, tf)   # before plugin code sees real bars: a crash still counts
     wf = walkforward(cfg, src, tf, symbols, workers, cfg.runs_dir / rid / "sandbox_stderr")
     log.info("walkforward done; OOS Sharpe %.2f", wf.oos_summary["sharpe"])
     sens = sensitivity(cfg, wf, workers)

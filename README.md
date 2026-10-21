@@ -135,6 +135,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 |---|---|
 | Signal at close of t, fill at open of t+1 | `engine/backtest.py`, `tests/test_engine_costs.py` |
 | No lookahead in any plugin | `tests/test_lookahead.py` runs every file in `strategies/`, incl. a planted cheater that must fail |
+| A trial is registered before plugin code first runs on real bars, so a crash still counts | `store/db.py::register_trial`, `tests/test_trials.py` |
 | Holdout (`holdout_start`, a **fixed date**) unreadable without a minted, logged token | `holdout.py`, `data/store.py`, `tests/test_holdout.py` |
 | Funding charged at real settlement timestamps (4h/8h both handled), reduces isolated margin | `data/store.py::align_funding`, engine step 1 |
 | Stop beats target when both inside one bar; targets need trade-through | engine step 5 |

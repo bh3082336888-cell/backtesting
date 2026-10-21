@@ -23,7 +23,7 @@ Resolved by the 3b-1 sandbox: `docs/superpowers/specs/2026-10-17-plugin-sandbox-
 |---|---|
 | Holdout rationing | Global cap on reads **and** at most one read per family. The proposer sees pass/fail only. |
 | Promote rule | Child passes every absolute gate. If its parent also passed, the child must also beat the parent on a paired comparison of OOS daily returns. A failing parent never lowers the bar. |
-| Multiple testing | Deflated Sharpe Ratio gate. N counts trials store-wide, so starting new families doesn't reset it. |
+| Multiple testing | Deflated Sharpe Ratio gate. N counts trials store-wide, so starting new families doesn't reset it. A trial is registered before plugin code first runs on real bars, so N counts registered trials as well as recorded walk-forward runs: a run that crashes still counts. |
 | Holdout pass | Positive, and consistent with the child's own walk-forward record. |
 | Paper gate | Every strategy (hand-written included) needs a passed holdout exam to be approved for paper. |
 | Shape | A synchronous `lab judge` command plus a `perp_lab/judge/` package. No queue or daemon. |

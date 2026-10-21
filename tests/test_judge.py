@@ -11,6 +11,7 @@ from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, judge, lookahead_failures
 from perp_lab.store import db
+from perp_lab.strategy import plugin_hash
 from tests.judge_fixtures import (CHEATER, NOISE, STRONG, WEAK, WIDE_TEXT, StubValidate, add_plugin,
                                   plugins, series)  # noqa: F401
 from tests.conftest import REAL_PLUGINS, REPO, market_config
@@ -416,6 +417,33 @@ def test_a_plugin_error_in_the_walk_forward_is_a_recorded_kill(cfg, plugins, cap
     assert "Traceback: boom" in caplog.text
     assert db.read_table(cfg, db.judgements).shape[0] == 1
     assert "Traceback" not in Path(j["verdict_path"]).read_text()
+    assert db.trial_stats(cfg)[0] == 1
+
+
+def test_a_plugin_error_after_real_bars_raises_n(cfg, plugins):
+    err = PluginError("exception", "ValueError", "boom")
+    judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", err))
+    assert db.trial_stats(cfg)[0] == 1
+
+
+def test_a_harness_crash_after_real_bars_raises_n(cfg, plugins):
+    with pytest.raises(RuntimeError):
+        judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", RuntimeError("engine")))
+    assert db.trial_stats(cfg)[0] == 1 and db.read_table(cfg, db.judgements).empty
+
+
+def test_judging_the_same_bytes_again_adds_no_trial(cfg, plugins):
+    with pytest.raises(RuntimeError):
+        judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", RuntimeError("x")))
+    judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    assert db.trial_stats(cfg)[0] == 1
+    assert db.trial_attempts(cfg, plugin_hash("donchian_atr"), "4h") == 2
+
+
+def test_a_lookahead_kill_registers_no_trial(cfg, plugins):
+    add_plugin(plugins, "cheater", CHEATER)
+    judge(cfg, "cheater", "4h", validate=StubValidate({}))
+    assert db.trial_stats(cfg)[0] == 0 and db.read_table(cfg, db.trials).empty
 
 
 def test_a_plugin_error_in_a_child_with_a_parent_records_no_edge(cfg, plugins):

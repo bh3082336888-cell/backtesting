@@ -137,6 +137,19 @@ judgements = sa.Table(
     sa.UniqueConstraint("strategy_hash", "timeframe"),
 )
 
+# One row per (strategy bytes, timeframe) whose code has been run on real bars, written before the
+# first run so a crash still counts toward N. `attempts` counts judge calls, not walk-forward runs.
+trials = sa.Table(
+    "trials", md,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("strategy", sa.String(128), nullable=False),
+    sa.Column("strategy_hash", sa.String(64), nullable=False),
+    sa.Column("timeframe", sa.String(8), nullable=False),
+    sa.Column("attempts", sa.Integer, nullable=False, default=0, server_default="0"),
+    sa.Column("registered_at", sa.DateTime(timezone=True)),
+    sa.UniqueConstraint("strategy_hash", "timeframe"),
+)
+
 DECISIONS = {"promote", "kill"}
 HOLDOUT_STATUSES = {"n/a", "pending", "passed", "failed", "blocked", "withdrawn"}
 
@@ -428,19 +441,44 @@ def family_of(cfg, strategy: str) -> str | None:
     return j[0] if j else None
 
 
+def register_trial(cfg, strategy: str, strategy_hash: str, timeframe: str, *, attempt: bool = False) -> int:
+    """Register the (strategy_hash, timeframe) trial if it is missing; with `attempt`, also count one
+    judge attempt. Returns the attempts so far. Call before plugin code first sees real bars."""
+    where = sa.and_(trials.c.strategy_hash == strategy_hash, trials.c.timeframe == timeframe)
+    try:
+        with engine(cfg).begin() as c:
+            if c.execute(sa.select(trials.c.id).where(where)).first() is None:
+                c.execute(trials.insert().values(strategy=strategy, strategy_hash=strategy_hash,
+                                                 timeframe=timeframe, attempts=0, registered_at=_now()))
+    except sa.exc.IntegrityError:   # a racing process inserted it first: fall through to the update
+        pass
+    with engine(cfg).begin() as c:
+        if attempt:
+            c.execute(trials.update().where(where).values(attempts=trials.c.attempts + 1))
+        return int(c.execute(sa.select(trials.c.attempts).where(where)).scalar_one())
+
+
+def trial_attempts(cfg, strategy_hash: str, timeframe: str) -> int:
+    with engine(cfg).connect() as c:
+        r = c.execute(sa.select(trials.c.attempts).where(sa.and_(
+            trials.c.strategy_hash == strategy_hash, trials.c.timeframe == timeframe))).first()
+    return int(r[0]) if r else 0
+
+
 def trial_stats(cfg) -> tuple[int, float]:
-    """N = distinct (strategy_hash, timeframe) among walk-forward runs, store-wide; V = sample
-    variance of the daily Sharpes of the latest run of each (0.0 when N < 2). The judge uses N
+    """N = distinct (strategy_hash, timeframe) among walk-forward runs and registered trials,
+    store-wide; V = sample variance of the daily Sharpes of the latest run of each (0.0 when N < 2). The judge uses N
     only; V is informational (the Deflated Sharpe uses the no-edge spread, see gates)."""
     with engine(cfg).connect() as c:
         df = pd.read_sql(sa.select(runs.c.strategy_hash, runs.c.timeframe, runs.c.sharpe, runs.c.created_at)
                          .where(sa.and_(runs.c.validation_mode == "walkforward", runs.c.sharpe.isnot(None))), c)
+        reg = pd.read_sql(sa.select(trials.c.strategy_hash, trials.c.timeframe), c)
     df = df.dropna(subset=["strategy_hash", "timeframe"])
+    n = len(set(zip(df.strategy_hash, df.timeframe)) | set(zip(reg.strategy_hash, reg.timeframe)))
     if df.empty:
-        return 0, 0.0
+        return n, 0.0
     latest = df.sort_values("created_at").groupby(["strategy_hash", "timeframe"]).tail(1)
-    n = len(latest)
-    v = float((latest.sharpe / np.sqrt(365)).var(ddof=1)) if n >= 2 else 0.0
+    v = float((latest.sharpe / np.sqrt(365)).var(ddof=1)) if len(latest) >= 2 else 0.0
     return n, v
 
 
