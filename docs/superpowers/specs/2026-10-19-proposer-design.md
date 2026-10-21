@@ -1,12 +1,22 @@
 # Phase 3b-2: the proposer
 
-Status: draft, 2026-10-19. The goal and the record of ideas were agreed in conversation on
+Status: approved, 2026-10-21. The goal and the record of ideas were agreed in conversation on
 2026-10-18. On 2026-10-19 the user skipped the remaining questions ("write the design"), so every
-other decision below is the author's call and open to review. The ones most worth a second look
-are marked ★, and the last section lists them. An independent builder's review, checked against
-the code, raised nine questions and three contradictions. All are settled in this text. Revised
-the same day after the user said that their only model access is their Claude Code login: the
-model runs through Claude Code headless (`claude -p`), not the API.
+other decision below was the author's call. The ones most worth a second look are marked ★, and
+the last section lists them. An independent builder's review, checked against the code, raised
+nine questions and three contradictions. All are settled in this text. Revised the same day after
+the user said that their only model access is their Claude Code login: the model runs through
+Claude Code headless (`claude -p`), not the API. Revised again on 2026-10-21 after a second review
+against the code. The user approved folding in all of its findings, and with them the ★ calls:
+- a trial is counted when plugin code first runs on real bars;
+- the seeded ports share a family with the ideas they port;
+- the static context is current;
+- "signal before costs" needs a gross Sharpe above 0;
+- near-copies are measured on positions held over time;
+- the orchestrator doesn't import `perp_lab.judge`;
+- the harness is pinned for a session;
+- proposer promotions are examined only by an explicit `lab exam --id`;
+- the CLI version and the prompt size are checked.
 
 Scope: the loop that proposes strategies and gets them judged, the harness changes it needs, and
 where the user reads the result. The judge's bar is unchanged.
@@ -58,6 +68,9 @@ What was agreed on 2026-10-18:
 
 - The loop spends N on near-copies and raises the bar for every later idea.
 - The model sees holdout data, exam timing, or output from real-data runs outside a counted trial.
+- A trial is judged by harness code the human didn't mean to run, such as a feature branch checked
+  out mid-session.
+- A plugin reaches a holdout exam that no human chose.
 - A long bias riding the 2020–26 drift gets read as an edge. Buy and hold had a Sharpe of 0.72
   over the OOS span, and 1.20 over its first two years.
 - A week of runs leaves a record the user can't read.
@@ -71,13 +84,13 @@ From the 3a spec ("Requirements carried into the Phase 3b proposer spec") and th
 |---|---|
 | model training cutoff before `holdout_start` (2026-07-01) | config guard on a pinned model ID, checked against the model each call reports; the loop refuses to start otherwise (Model) |
 | no read access to `runs/` except `runs/verdicts/`, nor to `lab.db` or the holdout log | the model reads nothing; the orchestrator reads only verdict contents and its own state (import-boundary and path tests) |
-| never imports `perp_lab.judge` or `perp_lab.holdout` | AST test on `perp_lab/proposer/` |
+| never imports `perp_lab.judge` or `perp_lab.holdout` | AST test on `perp_lab/proposer/`. The Deflated Sharpe maths it needs for the bar moves to `perp_lab/dsr.py`, which `judge.gates` imports |
 | submits only by writing a plugin to `strategies/` and running `lab judge` as a subprocess | the orchestrator does exactly that; the model returns text only |
 | writes only to `strategies/`, never to `perp_lab/`, `config/`, `tests/`, `.venv/` | the orchestrator writes new files in `strategies/` and its own state dir, nothing else (test) |
-| no read access to `data/`, and can't `stat()` it | the model's process is `claude -p` with no tools, started in an empty directory outside the repo, and killed at once if its first message shows any tool; the orchestrator never touches `data/` (path guard in tests) |
+| no read access to `data/`, and can't `stat()` it | the model's process is `claude -p` with no tools, started in an empty directory outside the repo, and killed at once if its first message shows any tool but `StructuredOutput`; the orchestrator never touches `data/` (path guard in tests) |
 | sees only `lab judge`'s exit code and the verdict file, never stdout or stderr | judge output goes to a human-only log that no prompt reads |
 | learns of exam failures only as reason codes; no file timestamps, nothing that dates an exam | prompts render whitelisted verdict fields, no times; exam outcomes enter only at session start |
-| never runs `lab exam` or `lab withdraw` | no code path; the subprocess argv allowlist is `lab judge` and `lab preflight` |
+| never runs `lab exam` or `lab withdraw` | no code path; the subprocess argv allowlist is `lab judge` and `lab preflight`. Its promotions are examined only by a human's `lab exam --id` (Exams and the human) |
 | plugins keep `PARENT`, `params`, `grid` and `timeframes` literal | AST check before preflight |
 | assume it knows exactly how the lookahead check works (R1) | accepted, bounded by G3 (it can't pass an exam it peeks in); see Residuals |
 
@@ -90,15 +103,16 @@ From the 3a spec ("Requirements carried into the Phase 3b proposer spec") and th
 | Model | `claude-opus-5-5`, pinned by full ID. Its published training-data cutoff is June 2026 (Anthropic's models page, read 2026-10-19), so config sets 2026-06-30. The loop refuses to start unless the cutoff is before `holdout_start`, and refuses any call that reports another model. |
 | Autonomy | Unattended. Exams, withdrawals and paper approval stay human. |
 | Memory | Each proposal starts from a fresh context holding the record. The record is the model's only memory, so it can be audited. |
-| What a trial is ★ | As today, plus one rule: a kill for a plugin error after plugin code ran on real research bars counts as a trial. |
+| What a trial is ★ | Counted at the start: a (plugin version, timeframe) becomes a trial the moment its plugin code first runs on real research bars, however the run ends. |
 | Feedback | The verdict gains a `diagnostics` block computed from the walk-forward run only. |
-| Luck check before costs | The random-entry benchmark also runs before costs. "Signal before costs" means a gross OOS Sharpe above the gross random-entry p95. |
-| Random-entry sides ★ | Each random entry's side is drawn with the plugin's long share, not 50/50 (issue #17). This applies to both benchmarks, so it changes the existing gate too. |
+| Luck check before costs | The random-entry benchmark also runs before costs. "Signal before costs" means a gross OOS Sharpe above both 0 and the gross random-entry p95. |
+| Random-entry sides ★ | Each random entry's side is drawn with the plugin's long share, not 50/50 (issue #17). This applies to both benchmarks, so it changes the existing gate too: stricter for a plugin that leans with the drift, easier for one that leans against it. |
 | Ideas and timeframes ★ | An idea has one timeframe. A refinement's `PARENT` is the idea's champion. The same idea on another timeframe is a *port*: a new idea and a new family, allowed only from an idea whose best pile is signal before costs or close call. |
-| Near-copies ★ | Measured by the harness, never declared by the model. Before any trial, decisions on synthetic bars are compared with every earlier plugin's. After the trial, the verdict reports overlap with earlier OOS runs, and the record acts on it. A mirror (the same entries, opposite side) of any judged plugin is refused. |
+| Near-copies ★ | Measured by the harness, never declared by the model, on positions held over time rather than exact entry bars. Before any trial, positions on synthetic bars are compared with every earlier plugin's. After the trial, the verdict reports position overlap and daily-return correlation with earlier OOS runs, and the record acts on both. A mirror (the same positions, opposite side) of any judged plugin is refused. |
 | Preflight | `lab preflight FILE --tf TF`: metadata checks, the lookahead check and the overlap check, all on synthetic bars. No real data, nothing recorded, no trial. Its full report may go to the model. |
 | Pace ★ | 12 trials a day, 100 trials in total for the proposer, 4 judged plugins per idea, one judge at a time. |
-| Exams | A judge and an exam never run at once: a harness lock, in both directions, that can't starve exams. Exam outcomes reach the model only as status and code, only at session start. |
+| Exams ★ | A judge and an exam never run at once: a harness lock, in both directions, that can't starve exams. A proposer promotion is examined only when a human names it, `lab exam --id N`; a bare `lab exam`, for example from a scheduled job, skips it. Exam outcomes reach the model only as status and code, only at session start. |
+| Harness pin ★ | A session runs on one harness version. It refuses to start while `perp_lab/` or `config/` has uncommitted changes, records the commit, and stops if either changes during the session. |
 | Where the user reads it | A new dashboard page, Ideas, plus a markdown digest per session. |
 | State | Its own SQLite file and folders under `proposer/` (git-ignored), never `lab.db`. |
 
@@ -112,7 +126,7 @@ lab propose  (trusted harness code, perp_lab/proposer/)
   4. lab preflight <staged file> --tf TF   (sandbox, synthetic bars only)
                                                          -- fails -> back to the model (bounded)
   5. copies the plugin into strategies/
-  6. lab judge <name> --tf TF   (subprocess; stdout and stderr to a human-only log)
+  6. lab judge <name> --tf TF --proposer   (subprocess; stdout and stderr to a human-only log)
   7. reads the verdict file's contents
   8. classifies the outcome in code, updates the record, writes the digest line; next round
 ```
@@ -146,15 +160,18 @@ Rejected:
    just written.
 2. **Prompt** (see What the model sees).
 3. **Model call** → one proposal (see What the model returns). Validate it against the contract.
-   Invalid → send the errors back. At most `fixups_per_proposal` (3) fix-ups per proposal, shared
-   with step 5. After that the proposal is dropped: no trial, recorded as dropped.
+   Invalid → send the errors back. Every call is a fresh `claude -p`, so a fix-up resends the
+   round's prompt plus the rejected proposal and the errors. At most `fixups_per_proposal` (3)
+   fix-ups per proposal, shared with steps 5 and 6. After that the proposal is dropped: no trial,
+   recorded as dropped.
 4. **Idea rules**, in code:
    - A new idea needs a complete card and a title not already in the record.
    - A refinement names an existing idea that is open (see The record) and has judged plugins left
      (`proposals_per_idea`, 4). It keeps the idea's timeframe.
    - A port names an idea that is open or exhausted, whose best pile is signal before costs or
      close call, and a timeframe that idea has no port on yet. At most one port per idea and
-     timeframe.
+     timeframe. A promoted idea gets no port: its family is headed for an exam, and a port would
+     be a second family, with a second holdout read, for the same mechanism.
    - Exactly one timeframe per plugin, from `proposer.timeframes` (15m, 1h, 4h). The plugin's
      `timeframes` must be exactly that one. The judge refuses a child whose parent doesn't declare
      the child's timeframe, and a parent declaring two would get a walk-forward at the second: an
@@ -176,11 +193,14 @@ Rejected:
    its report goes back to the model, within the same fix-up budget.
 7. **Copy** to `strategies/<name>.py`, refusing if the name exists. From here the loop never edits
    or deletes the file: its git blob hash is the plugin version.
-8. **Judge**: `lab judge <name> --tf TF`, stdout and stderr to `proposer/logs/<name>.log`. Exit
-   codes:
+8. **Judge**: first the harness pin is checked (see Harness pin). If the UTC day has changed since
+   preflight, preflight runs again, so its lookahead span is the judge's. Then
+   `lab judge <name> --tf TF --proposer`, with stdout and stderr to `proposer/logs/<name>.log`.
+   Every call counts toward the day's quota (Pace), whatever its exit code:
    - 0: judged; go on to step 9.
    - 2: refused. Recorded as `broken`; preflight should have caught it.
-   - 1: infrastructure error. Recorded as `broken`; it counts toward the day's trials (Pace).
+   - 1: infrastructure error. Recorded as `broken`. If plugin code had reached real bars, the
+     judge registered the trial first (Trials), so N already counts it.
 9. **Read the verdict**, `runs/verdicts/<name>@<tf>@<hash10>.json`. The orchestrator computes the
    hash from the bytes it wrote. It stores the verdict's contents in the record.
 10. **Classify** in code (see The record), update the idea's status, append a line to the digest.
@@ -198,11 +218,23 @@ checks that none reaches the model.
    - the cost model (fees, the per-coin slippage formula, funding);
    - the universe and spans: 17 coins, research bars 2020-01-01 → 2026-07-01, OOS from 2020-07 in
      36 two-month folds;
-   - the gates, what a trial is, and the Deflated Sharpe bar table (Pace);
+   - the gates, what a trial is, and the Deflated Sharpe bar table (Pace), computed with
+     `perp_lab.dsr` when the prompt is built;
    - the piles and the idea rules;
-   - sections 1 and 2 of `docs/research/2026-10-18-strategy-research.md` (what the baselines taught,
-     the cost hurdle by timeframe), labelled as the human's notes on 8 coins from 2022;
+   - the human's lessons from the baselines: a checked-in excerpt of section 1 of
+     `docs/research/2026-10-18-strategy-research.md` at `perp_lab/proposer/context/lessons.md`,
+     labelled as notes on 8 coins from 2022. It keeps section 1's table and lessons 1–5 and drops
+     lesson 6 and any references to other sections. Lesson 6's bar (1.52 at N = 7) and
+     buy-and-hold figure are stale; this spec's table replaces the bar.
    - the output contract.
+
+   Section 2 (the cost hurdle) is left out. Its fill costs predate per-coin slippage, and the
+   cost model above replaces them. Its tables of move sizes and funding are statistics of real
+   bars computed outside any trial, which anti-goal 2 rules out.
+
+   The static context is built in code and checked when it is built. A test pins its size below
+   100 KB, because it goes on the command line (`--system-prompt`) and Linux refuses a single
+   argument over 128 KiB. Its sources come to about 24 KB today.
 2. **The record**, rendered by code. Open ideas appear in full: card, each proposal's whitelisted
    verdict fields and diagnostics, and the champion's source, so a refinement can be a real change
    rather than a rewrite from the card. Closed ideas get one line each: title, signal, and why
@@ -212,7 +244,10 @@ checks that none reaches the model.
 
 Whitelisted verdict fields: decision, reasons, OOS metrics, Deflated Sharpe, N, sr0, beats-parent
 fraction, holdout status and code, diagnostics. Run ids and report paths are left out: run ids
-encode a time. The record numbers proposals in order and dates nothing.
+encode a time. The record numbers proposals in order and dates nothing. For a verdict whose
+diagnostics come from a refresh on today's data (`diagnostics.data`), the prompt shows the refreshed
+numbers and gives the old judgement's decision only, so the model never sees two different OOS
+Sharpes for one plugin.
 
 Today's date is not hidden. It says nothing about when an exam ran beyond what the session-start
 snapshot already allows, and preflight reports carry synthetic-bar dates anyway. What must never
@@ -247,20 +282,34 @@ A new harness command. It runs plugin code only in the sandbox, and only on synt
    the current UTC day, not the hour (`_now()` floored to 00:00). Today it moves with the hour,
    and the synthetic bars change with the span's length. With the pin, a preflight pass means the
    judge's own check passes on the same UTC day.
-3. **Overlap**: the plugin's entry decisions on the synthetic bars at its defaults, against those
-   of every plugin in `strategies/` at any timeframe. Earlier plugins' decisions are cached by hash
-   under `proposer/cache/`. The measure is the Jaccard index of (bar, side). A "mirror" is a match
-   on (bar, −side). Near-copy means ≥ `overlap_max` (0.5).
-   - A near-copy of a closed idea's plugin is refused.
+3. **Overlap**, measured on positions held, not on entry bars. A one-bar delay or a small
+   parameter change shifts entries by a bar or two, which drops an exact-bar match close to 0 while
+   the trades stay nearly the same.
+   - **The bars.** A fixed synthetic market: one 15m path per synthetic symbol from
+     `synthetic_bars` (fixed seeds and start date, never the day-pinned holdout span), resampled to
+     1h and 4h. So plugins at every timeframe trade the same market.
+   - **The run.** Each plugin runs at its defaults, in the sandbox (`client.fresh_run`), at the
+     timeframe in question. Earlier plugins run at each timeframe they declare.
+   - **The measure.** Its trades become positions on an hourly grid: at each hour's close, per
+     symbol, +1, −1 or 0. Overlap is the Jaccard index of (symbol, hour, side) over the hours
+     either plugin holds a position. Mirror overlap is the same with one plugin's side flipped.
+     Near-copy means overlap ≥ `overlap_max` (0.5); a mirror means mirror overlap
+     ≥ `overlap_max`.
+   - **The cache.** Earlier plugins' positions are cached under `proposer/cache/`, keyed by
+     (plugin hash, timeframe, synthetic-market version).
+
+   The rules:
+   - A near-copy of a closed idea's plugin is refused, whatever the proposal's kind.
    - A near-copy of an open idea's plugin, proposed as a new idea, is refused with "propose it as a
      refinement (or a port) of X".
-   - A port is exempt from overlap with the idea it ports, and only that idea.
+   - A refinement is exempt from overlap with its own idea, and a port with the idea it ports.
+     Neither is exempt from any other idea.
    - A mirror of any judged plugin is refused. A mirror's OOS result is close to minus the
      original's, which has already been seen, so its walk-forward would test nothing. This is the
      research note's exclusion of candidate E (sections 4 and 10), applied to every idea.
    Synthetic bars are a proxy: their taker, open-interest and volume columns are random walks, so
    two plugins can differ there and still coincide on real data. The after-trial overlap (The
-   record) catches those.
+   record) catches those, on real OOS positions and daily returns.
 4. Prints a JSON report and exits 0 (passed), 3 (failed a check) or 1 (infrastructure error).
 
 Its tracebacks come only from runs on synthetic bars, so they carry no market data. A test
@@ -283,18 +332,27 @@ Store: `proposer/record.db`, SQLite through SQLAlchemy like `lab.db`.
 |---|---|
 | promoted | decision `promote` |
 | close call | killed, but net OOS Sharpe > 0 and above the net random-entry p95 (it failed on the Deflated Sharpe or a narrow island) |
-| signal before costs | not the above, and the gross OOS Sharpe is above the gross random-entry p95 |
+| signal before costs | not the above, and the gross OOS Sharpe is above both 0 and the gross random-entry p95 |
 | no signal | none of the above, with at least the gate's minimum OOS trades |
 | broken | killed for lookahead or a plugin error, refused, an infrastructure error, or too few OOS trades |
 
 A promotion the human withdraws (`holdout_status` `withdrawn`) is filed as a close call. The human
 judged the effect not established.
 
+The floor of 0 matters because random entries are side-matched (Random entry). Over the
+up-drifting 2020–26 span, a short-leaning plugin's random entries lose money, so their gross p95
+can fall below 0, and a plugin that lost money before costs would otherwise land in a progress
+pile. Close calls already require a net Sharpe above 0.
+
+A judged proposal can also be filed as a `duplicate` (After-trial overlap). Its pile then doesn't
+count toward its idea's best pile.
+
 **The champion** of an idea is the plugin a refinement names as `PARENT`. It is chosen among the
 idea's plugins that have a walk-forward run (never a broken one, since the judge refuses a child
 whose parent can't be run):
-- first, a promoted plugin whose exam is pending, so a refinement must beat it, and supersedes its
-  queued exam if promoted;
+- first, the idea's most recent promotion whose exam is pending, so a refinement must beat it, and
+  supersedes its queued exam if promoted. "Most recent" lets the record follow a supersede within a
+  session without re-reading the parent's verdict, which could reveal an exam's timing;
 - otherwise the best by pile, then by net OOS Sharpe.
 
 **An idea's status.** Open ideas take proposals; every other status is closed for good.
@@ -306,20 +364,40 @@ whose parent can't be run):
   trials.
 - `passed` or `failed`: its family's holdout read was spent on an exam with that outcome. After
   that, any promotion in the family is blocked as `family_examined`, so another trial could never
-  reach paper. A passed idea is the edge the user is after; the human takes it from there.
-- `duplicate`: the after-trial overlap folded it into a closed idea (below).
+  reach paper. A passed idea is the edge the user is after; the human takes it from there. This
+  status is kept per family (`lineage_id`), not per idea. When a family's read is spent, every
+  idea with a judged plugin in that family closes with the outcome. The seeded ports share a
+  family with the ideas they port (Seed).
+- `duplicate`: a new idea whose only judged proposals were filed as duplicates (below).
 
-**After-trial overlap.** When a new idea's verdict shows OOS signal overlap ≥ `overlap_max` with a
-closed idea's run, the new idea becomes a `duplicate` of it. Its trial is recorded as spent, and
-the closed idea stays closed. The same goes for a mirror match (symbol, signal time, opposite
-side) with any judged run. The verdict names overlapping runs by strategy and timeframe, which the
-record maps to ideas.
+**After-trial overlap.** Every judged proposal, whatever its kind, is checked against its verdict's
+overlap block (Verdict diagnostics). The verdict names runs by strategy and timeframe, which the
+record maps to ideas. The same exemptions apply as in preflight: a refinement against its own idea,
+a port against the idea it ports.
+- **A near-copy of a closed idea.** It is one when, against any run of that idea, either:
+  - its OOS position overlap is ≥ `overlap_max` (0.5); or
+  - its OOS daily-return correlation is ≥ `corr_max` (0.8).
+
+  The proposal is filed as a `duplicate` of that idea, and its pile doesn't count toward its own
+  idea's best pile. There is one exception: if the proposal's pile is better than the closed idea's
+  best pile, the overlap wasn't the whole story. The proposal then keeps its pile, and the overlap
+  is noted on its card.
+- **A mirror of any judged run.** It is one when its mirror overlap is ≥ `overlap_max`, or its
+  correlation is ≤ −`corr_max`. It is filed as a `duplicate` whatever its pile, since a sign
+  flip chosen after seeing the original's OOS result tests nothing.
+
+A new idea whose only judged proposals are duplicates gets the status `duplicate`. Its trials stay
+spent, and the closed idea stays closed.
 
 **Global holdout budget.** When any verdict shows `blocked` / `budget_spent`, no promotion can
 reach an exam any more. `lab propose` then refuses to start and says so.
 
-**One idea is one family at one timeframe**, once it has a champion. Ports and the seeded trials
-fit that rule.
+**One idea is one family at one timeframe**, once it has a champion, for every idea the proposer
+makes: a refinement joins its champion's family, and a port is a new root. The seeded ports are
+the exception. The judge keys a family by plugin name (`db.family_of`), so a plugin judged at two
+timeframes is one family. That makes `family:donchian_atr` hold both Donchian ideas (and
+`donchian_atr_wide`), and `family:bb_vwap_reversion` both BB-VWAP ideas. Hence the per-family
+exam statuses above.
 
 **Seed** ★: the record starts with six ideas from the seven judged human trials, which cover five
 plugin files in four families:
@@ -331,7 +409,8 @@ plugin files in four families:
 - `flow_shock_fade` at 1h.
 
 The two seeded ports only record how the human trials relate. The port rule (signal before costs
-or close call first) doesn't apply to them.
+or close call first) doesn't apply to them. Each shares its family with the idea it ports, because
+it is the same plugin file.
 
 Their cards come from the plugins' docstrings and, for `flow_shock_fade`, from the research note.
 Six of the seven were judged on the old data (8 coins from 2022, flat slippage, 24 folds). So
@@ -364,10 +443,15 @@ existing test that a verdict holds nothing derived from holdout data is extended
   top coin's and top fold's share of it (the research note's criterion 6).
 - **IS against OOS Sharpe.**
 - **Selection:** how often each grid combination was picked across the folds.
-- **Overlap:** the three earlier judged runs at this timeframe with the most OOS signal overlap
-  (Jaccard of symbol, signal time and side), the three with the most mirror overlap (the same with
-  the side flipped), and the three with the highest OOS daily-return correlation. Each entry names
-  the run's strategy and timeframe and gives the value.
+- **Overlap:** against the latest walk-forward run of every earlier judged (plugin version,
+  timeframe), at any timeframe, three lists:
+  - the three with the most OOS position overlap. This is preflight's measure, on real OOS
+    positions: the Jaccard index of (symbol, hour, side) held, on an hourly grid built from
+    `oos_trades`;
+  - the three with the most mirror overlap;
+  - the three with the largest absolute OOS daily-return correlation, given with its sign.
+
+  Each entry names the run's strategy and timeframe and gives the value.
 
 Left out ★: per-month or per-coin return series, trade lists, and the dates of the best and worst
 stretches. The model already knows the OOS span's market history from its training. The finer the
@@ -387,25 +471,48 @@ plugin version and timeframe are unchanged, so this is not a new trial. The verd
 fields are never changed: they stay those of the original judgement. `diagnostics.data` says
 whether the diagnostics come from the judged run or from a refresh on today's data.
 
-## Trials: one change ★
+## Trials: counted at the start ★
 
-A judgement killed for a plugin error after plugin code ran on real research bars now counts as a
-trial. `trial_stats` counts these alongside walk-forward runs. Without this rule, a plugin could
-crash on purpose depending on what it saw, which is a free, uncounted look at the OOS data, and
-the proposer could submit only what it had already checked. Lookahead kills stay uncounted: that
-check runs on synthetic bars only.
+Today a trial is a recorded walk-forward run: `trial_stats` counts the distinct (plugin version,
+timeframe) pairs among them. A run that ends in a plugin error records a kill but no run, and one
+that ends in a harness exception (`lab judge` exits 1) records nothing. Either way plugin code
+saw real research bars and N didn't move. A plugin could then fail on purpose depending on what it
+saw. That is a free, uncounted look at the OOS data, and the proposer could submit only what it
+had already checked.
 
-This needs issue #15 fixed first. A transient sandbox failure (`died`, `timeout`, `cpu_limit`
-caused by the machine) must be retried and, if it recurs only intermittently, become an
-infrastructure error with nothing recorded. Otherwise an honest plugin pays a trial for a machine
-hiccup. The builder settles the retry rule within #15.
+The rule: a (plugin version, timeframe) becomes a trial the moment its plugin code is about to run
+on real research bars, before the walk-forward's first batch.
+- `validate_strategy` writes a row to a new `trials` table: strategy, plugin hash, timeframe,
+  `registered_at`. It does this before the walk-forward starts, unless that pair is already a
+  trial.
+- `trial_stats` counts the distinct pairs in `trials` together with those among walk-forward runs.
+  Runs made before this change have no row.
+- So a plugin error, a sandbox death, a timeout and a harness crash after that point all count,
+  and so does a run interrupted by Ctrl-C.
+- Re-judging the same bytes at the same timeframe adds nothing, because N counts distinct pairs.
+- A lookahead kill stays uncounted: that check runs on synthetic bars only, before anything is
+  registered.
+- A parent re-run and a `lab verdict-refresh` re-run an existing pair, so they add nothing either.
+
+Issue #15 is still built first, for a different reason. Without it, a transient sandbox failure
+(`died`, `timeout`, `cpu_limit` caused by the machine) records a permanent plugin-error kill. N is
+right either way, since the trial was registered. But the record would file an honest plugin as
+broken, and its idea would lose one of its 4 plugins. The builder settles the retry rule within
+#15.
 
 ## Random entry: before costs, and side-matched ★
 
 - **Side-matched (#17).** Each random entry's side is drawn with the plugin's overall OOS long
-  share, not 50/50. Without this, a long-biased plugin beats random entries on drift alone, and an
-  optimising proposer will find that. The change applies to the existing net gate too. It makes
-  the gate stricter for long-biased plugins only.
+  share, not 50/50 (today `RandomEntry` draws `u < 0.5`, `perp_lab/strategy.py`). Without this, a
+  long-biased plugin beats random entries on drift alone, and an optimising proposer will find
+  that. The change applies to the existing net gate too, in both directions:
+  - over the up-drifting 2020–26 span it makes the gate stricter for a plugin that leans long;
+  - it makes the gate easier for a plugin that leans short, since its random entries lean short
+    too and lose to the drift.
+
+  That is the like-for-like comparison intended. The absolute floors keep a losing short-leaning
+  plugin out of the progress piles: a net Sharpe above 0 for the gate and for close calls, and a
+  gross Sharpe above 0 for signal before costs.
 - **Before costs.** The plugin's selected per-fold parameters are re-run with fees and slippage
   set to zero, and so is the random-entry benchmark. Funding is kept: it is part of holding the
   position, and a strategy may earn it. This is narrower than section 7's "gross", which was before
@@ -424,10 +531,13 @@ span), computed with `gates.dsr_from_moments`:
 
 Caps (config):
 - **`trials_per_day`: 12.** When the day's quota is used, the loop sleeps until the next 00:00
-  UTC. Infrastructure errors count toward it, so a plugin can't loop on them.
+  UTC. Every `lab judge` call counts toward it, whatever its exit code, so a plugin can't loop on
+  errors.
 - **`trials_total`: 100**, for the proposer's own trials. N would then be about 107 and the bar
   about 1.72. When it is reached, `lab propose` refuses to start. Raising it is the human's
-  decision.
+  decision. The orchestrator can't read the `trials` table, so it counts conservatively: every
+  judge call except a refusal (exit 2) and a lookahead kill. That is never less than the
+  proposer's share of N.
 - **`proposals_per_idea`: 4** judged plugins.
 - **`fixups_per_proposal`: 3.**
 - **Token caps per day**, input and output, from the CLI's reported `usage`. They keep the loop
@@ -442,23 +552,41 @@ Stop conditions:
 - 3 infrastructure errors in a row;
 - 5 proposals in a row dropped at the schema or preflight stage (the model is stuck);
 - the model call failing after retries (see Failures);
+- the harness pin changing (`harness_changed`, see Harness pin);
 - SIGINT or SIGTERM. The first one lets a running judge finish and then stops. The second kills it
   and records the proposal as `broken` / `interrupted`; it counts toward the day's quota.
 
-Rough size: a 1h judgement took about 2 minutes. The model call takes a few minutes. So 12 trials
-take a few hours of a day. With `--system-prompt`, Claude Code's own prompt is replaced: the probe's
-whole cached prefix was about 2,500 tokens. Per call, the static context is about 30–40k tokens
-(cached), and the
-record adds about 5k tokens per open idea (card, verdicts, diagnostics, the champion's source) and
-about 60 per closed idea. Output is 5–15k tokens with thinking. At about 1.5 calls per trial, a day of 12 trials is about 18 calls: roughly 1–2M input
-tokens (mostly cached) and 0.2M output. That share of a Claude Code plan's limits is a guess
-until measured. The first session's digest gives the real figure, and `trials_per_day` is the
-knob.
+Rough size:
+- **Time.** A 1h judgement took about 2 minutes, and a model call takes a few minutes. So 12
+  trials take a few hours of a day.
+- **Static context.** With `--system-prompt`, Claude Code's own prompt is replaced: the probe's
+  whole cached prefix was about 2,500 tokens. The static context's sources come to about 24 KB,
+  so it is about 10–15k tokens per call, cached.
+- **The record** adds about 5k tokens per open idea (card, verdicts, diagnostics, the champion's
+  source) and about 60 per closed idea.
+- **Output** is 5–15k tokens with thinking.
+- **A day.** At about 1.5 calls per trial, 12 trials are about 18 calls. With ten open ideas that
+  is roughly 1M input tokens (mostly cached) and 0.2M output.
+
+That share of a Claude Code plan's limits is a guess until measured. The first session's digest
+gives the real figure, and `trials_per_day` is the knob.
 
 ## Exams and the human
 
 - **Unchanged:** only a human or a scheduled job runs `lab exam`; only a human runs `lab withdraw`
   or approves paper. `perp_lab/proposer/` has no code path to any of them (import and argv tests).
+- **A proposer promotion is examined only when a human names it.** This is a harness change, in
+  code because a minted read can't be taken back (`lab withdraw` works only before the mint):
+  - `lab judge --proposer` records `judged_by = "proposer"` on the judgement. The orchestrator
+    always passes the flag; a human never needs it.
+  - A bare `lab exam`, as a scheduled job would run it, skips those judgements. It prints each
+    one as "awaiting review: `lab exam --id N`" and leaves it pending, spending nothing.
+  - `lab exam --id N` examines that one judgement, under today's budget rules. That is the human's
+    approval, given after reading the review packet.
+  - A refinement that supersedes a reviewed promotion has its own id, so the human always examines
+    exactly what they reviewed.
+  - The status and code in the verdict don't change (`pending` / `awaiting_exam`), so the model
+    learns nothing new.
 - **A judge and an exam never run at once.** This is a harness change. `lab judge`, `lab
   walkforward`, `lab backtest` and `lab preflight` hold a shared lock for their whole run, and
   `attempt_exam` takes it exclusively. Exams get writer preference, so a stream of judges can't
@@ -468,10 +596,25 @@ knob.
 - **What the model learns of exams:** `holdout_status` and its code, only from the session-start
   snapshot, and nothing with a time attached.
 - **Review before an exam:** for each promoted plugin, the Ideas page shows the criterion-6 checks
-  from its diagnostics (sides, top coin and top fold share). The human decides whether to withdraw
-  it before running `lab exam`.
+  from its diagnostics (sides, top coin and top fold share), and the exact `lab exam --id N`
+  command. The human either runs it or withdraws the promotion.
 - **Holdout reads:** 10 in total, one per family. Each new idea is a new family, so the loop can
-  make many. What reaches an exam is still the human's choice, through `lab withdraw`.
+  make many. What reaches an exam is the human's choice, through `lab exam --id` and
+  `lab withdraw`.
+
+## Harness pin ★
+
+The loop runs `lab judge` from the main checkout, where the editable install points. If the human
+checks out a branch or edits `perp_lab/` or `config/` during a week-long session, later trials
+would be judged by code or settings nobody chose for them, and the record wouldn't show it.
+- **At session start** `lab propose` refuses to start if `git status --porcelain -- perp_lab config`
+  shows any change. It records the commit (`git rev-parse HEAD`), the branch, and a hash of the
+  tracked files under `perp_lab/` and `config/`. The digest shows them, with a warning when the
+  branch isn't `main`.
+- **Before every preflight and judge** it checks the commit and the hash again. Any difference
+  stops the session with reason `harness_changed`. A judge already running finishes first.
+- **New plugins in `strategies/`** are untracked files outside both paths, so they never trip the
+  check.
 
 ## Model
 
@@ -519,6 +662,9 @@ claude -p --model claude-opus-5-5 --effort <proposer.effort>
   `init`) reported model `claude-opus-5-5`, tools `["StructuredOutput"]` (the `--json-schema`
   mechanism), no MCP servers, no skills and no slash commands. The reply arrived as validated JSON
   in `structured_output`, with `usage` and a `rate_limit_event` in the stream.
+- **The CLI updates itself.** It was 2.1.306 two days after the probe. Each session records
+  `claude --version` at start, and the digest shows it. The init check below is what holds
+  across versions.
 
 **Checked in code, not trusted to flags** (ADR 0006). The orchestrator reads the stream line by
 line. It kills the process the moment the `init` message shows any of these:
@@ -574,7 +720,8 @@ proposer:
   proposals_per_idea: 4
   fixups_per_proposal: 3
   max_grid_combos: 16
-  overlap_max: 0.5
+  overlap_max: 0.5                   # position overlap (Jaccard of symbol, hour, side)
+  corr_max: 0.8                      # OOS daily-return correlation, after the trial
   max_input_tokens_per_day: 4000000
   max_output_tokens_per_day: 500000
 ```
@@ -587,6 +734,8 @@ proposer:
 - `lab ideas`: print the record by pile.
 - `lab preflight FILE --tf TF`: also useful to humans.
 - `lab verdict-refresh STRATEGY --tf TF`: recompute an existing judgement's diagnostics.
+- `lab judge ... --proposer`: marks the judgement as the proposer's (Exams and the human).
+- `lab exam --id N`: examines one judgement. A bare `lab exam` skips the proposer's.
 
 ## Failures
 
@@ -601,14 +750,15 @@ proposer:
 - **Record or state-dir errors:** fail closed; the session stops.
 - **Orchestrator crash:** on the next start, a proposal whose plugin is in `strategies/` but whose
   verdict was never read gets `lab judge` again. If a judgement exists, this only rewrites the
-  verdict. If not, the same bytes are judged now. The model never saw the lost run, so it gains
-  nothing.
+  verdict. If not, the same bytes are judged now, and N doesn't move again since the pair is
+  already registered. The model never saw the lost run, so it gains nothing.
 
 ## Residuals
 
-- **Exit-code channel.** A plugin that could make `lab judge` exit 1 on purpose would get a bit
-  without a trial. This is bounded by the stop rule (3 in a row) and by counting these toward the
-  day's quota.
+- **Exit-code channel.** Mostly closed by counting trials at the start. A plugin that makes
+  `lab judge` exit 1 after reaching real bars still pays a trial. What is left is one bit (exit 1
+  or a verdict) on a trial that is already counted. The day's quota and the stop rule (3 in a
+  row) bound how often that can happen.
 - **R1 from 3b-1** (behaving differently under test) matters more with an optimising author. It is
   bounded by G3: such a plugin can't pass its exam. The 3b-1 follow-up "narrowing R1" (a streamed
   re-run over a secret stretch of real OOS data) is recommended before the first exam of a
@@ -630,24 +780,46 @@ allowance. The orchestrator's tests put a fake `claude` executable first on `PAT
 
 The orchestrator:
 - **Prompt sources:** sentinels planted in `lab.db`, a run's `report.md`, the holdout log, `data/`
-  and the judge's stdout never appear in anything sent to the model (the fake CLI's stdin and argv), over a full round.
+  and the judge's stdout never appear in anything sent to the model (the fake CLI's stdin and
+  argv), over a full round.
 - **No times:** distinctive times planted in verdict files' modification times, run ids, the
   holdout log and the judge's output never appear in anything sent to the model.
-- **Boundaries:** `perp_lab/proposer/` imports none of `perp_lab.judge`, `perp_lab.holdout`,
-  `perp_lab.store`, `perp_lab.data` (AST scan anchored on the repo root). Subprocesses are only
-  `lab judge` and `lab preflight`. Files are written only under `state_dir`, plus new files in
-  `strategies/`; nothing is overwritten.
+- **Boundaries:**
+  - `perp_lab/proposer/` imports none of `perp_lab.judge`, `perp_lab.holdout`, `perp_lab.store` or
+    `perp_lab.data` (an AST scan anchored on the repo root). It may import `perp_lab.dsr`.
+  - Subprocesses are only `lab judge` (always with `--proposer`), `lab preflight`, `claude` and
+    read-only `git`.
+  - Files are written only under `state_dir`, plus new files in `strategies/`; nothing is
+    overwritten.
+- **Static context:** under 100 KB. It holds no lesson 6 and nothing from section 2 of the
+  research note.
+- **Harness pin:** a dirty `perp_lab/` or `config/` refuses the start. A commit, or an edit to a
+  tracked file under either path, between rounds stops the session as `harness_changed`. A new
+  file in `strategies/` doesn't.
 - **Idea rules:** a closed idea refused; a refinement gets its idea's champion as `PARENT`. The
   champion is a pending promotion first, never a broken plugin; with no champion the plugin is a
   root. A `PARENT` written by the model refused; a port only from a signal-before-costs or
   close-call idea, once per timeframe, always a root; the one-timeframe rule, the grid cap and the
   import allowlist; the fix-up bound.
-- **Piles and statuses:** a table of verdict fixtures with their expected piles, including trial
-  7's verdict, which is no signal, and a withdrawn promotion, which is a close call. An exam
-  passed or failed closes the idea. An after-trial overlap or mirror match makes the new idea a
-  duplicate. `budget_spent` refuses the next start.
-- **Session:** the daily quota sleeps; the total cap refuses to start; the cutoff guard refuses;
-  SIGINT once and twice; 3 infrastructure errors stop.
+- **Piles and statuses:** a table of verdict fixtures with their expected piles. Among them:
+  - trial 7's verdict, which is no signal;
+  - a withdrawn promotion, which is a close call;
+  - a gross Sharpe of −0.2 above a gross random p95 of −0.3, which is no signal.
+
+  Status rules:
+  - an exam passed or failed closes every idea in that family, including a seeded port that
+    shares it;
+  - an after-trial overlap or correlation match files the proposal as a duplicate, unless its pile
+    beats the closed idea's;
+  - a mirror is filed as a duplicate whatever its pile;
+  - a new idea with only duplicates is `duplicate`;
+  - `budget_spent` refuses the next start.
+- **Champion:** with two pending promotions in an idea, the most recent one.
+- **Session:** the daily quota sleeps, and every exit code counts toward it. The total cap refuses
+  to start, counting exit 0 and 1 but not refusals or lookahead kills. Also tested: the cutoff
+  guard refuses; SIGINT once and twice; 3 infrastructure errors stop; a fix-up resends the prompt
+  with the rejected proposal and errors; a UTC day change between preflight and judge re-runs
+  preflight.
 - **The model call:**
   - the argv carries every flag in Model, the pinned model ID and the contract's schema;
   - the working directory is empty and outside the repo;
@@ -656,20 +828,38 @@ The orchestrator:
     slash command, or a later hook event kills the process before any output is used, and stops
     the session;
   - a usage-limit message sleeps until its reset;
-  - the alias `opus` in config refuses to start.
+  - the alias `opus` in config refuses to start;
+  - the session records `claude --version`.
 
 The harness:
 - **Preflight:** never calls `load_bars` and never opens `data/`. A lookahead plugin fails
   preflight and the judge alike. The dated span is the same at any hour of one UTC day. Overlap
-  catches a byte-different copy and a mirror, and exempts a port from its own idea only.
+  checks:
+  - it catches a byte-different copy, a copy whose entries are one bar late, a small parameter
+    change and a mirror;
+  - a 1h plugin and its 4h twin overlap on the shared synthetic market;
+  - a refinement is exempt from its own idea only, and a port from the idea it ports only;
+  - the cache key changes with the timeframe and the synthetic-market version.
 - **Verdict v2:** diagnostics present and computed from the walk-forward run, and still nothing
   derived from holdout data. A plugin-error message is absent from the verdict and kept in
   `lab.db`. A builtin exception type is kept; a plugin-defined one becomes `other`.
 - **Verdict refresh:** a refresh on today's data changes no decision field, adds no trial, and
   marks `diagnostics.data`.
-- **Trials:** a plugin-error kill after real bars raises N; a lookahead kill doesn't.
+- **Trials:** each of these after real bars raises N by one:
+  - a plugin-error kill;
+  - a harness exception;
+  - an interrupted run.
+
+  Judging the same bytes again doesn't raise it, and a lookahead kill doesn't. Runs from before
+  the change still count once each.
 - **Random entry:** side-matched draws follow the long share; the gross variant has zero fees and
   slippage.
+- **Verdict overlap:** position overlap and correlation are computed across timeframes from
+  `oos_trades` and `oos_daily`.
+- **Proposer exams:** a bare `lab exam` leaves a `--proposer` judgement pending and spends nothing.
+  `lab exam --id N` examines it. A human judgement is examined by a bare `lab exam` as today.
+- **DSR module:** `perp_lab.dsr` gives the same values as before the move. The bar table in this
+  spec is a test fixture: 1.24 at N = 7, 1.72 at N = 107, 2.00 at N = 1,000.
 - **Lock:** no exam starts while a judge runs, and no judge while an exam runs. A stream of judges
   doesn't starve a waiting exam.
 
@@ -683,14 +873,23 @@ The record shows the right piles and the digest is written.
 ## Suggested build order
 
 1. Harness changes, each its own commit with its tests:
+   - `perp_lab/dsr.py` (the Deflated Sharpe maths moved out of `judge.gates`);
    - #15 (transient failures);
-   - the trial-count rule and the verdict message rule;
+   - trials registered at the start, and the verdict message rule;
    - random entry side-matched and before costs;
-   - verdict diagnostics and `lab verdict-refresh`;
+   - verdict diagnostics, with position overlap and correlation, and `lab verdict-refresh`;
+   - `lab judge --proposer` and `lab exam --id`;
    - the judge–exam lock;
    - the dated lookahead span pinned to the day;
-   - `lab preflight`.
-2. The orchestrator: contract, record store, prompt builder, the `claude -p` caller with its init check, the loop, the CLI.
+   - `lab preflight`, with the shared synthetic market.
+2. The orchestrator:
+   - the contract;
+   - the record store;
+   - the static context and prompt builder;
+   - the harness pin;
+   - the `claude -p` caller with its init check;
+   - the loop;
+   - the CLI.
 3. The Ideas page and the digest.
 4. Seed the record and refresh the seven trials' diagnostics.
 
@@ -699,13 +898,18 @@ The record shows the right piles and the digest is written.
 - `2026-10-17-plugin-sandbox-design.md`, Failures, walk-forward plugin errors: the sentence "the
   message may reach the verdict ... No run is recorded, so it is not a trial" is replaced by this
   spec's two rules. The message stays out of the verdict, the exception type is kept only if
-  builtin, and the kill counts as a trial.
-- `2026-10-16-judge-design.md`, Who sees what: the public verdict also carries the `diagnostics`
-  block, computed from walk-forward data only.
+  builtin, and the trial was registered before the run began.
+- `2026-10-16-judge-design.md`:
+  - Who sees what: the public verdict also carries the `diagnostics` block, computed from
+    walk-forward data only.
+  - The trial definition: N counts registered trials as well as walk-forward runs.
+  - Exams: a bare `lab exam` skips proposer judgements, and `lab exam --id` examines one.
 - `tests/test_judge.py`: `test_a_plugin_error_in_the_walk_forward_is_a_recorded_kill` asserts the
   message in the reasons. It changes to assert the verdict's reduced reason, the full reason in
   `lab.db`, and N raised by one. Its neighbour for a child's plugin error gets the same N
   assertion.
+- `docs/research/2026-10-18-strategy-research.md` is unchanged. The proposer's excerpt of
+  section 1 is a separate checked-in file.
 
 ## Out of scope and follow-ups
 
@@ -724,11 +928,15 @@ The record shows the right piles and the digest is written.
 
 ## Calls made by the author, for review
 
-★ in the text. The ones that most change what gets built:
+★ in the text. The user approved all of them on 2026-10-21, with the review's changes folded in
+(items 2, 3, 9 and 10 changed; 12 and 13 are new). The ones that most change what gets built:
 1. **No tools for the model**, with a trusted orchestrator doing everything (Shape).
-2. **Plugin errors after real bars count as trials**, with #15 fixed first (Trials).
-3. **Random entry side-matched (#17)**, which changes the existing gate for every later trial.
-   The user had deferred #17 before the proposer existed.
+2. **A trial is counted at the start**, when plugin code first runs on real bars, however the run
+   ends (Trials). #15 is still built first so that a machine hiccup doesn't file an honest plugin
+   as broken.
+3. **Random entry side-matched (#17)**, which changes the existing gate for every later trial, in
+   both directions. "Signal before costs" also needs a gross Sharpe above 0. The user had
+   deferred #17 before the proposer existed.
 4. **Pace: 12 trials a day, 100 in total**, and 4 judged plugins per idea (Pace).
 5. **Feedback granularity:** aggregates only, no per-month or per-coin series (Verdict
    diagnostics).
@@ -740,8 +948,15 @@ The record shows the right piles and the digest is written.
    are removed by flags, and that is verified in code from each call's first message (Model).
 9. **Ideas are (family, timeframe) pairs.** A refinement keeps the timeframe and names the
    champion as `PARENT`. The same idea on another timeframe is a port: a new family, allowed only
-   from a signal-before-costs or close-call idea (Ideas and timeframes, The record).
-10. **Mirrors of any judged plugin are refused**, extending the research note's exclusion of E to
-    every idea (Preflight).
+   from a signal-before-costs or close-call idea (Ideas and timeframes, The record). The seeded
+   ports are the exception: they share their family, so exam statuses are kept per family.
+10. **Near-copies and mirrors are measured on positions held over time**, before the trial on a
+    shared synthetic market and after it on real OOS positions. After the trial, return
+    correlation counts too. Mirrors of any judged plugin are refused, extending the research
+    note's exclusion of E to every idea (Preflight, The record).
 11. **Closed for good:** an idea whose family's holdout read was spent takes no more trials, and a
     withdrawn promotion counts as a close call (The record).
+12. **Proposer promotions are examined only by `lab exam --id N`**; a bare or scheduled
+    `lab exam` skips them (Exams and the human).
+13. **The harness is pinned for a session**: a clean `perp_lab/` and `config/` to start, and a stop
+    on any change (Harness pin).
