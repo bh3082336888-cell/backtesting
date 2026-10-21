@@ -84,7 +84,7 @@ def write_verdict(cfg, j: dict) -> Path:
     out["walkforward"] = wf
     p = verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"])
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(out, indent=1, default=str))
+    p.write_text(json.dumps(out, indent=1, sort_keys=True, default=str))   # no dict's order says what came first
     return p
 
 

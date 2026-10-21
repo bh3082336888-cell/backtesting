@@ -628,6 +628,13 @@ def test_a_verdict_is_schema_2_with_diagnostics(cfg, plugins):
     assert db.get_judgement_by_id(cfg, j["id"])["diagnostics_run_id"] == j["child_run_id"]
 
 
+def test_a_verdict_file_writes_its_keys_in_sorted_order(cfg, plugins):
+    # insertion order could say what came first (a fold's combo, a step's result): no dict keeps it
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    v = json.loads(Path(j["verdict_path"]).read_text())
+    assert list(v) == sorted(v) and list(v["diagnostics"]) == sorted(v["diagnostics"])
+
+
 def test_overlap_lists_earlier_judgements_only(cfg, plugins):
     v = StubValidate({"donchian_atr": ("noise", NOISE), "donchian_atr_wide": ("candidate", STRONG)})
     a = judge(cfg, "donchian_atr", "4h", validate=v)

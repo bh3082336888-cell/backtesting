@@ -81,12 +81,13 @@ def _mean(x: pd.Series) -> float | None:
     return _num(x.mean()) if len(x) else None
 
 
-def _breadth(t: pd.DataFrame, n_folds: int) -> dict:
-    """How many coins and folds made money, and how much of the total the best one supplied."""
+def _breadth(t: pd.DataFrame, n_coins: int, n_folds: int) -> dict:
+    """How many coins and folds made money, out of all the run's coins and folds (one that never traded
+    made none), and how much of the total the best one supplied."""
     by_coin = t.groupby("symbol")["pnl"].sum() if len(t) else pd.Series(dtype=float)
     by_fold = t.groupby("fold")["pnl"].sum() if len(t) else pd.Series(dtype=float)
     total = float(t["pnl"].sum()) if len(t) else 0.0
-    return {"coins_net_pos": int((by_coin > 0).sum()), "coins": int(len(by_coin)),
+    return {"coins_net_pos": int((by_coin > 0).sum()), "coins": max(n_coins, int(len(by_coin))),
             "folds_net_pos": int((by_fold > 0).sum()), "folds": n_folds,
             "top_coin_share": _num(by_coin.max() / total) if total > 0 else None,
             "top_fold_share": _num(by_fold.max() / total) if total > 0 else None}
@@ -140,9 +141,10 @@ def diagnostics(cfg, run_dir: str | Path, *, data: str, earlier: list[dict]) -> 
         "exits": {"share": {str(k): float(v) for k, v in sorted(share.items())},
                   "mean_bars_held": _mean(t["bars_held"]) if len(t) else None},
         "regimes": regimes,
-        "breadth": _breadth(t, len(s.get("folds") or [])),
+        "breadth": _breadth(t, len(s.get("universe") or []), len(s.get("folds") or [])),
         "is_vs_oos": {"is_sharpe": _num((s.get("is_metrics") or {}).get("sharpe")),
                       "oos_sharpe": _num(m.get("sharpe"))},
-        "selection": dict(Counter(str(f.get("combo")) for f in s.get("folds") or [])),
+        # sorted: keys in fold order would tell which combo won the earliest fold
+        "selection": dict(sorted(Counter(str(f.get("combo")) for f in s.get("folds") or []).items())),
         "overlap": _overlap(t, _portfolio(run_dir), earlier),
     }

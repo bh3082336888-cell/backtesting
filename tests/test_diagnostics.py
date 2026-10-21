@@ -94,6 +94,20 @@ def test_diagnostics_from_a_recorded_run(cfg):
     assert d["overlap"] == {"position": [], "mirror": [], "correlation": []}
 
 
+def test_breadth_counts_every_coin_in_the_universe(cfg):
+    # a coin that never traded made nothing: a plugin trading 2 of 3 coins is not broad on all of them
+    idle = next(s for s in cfg.symbols if s not in ("BTCUSDT", "ETHUSDT"))
+    d = recorded_run(cfg, "r1", trades(), universe=["BTCUSDT", "ETHUSDT", idle])
+    b = diagnostics(cfg, d, data="judged", earlier=[])["breadth"]
+    assert (b["coins_net_pos"], b["coins"]) == (1, 3)
+
+
+def test_selection_keys_never_follow_fold_order(cfg):
+    # the folds pick n=20, n=10, n=20: first-seen order would put the first fold's winner first
+    d = diagnostics(cfg, recorded_run(cfg, "r1", trades()), data="judged", earlier=[])
+    assert list(d["selection"]) == sorted(d["selection"]) == ["n=10", "n=20"]
+
+
 def test_concentration_is_undefined_when_the_total_net_is_not_positive(cfg):
     losing = [r[:3] + (-abs(r[3]),) + r[4:] for r in TRADES]
     b = diagnostics(cfg, recorded_run(cfg, "r1", trades(losing)), data="judged", earlier=[])["breadth"]
@@ -134,7 +148,7 @@ def test_a_run_without_trades(cfg):
     assert d["sides"] == {"long": 0, "short": 0, "long_share": None, "long_gross_bp": None, "long_net_bp": None,
                           "short_gross_bp": None, "short_net_bp": None}
     assert d["exits"] == {"share": {}, "mean_bars_held": None} and d["regimes"] == {}
-    assert d["breadth"] == {"coins_net_pos": 0, "coins": 0, "folds_net_pos": 0, "folds": 3,
+    assert d["breadth"] == {"coins_net_pos": 0, "coins": 2, "folds_net_pos": 0, "folds": 3,
                             "top_coin_share": None, "top_fold_share": None}
     assert d["overlap"] == {"position": [], "mirror": [], "correlation": []}
     json.dumps(d, allow_nan=False)
