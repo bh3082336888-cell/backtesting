@@ -227,3 +227,39 @@ def test_a_stop_fills_with_its_bars_slippage():
     b.loc[b.index[8], ["low", "slippage"]] = [103.0, 0.002]
     t = run(b, {5: Signal("long", stop=104.0)}).trades[0]
     assert t["exit_reason"] == "stop" and t["exit_price"] == pytest.approx(104.0 * (1 - 0.002))
+
+
+def _slip_bars(n=30, slip=0.001):
+    b = ramp_bars(n)
+    b["slippage"] = slip
+    return b
+
+
+def test_a_zero_slippage_scale_fills_at_the_price_before_slippage():
+    b = _slip_bars()
+    ep = EngineParams(taker=0.0005, maker=0.0002, slippage=0.0002, equity0=10_000, leverage=3,
+                      risk=0.01, mmr=0.004, slippage_scale=0.0)
+    t = run(b, {5: Signal("long", stop=90.0), 10: EXIT}, ep).trades[0]
+    assert t["entry_price"] == b.open.iloc[6]
+    assert t["exit_price"] == b.open.iloc[11]
+    assert t["slippage"] == 0.0
+
+
+def test_a_trade_records_its_slippage_cost():
+    b = ramp_bars()
+    b["slippage"] = 0.0002
+    b.loc[b.index[10], "low"] = 80.0     # bar 10 trades through the stop at 90
+    r = run(b, {5: Signal("long", stop=90.0)})
+    t = r.trades[0]
+    assert t["exit_reason"] == "stop"
+    open_px = b.open.iloc[6]
+    assert t["slippage"] == pytest.approx(t["qty"] * open_px * 0.0002 + t["qty"] * 90.0 * 0.0002)
+
+
+def test_slippage_scale_one_changes_nothing():
+    b = _slip_bars()
+    sched = {5: Signal("long", stop=90.0), 10: EXIT}
+    base = run(b, sched)
+    one = run(b, sched, EngineParams(**{**EP.__dict__, "slippage_scale": 1.0}))
+    assert one.trades == base.trades
+    assert np.array_equal(one.equity, base.equity)

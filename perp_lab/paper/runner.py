@@ -173,7 +173,7 @@ class PaperBook:
             "notional": p["qty"] * p["entry_price"], "leverage": self.ep.leverage,
             "margin": p["qty"] * p["entry_price"] / self.ep.leverage, "stop_init": p["stop_init"],
             "target": p["target_init"], "exit_time": ts, "exit_price": px, "exit_reason": reason,
-            "fees": fees, "funding": p["funding"], "pnl_gross": pnl, "pnl": net,
+            "fees": fees, "slippage": 0.0, "funding": p["funding"], "pnl_gross": pnl, "pnl": net,
             "equity_before": p["W_before"], "pnl_pct": net / p["W_before"],
             "r_multiple": net / p["risk_amt"], "bars_held": nb, "regime": p["regime"],
             "level_time": p["level_time"], "level_stop": p["level_stop"], "level_target": p["level_target"],
