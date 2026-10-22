@@ -117,6 +117,30 @@ def _require_timeframe(src: PluginSource, tf: str, role: str = "") -> None:
         raise JudgeRefused(str(e)) from e
 
 
+def precheck(src: PluginSource, tf: str) -> None:
+    """The judge's refusals that read only plugin source, so no code runs and they hold on any machine:
+    `tf` declared; a PARENT that is a plugin in strategies/, isn't the plugin itself, isn't
+    byte-identical to it and declares `tf` too. `lab preflight` runs them on a staged file."""
+    _precheck(src, tf)
+
+
+def _precheck(src: PluginSource, tf: str) -> PluginSource | None:
+    """precheck; the parent's source as it was read and checked (None for a root), for the judge to run."""
+    _require_timeframe(src, tf)
+    parent = src.meta.parent
+    if parent is None:
+        return None
+    if parent == src.name:
+        raise JudgeRefused(f"{src.name} names itself as its PARENT")
+    if parent not in list_plugins():
+        raise JudgeRefused(f"PARENT '{parent}' is not a plugin in strategies/")
+    psrc = read_plugin(parent)
+    if psrc.hash == src.hash:
+        raise JudgeRefused(f"{src.name} is byte-identical to its parent {parent}; not a variation")
+    _require_timeframe(psrc, tf, "parent ")   # its walk-forward runs at tf too, and is a trial
+    return psrc
+
+
 def plugin_parent(name: str, src: PluginSource | None = None) -> str | None:
     """The PARENT a plugin declares, read from its source (`src` when already read)."""
     return (src or read_plugin(name)).meta.parent
@@ -214,19 +238,8 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     jc = cfg["judge"]
     src = read_plugin(name)              # read once: this src and h are what is checked, run and recorded
     h = src.hash
-    _require_timeframe(src, tf)
+    psrc = _precheck(src, tf)            # likewise the parent's; source only, so first, on any machine
     parent = src.meta.parent
-    psrc = None
-    if parent is not None:
-        if parent == name:
-            raise JudgeRefused(f"{name} names itself as its PARENT")
-        if parent not in list_plugins():
-            raise JudgeRefused(f"PARENT '{parent}' is not a plugin in strategies/")
-        psrc = read_plugin(parent)
-        if psrc.hash == h:
-            raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
-        _require_timeframe(psrc, tf, "parent ")   # its walk-forward runs at tf too, and is a trial
-    # The refusals above read only plugin source (no code runs), so they come first, on any machine.
     client.check(cfg)                    # no sandbox, no judging: SandboxUnavailable propagates
 
     existing = db.get_judgement(cfg, h, tf)

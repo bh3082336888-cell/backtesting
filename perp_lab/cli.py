@@ -7,6 +7,7 @@ import json
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -270,6 +271,27 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
     dsr = "—" if j["dsr"] is None else f"{j['dsr']:.2f}"
     typer.echo(f"Deflated Sharpe {dsr} (N={j['n_trials']})   holdout: {j['holdout_status']} ({j['holdout_reason']})")
     typer.echo(f"verdict: {j['verdict_path']}")
+
+
+@app.command("preflight")
+def preflight_cmd(file: Path = typer.Argument(..., help="the plugin file; its name is the file's stem"),
+                  tf: str = typer.Option(..., "--tf", help="the timeframe it would be judged at"),
+                  config: Optional[str] = CfgOpt):
+    """The judge's checks a plugin can fail before any trial, on synthetic bars only (nothing recorded):
+    metadata, lookahead, a mirror of a judged plugin, and position overlap with every other plugin.
+    Prints the JSON report; exits 0 (passed), 3 (failed a check) or 1 (no sandbox, or another error)."""
+    from perp_lab import preflight as pf
+    from perp_lab.sandbox.errors import SandboxUnavailable
+    try:
+        cfg = load_config(config)
+        with runlock.plugin_runs(cfg):   # outermost only: the lock is not re-entrant
+            report = pf.preflight(cfg, file, tf)
+    except Exception as e:
+        if not isinstance(e, SandboxUnavailable):
+            log.exception("preflight of %s failed", file)        # the traceback, for humans, on stderr
+        report = {**pf.blank_report(), "error": f"{type(e).__name__}: {e}"}
+    typer.echo(json.dumps(report))
+    raise typer.Exit(0 if report["ok"] else 1 if report["error"] else 3)
 
 
 @app.command("verdict-refresh")

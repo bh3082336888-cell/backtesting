@@ -127,3 +127,22 @@ sandbox:
   exam_cpu_hours: 6      # per symbol; the cost probe blocks an exam estimated above it
   max_output_mb: 64      # largest message a worker may send
   min_landlock_abi: 6
+
+# Phase 3b-2 proposer (docs/superpowers/specs/2026-10-19-proposer-design.md, "Config").
+proposer:
+  model: claude-opus-5-5             # full pinned ID, never an alias
+  model_training_cutoff: 2026-06-30  # Anthropic models page, "Jun 2026" (read 2026-10-19); < holdout_start
+  claude_bin: claude                 # the Claude Code CLI, logged in as the user
+  effort: high
+  state_dir: proposer                # record.db, staging/, logs/, transcripts/, sessions/, cache/
+  timeframes: [15m, 1h, 4h]
+  trials_per_day: 12
+  trials_total: 100
+  proposals_per_idea: 4
+  fixups_per_proposal: 3
+  max_grid_combos: 16
+  overlap_max: 0.5                   # position overlap (Jaccard of symbol, hour, side)
+  corr_max: 0.8                      # OOS daily-return correlation, after the trial
+  max_input_tokens_per_day: 4000000
+  max_output_tokens_per_day: 500000
+  call_timeout_s: 1800               # one model call's wall-clock limit; past it the call times out
