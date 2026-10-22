@@ -556,6 +556,20 @@ def test_lab_judge_never_runs_an_exam(cfg, plugins, monkeypatch):
     assert budget.reads_used(cfg) == 0
 
 
+def test_lab_judge_proposer_marks_the_judgement_and_a_bare_exam_skips_it(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    budget.init_log(cfg)
+    monkeypatch.setattr(jm, "judge", partial(jm.judge, validate=StubValidate(ROOT_STRONG)))
+    r = CliRunner().invoke(app, ["judge", "donchian_atr", "--proposer", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+    [j] = db.pending_judgements(cfg)
+    assert j["judged_by"] == "proposer"
+    r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+    assert f"donchian_atr @ 4h: awaiting review: lab exam --id {j['id']}" in r.output
+    assert budget.reads_used(cfg) == 0
+
+
 def test_a_retry_uses_the_window_stored_at_the_mint(cfg, plugins):
     budget.init_log(cfg)
     j = promoted(cfg)
