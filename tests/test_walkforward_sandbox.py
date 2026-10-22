@@ -205,7 +205,8 @@ def test_a_walk_forward_at_an_undeclared_timeframe_is_refused_before_anything_ru
         pipeline.validate_strategy(cfg, "donchian_atr_wide", "1h", workers=1)
     r = CliRunner().invoke(app, ["walkforward", "donchian_atr_wide", "--config", str(cfg.path)])   # default 1h
     assert r.exit_code == 2 and "refused: donchian_atr_wide declares timeframes 4h, not 1h" in r.output
-    assert not cfg.runs_dir.exists() or not any(cfg.runs_dir.iterdir())
+    # no run written (the lock files the command held while it refused are not a run)
+    assert not cfg.runs_dir.exists() or not [p for p in cfg.runs_dir.iterdir() if p.suffix != ".lock"]
     assert db.read_table(cfg, db.runs).empty
 
 

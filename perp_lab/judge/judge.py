@@ -21,6 +21,7 @@ from typing import Callable
 import pandas as pd
 
 from perp_lab.engine.metrics import summarize
+from perp_lab import runlock
 from perp_lab.judge import budget, gates
 from perp_lab.judge.diagnostics import diagnostics
 from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, window_end
@@ -495,7 +496,8 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
             return j
         if not (mine and alone):
             return {**j, "in_progress": True}
-        return _attempt(cfg, j, run, end_fn, cost_fn, data_fn)
+        with runlock.exam_exclusive(cfg):        # after the non-blocking locks: waits for running judges
+            return _attempt(cfg, j, run, end_fn, cost_fn, data_fn)
 
 
 def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable, data_fn: Callable) -> dict:

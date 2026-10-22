@@ -12,6 +12,7 @@ from typing import Optional
 import pandas as pd
 import typer
 
+from perp_lab import runlock
 from perp_lab.config import load_config
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -102,12 +103,13 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
     src = PluginSource.read(strategy)
     p = json.loads(params)
     per, trades = {}, []
-    for s in research_symbols(cfg, _syms(cfg, symbols), tf):
-        bars = load_bars(cfg, s, tf)
-        with _sandbox_required(), client.Batch(cfg, src, s, tf, bars) as batch:
-            r = batch.backtest({**src.meta.params, **p}, EngineParams.from_config(cfg, s))
-        per[s] = daily_returns(r.equity, r.time)
-        trades += r.trades
+    with runlock.plugin_runs(cfg):
+        for s in research_symbols(cfg, _syms(cfg, symbols), tf):
+            bars = load_bars(cfg, s, tf)
+            with _sandbox_required(), client.Batch(cfg, src, s, tf, bars) as batch:
+                r = batch.backtest({**src.meta.params, **p}, EngineParams.from_config(cfg, s))
+            per[s] = daily_returns(r.equity, r.time)
+            trades += r.trades
     tr = pd.DataFrame(trades)
     m = summarize(portfolio_returns(per), tr)
     rid = new_run_id()
@@ -135,7 +137,7 @@ def walkforward(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
     from perp_lab.validate.pipeline import validate_strategy
     cfg = load_config(config)
     try:
-        with _sandbox_required():
+        with runlock.plugin_runs(cfg), _sandbox_required():
             rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
                                             parent_run_id=parent_run)
     except UndeclaredTimeframe as e:            # a trial at a timeframe it doesn't declare: nothing ran
@@ -250,7 +252,7 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
     from perp_lab.judge.judge import judge as run_judge
     cfg = load_config(config)
     try:
-        with _sandbox_required():
+        with runlock.plugin_runs(cfg), _sandbox_required():
             j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers,
                         judged_by="proposer" if proposer else None)
     except JudgeRefused as e:
@@ -278,7 +280,7 @@ def verdict_refresh(strategy: str, tf: str = typer.Option(..., "--tf", help="the
     from perp_lab.judge.judge import JudgeRefused, refresh_verdict
     cfg = load_config(config)
     try:
-        with _sandbox_required():
+        with runlock.plugin_runs(cfg), _sandbox_required():
             j = refresh_verdict(cfg, strategy, tf)
     except JudgeRefused as e:
         typer.secho(f"refused: {e}", fg="red")
