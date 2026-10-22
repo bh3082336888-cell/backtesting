@@ -177,7 +177,7 @@ def lookahead_failures(cfg, src) -> list[str]:
     """The causality check at the synthetic bars' default dates, plus the dated check over the
     holdout up to DATED_AHEAD_DAYS past today. attempt_exam repeats the dated check over the
     actual exam window just before the read, so dates after the judged span are covered too."""
-    until = max(_now(), cfg.holdout_start) + pd.Timedelta(days=DATED_AHEAD_DAYS)
+    until = max(_now().floor("D"), cfg.holdout_start) + pd.Timedelta(days=DATED_AHEAD_DAYS)
     return list(dict.fromkeys(causality_failures(cfg, src) + dated_lookahead_failures(cfg, src, until)))
 
 

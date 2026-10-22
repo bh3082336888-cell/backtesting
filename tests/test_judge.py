@@ -12,6 +12,7 @@ from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.judge.diagnostics import diagnostics
 from perp_lab.judge.judge import (VERDICT_KEYS, JudgeRefused, TransientFailure, judge, lookahead_failures,
                                   verdict_path)
+from perp_lab.plugins import PluginSource
 from perp_lab.store import db
 from perp_lab.strategy import plugin_hash
 from tests.judge_fixtures import (CHEATER, NOISE, STRONG, WEAK, WIDE_TEXT, StubValidate, add_plugin,
@@ -329,6 +330,16 @@ def test_the_dated_check_covers_the_holdout_up_to_a_month_past_today(cfg, plugin
     add_plugin(plugins, "peek", date_peek(day))
     fails = lookahead_failures(cfg, PluginSource.read("peek"))
     assert any(f.startswith("holdout-dated: ") and "features at cut" in f for f in fails)
+
+
+def test_the_dated_span_is_the_same_at_any_hour_of_one_utc_day(cfg, plugins, monkeypatch):
+    seen = []
+    monkeypatch.setattr("perp_lab.judge.judge.dated_lookahead_failures", lambda c, s, until, **k: seen.append(until) or [])
+    monkeypatch.setattr("perp_lab.judge.judge.causality_failures", lambda *a, **k: [])
+    for t in ("2026-10-21 00:05", "2026-10-21 23:55"):
+        monkeypatch.setattr("perp_lab.judge.judge._now", lambda t=t: pd.Timestamp(t, tz="UTC"))
+        lookahead_failures(cfg, PluginSource.read("donchian_atr"))
+    assert seen[0] == seen[1] == pd.Timestamp("2026-11-20", tz="UTC")
 
 
 @pytest.mark.parametrize("name", REAL_PLUGINS)
