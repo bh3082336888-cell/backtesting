@@ -489,6 +489,10 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     time on this machine (`budget.exams_lock`, likewise): while another `lab exam` examines this
     judgement or any other (an exam can take hours), this returns it unchanged, marked
     `in_progress`, and spends nothing.
+
+    Only after those two non-blocking locks does it take `runlock.exam_exclusive`: it waits for the
+    running plugin commands (judges, walk-forwards) to finish, new ones queue behind it, and nothing
+    runs plugin code alongside the exam.
     """
     with budget.exam_lock(cfg, jid) as mine, budget.exams_lock(cfg) as alone:
         j = db.get_judgement_by_id(cfg, jid)     # read under the lock: an exam that just ended is final

@@ -1053,3 +1053,87 @@ def test_cli_withdraw_refuses_a_read_already_minted(cfg, plugins):
     crash(cfg, j["id"])
     r = CliRunner().invoke(app, ["withdraw", "donchian_atr", "--tf", "4h", "--reason", WHY, "--config", str(cfg.path)])
     assert r.exit_code == 2 and "refused:" in r.output and "holds its family's read" in r.output
+
+
+# --- the judge-exam lock (perp_lab/runlock.py): the exam's side ---
+
+def _pending(cfg):
+    budget.init_log(cfg)
+    j = judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(0.003), days=100)     # too short: stays pending
+    assert (j["holdout_status"], j["holdout_reason"]) == ("pending", "too_short")
+    return j
+
+
+def _shared_nb_fails(cfg):
+    import fcntl
+    with open(cfg.runs_dir / ".plugin-runs.lock", "a+") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return False
+        except BlockingIOError:
+            return True
+
+
+def test_an_exam_holds_the_run_lock_exclusively_while_it_runs(cfg, plugins):
+    j = _pending(cfg)
+    seen = []
+
+    def end_fn(cfg_, syms, tf):
+        seen.append(_shared_nb_fails(cfg_))
+        return cfg_.holdout_start + pd.Timedelta(days=200)
+
+    r = attempt_exam(cfg, j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=end_fn, cost_fn=no_cost)
+    assert r["holdout_status"] == "passed" and seen and all(seen)
+    assert not _shared_nb_fails(cfg)                    # released afterwards
+
+
+def test_an_exam_waits_for_a_running_judge(cfg, plugins):
+    from perp_lab import runlock
+    j = _pending(cfg)
+    started, finished = threading.Event(), threading.Event()
+    out = {}
+
+    def end_fn(cfg_, syms, tf):
+        started.set()
+        return cfg_.holdout_start + pd.Timedelta(days=200)
+
+    def exam():
+        out["r"] = attempt_exam(cfg, j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=end_fn,
+                                cost_fn=no_cost)
+        finished.set()
+
+    with runlock.plugin_runs(cfg):
+        t = threading.Thread(target=exam, daemon=True)
+        t.start()
+        assert not started.wait(0.3)                    # blocked behind the judge
+    assert started.wait(2)                              # it runs once the judge has left
+    assert finished.wait(30)                            # (the lookahead probe after it takes a few seconds)
+    t.join(2)
+    assert out["r"]["holdout_status"] == "passed"
+
+
+def test_early_returns_do_not_wait_for_a_running_judge(cfg, plugins):
+    # The exclusive lock comes after the non-blocking ones: an in_progress or already-decided
+    # judgement answers at once, even while a judge holds the shared lock.
+    from perp_lab import runlock
+    j = _pending(cfg)
+    done = {}
+
+    def call(key, jid):
+        done[key] = attempt_exam(cfg, jid, run=boom, data_fn=no_gaps, end_fn=end_after(200))
+
+    with runlock.plugin_runs(cfg):
+        with budget.exam_lock(cfg, j["id"]) as mine:
+            assert mine
+            t = threading.Thread(target=call, args=("busy", j["id"]), daemon=True)
+            t.start()
+            t.join(2)
+            assert not t.is_alive() and done["busy"]["in_progress"] is True
+    decided = attempt_exam(cfg, j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=end_after(200),
+                           cost_fn=no_cost)
+    assert decided["holdout_status"] == "passed"
+    with runlock.plugin_runs(cfg):
+        t = threading.Thread(target=call, args=("decided", decided["id"]), daemon=True)
+        t.start()
+        t.join(2)
+        assert not t.is_alive() and done["decided"]["holdout_status"] == decided["holdout_status"]

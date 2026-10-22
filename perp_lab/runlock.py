@@ -10,7 +10,11 @@ exam waits for R it holds T, so new shared callers queue behind it: a stream of 
 unattended proposer can't starve it. flock locks belong to the open file description, so each call
 opens its own files and the locks hold across threads as well as processes.
 
-`lab paper` is deliberately not covered (an accepted residual).
+Not covered, an accepted residual: `lab paper`, and the dashboard's paper page (dashboard/app.py
+replay_divergence, which reaches the sandbox) run plugin code outside this lock.
+
+The locks are not re-entrant: never nest `plugin_runs`, and never take it under `exam_exclusive`.
+A nested take deadlocks against itself as soon as an exam is waiting (it holds the turnstile).
 """
 from __future__ import annotations
 
