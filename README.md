@@ -19,7 +19,8 @@ lab paper RUN_ID                      # only runs approved for paper in the dash
 lab paper-refresh PAPER_RUN_ID        # recount regime changes → paper_eligible
 lab holdout-init                      # once: create the holdout read log (the judge refuses without it)
 lab judge donchian_atr_wide --tf 4h   # promote or kill against PARENT; a promotion waits for `lab exam`
-lab exam                              # the only command that runs holdout exams, and retries pending ones (budget rules apply)
+lab exam                              # the only command that runs holdout exams, and retries pending ones (budget rules apply); skips a proposer's promotions
+lab exam --id N                       # examine one judgement by id: the only way a proposer's promotion is examined
 pytest
 ```
 
@@ -157,6 +158,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | Harness lineage edges can't be overwritten by hand, nor a harness-judged run re-parented | `store/db.py::add_edge` |
 | Verdicts never carry holdout numbers | `judge/judge.py::write_verdict`, `tests/test_judge_exam.py` |
 | Trade charts read research candles only before `holdout_start`, without a token; holdout exams are never charted | `dashboard/trade_chart.py`, `tests/test_trade_chart.py` |
+| A proposer promotion is examined only by `lab exam --id` | `judge/judge.py::exam_pending`, `tests/test_judge_exam.py` |
 | A promotion can be withdrawn only while pending and holding no read (checked under the mint's lock), with a reason recorded in `withdrawals.jsonl`; its family keeps its read | `judge/judge.py::withdraw`, `judge/budget.py::no_read_held`, `tests/test_judge_exam.py` |
 | No holdout read over candles that didn't come from exchange files (ccxt-stitched, incomplete or unknown months wait as `incomplete_data`) | `judge/exam.py::window_data_problems`, `tests/test_exam.py`, `tests/test_judge_exam.py` |
 

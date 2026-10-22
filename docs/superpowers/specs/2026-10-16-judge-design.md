@@ -134,7 +134,9 @@ the dashboard shows judgements and the holdout budget.
     then re-raised (exit 1).
 
 `lab exam` retries every judgement with `holdout_status = pending`, oldest first, through the
-same budget checks.
+same budget checks, except those with `judged_by = "proposer"` (set by `lab judge --proposer`): a
+bare `lab exam` lists them as `awaiting review: lab exam --id N` and spends nothing. `lab exam --id N`
+examines that one judgement, whoever judged it; a minted read can't be taken back, so a human names it.
 
 ## Family identity
 

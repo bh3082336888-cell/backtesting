@@ -241,6 +241,8 @@ def holdout_init(config: Optional[str] = CfgOpt):
 
 @app.command()
 def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers: Optional[int] = None,
+          proposer: bool = typer.Option(False, "--proposer", help="mark the judgement as the proposer's: a bare "
+                                        "`lab exam` skips it, only `lab exam --id N` examines it"),
           config: Optional[str] = CfgOpt):
     """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam,
     which only `lab exam` runs."""
@@ -249,7 +251,8 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
     cfg = load_config(config)
     try:
         with _sandbox_required():
-            j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers)
+            j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers,
+                        judged_by="proposer" if proposer else None)
     except JudgeRefused as e:
         typer.secho(f"refused: {e}", fg="red")
         raise typer.Exit(2)
@@ -329,14 +332,22 @@ def withdraw(strategy: Optional[str] = typer.Argument(None, help="the plugin, by
 
 
 @app.command()
-def exam(config: Optional[str] = CfgOpt):
-    """Attempt the holdout exam for every pending promotion (budget rules apply). The only command
-    that runs exams; the proposer never runs it."""
-    from perp_lab.judge.judge import exam_pending
-    done = exam_pending(load_config(config))
+def exam(judgement: Optional[int] = typer.Option(None, "--id", help="examine this one judgement, whoever judged it"),
+         config: Optional[str] = CfgOpt):
+    """Attempt the holdout exam for every pending promotion (budget rules apply), except a proposer's:
+    those wait for `lab exam --id N`. The only command that runs exams; the proposer never runs it."""
+    from perp_lab.judge.judge import JudgeRefused, exam_pending
+    try:
+        done = exam_pending(load_config(config), only_id=judgement)
+    except JudgeRefused as e:
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(2)
     if not done:
         typer.echo("no pending exams")
     for j in done:
+        if j.get("awaiting_review"):
+            typer.echo(f"{j['strategy']} @ {j['timeframe']}: awaiting review: lab exam --id {j['id']}")
+            continue
         if j.get("in_progress"):
             typer.echo(f"{j['strategy']} @ {j['timeframe']}: in progress elsewhere (another `lab exam` is running)")
             continue

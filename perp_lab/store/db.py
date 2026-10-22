@@ -139,6 +139,7 @@ judgements = sa.Table(
     # judged run, or a later walk-forward run of the same plugin version on today's data (a refresh).
     sa.Column("diagnostics", sa.JSON),
     sa.Column("diagnostics_run_id", sa.String(64)),
+    sa.Column("judged_by", sa.String(16)),   # "proposer" for an unattended judgement; null for a human's
     sa.UniqueConstraint("strategy_hash", "timeframe"),
 )
 
@@ -171,6 +172,7 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("judgements", "verdict_reasons", "JSON"),
     ("judgements", "diagnostics", "JSON"),
     ("judgements", "diagnostics_run_id", "VARCHAR(64)"),
+    ("judgements", "judged_by", "VARCHAR(16)"),
 ]
 
 

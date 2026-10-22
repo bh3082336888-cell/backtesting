@@ -209,7 +209,7 @@ def supersede(cfg, parent: str, tf: str, family: str) -> None:
 
 
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
-          validate: Callable = validate_strategy) -> dict:
+          validate: Callable = validate_strategy, judged_by: str | None = None) -> dict:
     jc = cfg["judge"]
     src = read_plugin(name)              # read once: this src and h are what is checked, run and recorded
     h = src.hash
@@ -237,7 +237,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if fails:
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
-            "parent_run_id": None, "lineage_id": family, "decision": "kill",
+            "parent_run_id": None, "lineage_id": family, "decision": "kill", "judged_by": judged_by,
             "reasons": [f"lookahead: {f}" for f in fails], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
 
@@ -271,7 +271,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
             raise TransientFailure(e.kind) from e
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
-            "parent_run_id": None, "lineage_id": family, "decision": "kill", "reasons": [e.reason()],
+            "parent_run_id": None, "lineage_id": family, "decision": "kill", "judged_by": judged_by, "reasons": [e.reason()],
             "verdict_reasons": [e.public_reason()], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
     child = db.run_row(cfg, rec["run_id"])
@@ -307,7 +307,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     jid = db.record_judgement(cfg, {
         "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": child["run_id"],
         "parent_run_id": parent_row["run_id"] if parent_row else None, "lineage_id": family,
-        "decision": decision, "reasons": reasons, "dsr": d["dsr"], "n_trials": n, "sr0": d["sr0"],
+        "decision": decision, "judged_by": judged_by, "reasons": reasons, "dsr": d["dsr"], "n_trials": n, "sr0": d["sr0"],
         "parent_passed": parent_passed, "beats_parent_frac": frac,
         "holdout_status": "pending" if decision == "promote" else "n/a",
         "holdout_reason": "awaiting_exam" if decision == "promote" else "n/a"})
@@ -613,11 +613,19 @@ def withdraw(cfg, jid: int, reason: str) -> dict:
     return finish(cfg, jid)
 
 
-def exam_pending(cfg, **kw) -> list[dict]:
+def exam_pending(cfg, only_id: int | None = None, **kw) -> list[dict]:
     """Retry every pending exam, oldest first; one crashing exam never blocks the rest. While
-    another `lab exam` is examining, each comes back unchanged, marked `in_progress`."""
+    another `lab exam` is examining, each comes back unchanged, marked `in_progress`.
+
+    A proposer's promotion is examined only when a human names it (`only_id`): a minted read can't
+    be taken back, so a bare run lists it as `awaiting_review` and spends nothing."""
+    if only_id is not None and db.get_judgement_by_id(cfg, only_id) is None:
+        raise JudgeRefused(f"no judgement with id {only_id}")
     out = []
-    for j in db.pending_judgements(cfg):
+    for j in db.pending_judgements(cfg) if only_id is None else [{"id": only_id}]:
+        if only_id is None and j.get("judged_by") == "proposer":
+            out.append({**j, "awaiting_review": True})
+            continue
         try:
             out.append(attempt_exam(cfg, j["id"], **kw))
         except Exception as e:

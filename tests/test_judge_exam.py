@@ -326,6 +326,57 @@ def test_cli_exam_with_nothing_pending(cfg):
     assert r.exit_code == 0 and "no pending exams" in r.output
 
 
+def _proposer_promotion(cfg):
+    budget.init_log(cfg)
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG), judged_by="proposer")
+    assert j["decision"] == "promote"
+    return j["id"]
+
+
+def test_a_proposer_judgement_records_who_judged(cfg, plugins):
+    jid = _proposer_promotion(cfg)
+    assert db.get_judgement_by_id(cfg, jid)["judged_by"] == "proposer"
+    j = judge(cfg, "donchian_atr_wide", "4h", validate=StubValidate(FAMILY))
+    assert db.get_judgement_by_id(cfg, j["id"])["judged_by"] is None
+
+
+def test_a_bare_exam_skips_a_proposer_promotion_and_spends_nothing(cfg, plugins):
+    jid = _proposer_promotion(cfg)
+    out = exam_pending(cfg, run=boom, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
+    assert len(out) == 1 and out[0]["id"] == jid and out[0]["awaiting_review"]
+    assert budget.reads_used(cfg) == 0
+    got = db.get_judgement_by_id(cfg, jid)
+    assert (got["holdout_status"], got["holdout_reason"]) == ("pending", "awaiting_exam")
+
+
+def test_exam_by_id_examines_a_proposer_promotion(cfg, plugins):
+    jid = _proposer_promotion(cfg)
+    out = exam_pending(cfg, only_id=jid, run=stub_run(0.003), data_fn=no_gaps, end_fn=end_after(200),
+                       cost_fn=no_cost)
+    assert len(out) == 1 and out[0]["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_a_bare_exam_still_examines_a_human_promotion(cfg, plugins):
+    budget.init_log(cfg)
+    judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG))
+    out = exams(cfg, stub_run(0.003))
+    assert out[0]["holdout_status"] == "passed" and not out[0].get("awaiting_review")
+
+
+def test_exam_by_id_of_an_unknown_judgement_is_refused(cfg):
+    budget.init_log(cfg)
+    r = CliRunner().invoke(app, ["exam", "--id", "99", "--config", str(cfg.path)])
+    assert r.exit_code == 2 and "no judgement with id 99" in r.output
+
+
+def test_cli_exam_prints_the_review_command(cfg, plugins):
+    jid = _proposer_promotion(cfg)
+    r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
+    assert r.exit_code == 0
+    assert f"donchian_atr @ 4h: awaiting review: lab exam --id {jid}" in r.output
+    assert budget.reads_used(cfg) == 0
+
+
 @pytest.fixture
 def fresh_wf_caches():
     wfm._cfg.cache_clear()
@@ -612,7 +663,7 @@ def test_lab_exam_prints_why_the_data_is_refused(cfg, monkeypatch):
     import perp_lab.judge.judge as jm
     waiting = {"strategy": "s", "timeframe": "1h", "holdout_status": "pending", "holdout_reason": "incomplete_data",
                "detail": [CCXT_MONTH, "run `lab backfill` ..."]}
-    monkeypatch.setattr(jm, "exam_pending", lambda cfg: [waiting])
+    monkeypatch.setattr(jm, "exam_pending", lambda cfg, only_id=None: [waiting])
     r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
     assert r.exit_code == 0 and "s @ 1h: pending (incomplete_data)" in r.output
     assert f"  {CCXT_MONTH}" in r.output and "lab backfill" in r.output
