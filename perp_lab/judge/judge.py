@@ -329,6 +329,39 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     return finish(cfg, jid)    # a promotion stays pending (awaiting_exam): only `lab exam` examines
 
 
+def _todays_rules(run_dir) -> bool:
+    """A run made under today's benchmark rules: a before-costs pass and a side-matched random entry."""
+    s = run_summary(run_dir)
+    return bool(s.get("before_costs")) and (s.get("random_entry") or {}).get("long_share") is not None
+
+
+def refresh_verdict(cfg, name: str, tf: str, *, validate: Callable = validate_strategy) -> dict:
+    """Recompute a judgement's diagnostics from a walk-forward run on today's data and rules. Decision
+    fields are never written, and the (plugin version, timeframe) pair is already a trial, so N does not
+    move. A kill that has no run (lookahead, plugin error) is refused: making one would run its plugin on
+    real bars with nothing recorded about what it saw."""
+    src = read_plugin(name)
+    j = db.get_judgement(cfg, src.hash, tf)
+    if j is None:
+        raise JudgeRefused("no judgement of this plugin version at tf")
+    if j["child_run_id"] is None:
+        raise JudgeRefused("this judgement has no walk-forward run (a kill before one); nothing to refresh")
+    client.check(cfg)
+    universe = cfg.symbols
+    row = db.latest_wf_run(cfg, name, tf, src.hash, universe, data_id=data_id(data_identity(cfg, universe)))
+    if row is None or not _todays_rules(row["run_dir"]):
+        try:
+            rec, _ = validate(cfg, name, tf, lineage_id=j["lineage_id"], src=src)
+        except PluginError as e:
+            log.warning("%s failed in the sandbox: %s\n%s", name, e.reason(), e.stderr.decode("utf-8", "replace"))
+            raise JudgeRefused(f"{name} failed in the sandbox: {e.public_reason()}") from e
+        row = db.run_row(cfg, rec["run_id"])
+    data = "judged" if row["run_id"] == j["child_run_id"] else "refreshed"
+    db.set_diagnostics(cfg, j["id"], diagnostics(cfg, row["run_dir"], data=data,
+                                                 earlier=db.earlier_runs(cfg, j["id"])), row["run_id"])
+    return finish(cfg, j["id"])
+
+
 HOLDOUT_BOOT = 10_000
 BACKFILL_HINT = ("run `lab backfill --tfs {tf}` (it rebuilds every incomplete month from data.binance.vision, a "
                  "closed one from its monthly file and the current one from daily files up to yesterday), then "

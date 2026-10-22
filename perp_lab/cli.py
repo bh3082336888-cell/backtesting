@@ -267,6 +267,24 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
     typer.echo(f"verdict: {j['verdict_path']}")
 
 
+@app.command("verdict-refresh")
+def verdict_refresh(strategy: str, tf: str = typer.Option(..., "--tf", help="the timeframe it was judged at"),
+                    config: Optional[str] = CfgOpt):
+    """Recompute a judgement's diagnostics from a walk-forward run on today's data and rules. The decision
+    is unchanged and no trial is added."""
+    from perp_lab.judge.judge import JudgeRefused, refresh_verdict
+    cfg = load_config(config)
+    try:
+        with _sandbox_required():
+            j = refresh_verdict(cfg, strategy, tf)
+    except JudgeRefused as e:
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(2)
+    typer.echo(f"{j['strategy']} @ {j['timeframe']}: diagnostics from {j['diagnostics']['data']} data "
+               f"(run {j['diagnostics_run_id']})")
+    typer.echo(f"verdict: {j['verdict_path']}")
+
+
 @app.command()
 def withdraw(strategy: Optional[str] = typer.Argument(None, help="the plugin, by the name it was judged under"),
              tf: Optional[str] = typer.Option(None, "--tf", help="the timeframe it was judged at"),
