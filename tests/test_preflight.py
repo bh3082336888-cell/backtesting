@@ -87,7 +87,7 @@ class Quiet(Strategy):
         return HOLD
 '''
 
-KEYS = {"ok", "meta", "lookahead", "overlap", "mirror_of", "error"}
+KEYS = {"ok", "meta", "lookahead", "overlap", "mirror_of", "skipped", "error"}
 ENTRY_KEYS = {"strategy", "timeframe", "overlap", "mirror", "judged"}
 
 
@@ -146,7 +146,7 @@ def test_preflight_passes_a_sound_plugin_and_reports_its_nearest(cfg, plugins, t
     code, report = run_cli(cfg, stage(tmp_path, "sound", SOUND), "4h")
     assert code == 0 and set(report) == KEYS
     assert report["ok"] is True and report["error"] is None
-    assert report["meta"] == report["lookahead"] == report["mirror_of"] == []
+    assert report["meta"] == report["lookahead"] == report["mirror_of"] == [] and report["skipped"] == {}
     top = report["overlap"][0]
     assert set(top) == ENTRY_KEYS and (top["strategy"], top["timeframe"]) == ("donchian_atr", "4h")
     assert top["overlap"] >= 0.5 and top["mirror"] < 0.1 and top["judged"] is False
@@ -162,11 +162,22 @@ def test_preflight_passes_a_sound_plugin_and_reports_its_nearest(cfg, plugins, t
 def test_preflight_fails_a_lookahead_plugin_as_the_judge_does(cfg, plugins, tmp_path):
     code, report = run_cli(cfg, stage(tmp_path, "cheater", CHEATER), "4h")
     assert code == 3 and report["ok"] is False and report["error"] is None
-    assert report["lookahead"] and report["meta"] == [] and report["overlap"] == []
+    assert report["lookahead"] and report["meta"] == [] and report["skipped"] == {}   # the overlap ran too
+    cache = tmp_path / "proposer" / "cache" / "positions"
+    assert (cache / f"{PluginSource.from_text('cheater', CHEATER).hash}@4h@v{MARKET_VERSION}.parquet").exists()
     assert nothing_recorded(cfg)
     add_plugin(plugins, "cheater", CHEATER)
     j = judge(cfg, "cheater", "4h", validate=StubValidate({}))      # the same UTC day: the same span
     assert j["decision"] == "kill" and j["reasons"] == [f"lookahead: {f}" for f in report["lookahead"]]
+
+
+@pytest.mark.sandbox
+def test_a_refused_plugin_is_still_checked_for_lookahead_and_overlap(cfg, plugins, tmp_path):
+    hourly = SOUND.replace('timeframes = ["1h", "4h"]', 'timeframes = ["1h"]')
+    code, report = run_cli(cfg, stage(tmp_path, "hourly", hourly), "4h")
+    assert code == 3 and report["meta"] == ["hourly declares timeframes 1h, not 4h"]
+    assert report["lookahead"] == [] and report["skipped"] == {} and report["error"] is None   # it ran: causal
+    assert entry(report, "donchian_atr", "4h")["overlap"] >= 0.5                                # and a near-copy
 
 
 @pytest.mark.sandbox
@@ -316,49 +327,76 @@ def test_an_earlier_plugin_that_fails_holds_nothing_and_is_logged(cfg, plugins, 
 def test_a_plugin_that_fails_on_the_synthetic_market_fails_preflight(cfg, plugins, tmp_path, monkeypatch):
     calls = stub_runs(monkeypatch, {("cand", "4h"): PluginError("exception", "ZeroDivisionError", "boom")})
     report = pf.preflight(cfg, stage(tmp_path, "cand", SOUND), "4h")
-    assert report["ok"] is False and report["overlap"] == [] and calls == [("cand", "4h")]
-    assert report["lookahead"] == ["synthetic market @ 4h: plugin_error: exception: ZeroDivisionError: boom"]
+    assert report["ok"] is False and report["overlap"] == report["lookahead"] == [] and calls == [("cand", "4h")]
+    assert report["skipped"] == {"overlap": "the plugin fails on the synthetic market @ 4h: "
+                                            "plugin_error: exception: ZeroDivisionError: boom"}
 
 
-def test_a_lookahead_failure_skips_the_overlap(cfg, plugins, tmp_path, monkeypatch):
-    calls = stub_runs(monkeypatch, {})
+def test_a_lookahead_failing_near_copy_still_reports_its_overlap_and_mirror_of(cfg, plugins, tmp_path,
+                                                                              monkeypatch):
+    # The model hears every defect at once: a peeking near-copy, and a mirror, in one report.
+    stub_runs(monkeypatch, {("cand", "4h"): held(100), ("donchian_atr", "4h"): held(100),
+                            ("donchian_atr_wide", "4h"): held(100, side=-1)})
     monkeypatch.setattr(pf, "lookahead_failures", lambda c, s: ["defaults: AssertionError: features at cut 400"])
+    judged(cfg, "donchian_atr_wide", "4h")
     report = pf.preflight(cfg, stage(tmp_path, "cand", SOUND), "4h")
     assert report["ok"] is False and report["lookahead"] == ["defaults: AssertionError: features at cut 400"]
-    assert report["overlap"] == [] and calls == []
+    assert [(e["strategy"], e["overlap"], e["mirror"]) for e in report["overlap"]] == [
+        ("donchian_atr", 1.0, 0.0), ("donchian_atr_wide", 0.0, 1.0)]
+    assert report["mirror_of"] == ["donchian_atr_wide@4h"] and report["skipped"] == {}
 
 
-@pytest.mark.parametrize("name,text,tf,msg", [
-    ("computed", BASE.replace('"n": 40,', '"n": 4 * 10,'), "4h", "computed: params must be a literal"),
-    ("hourly", BASE, "15m", "hourly declares timeframes 1h, 4h, not 15m"),
-    ("orphan", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "nope"'), "4h",
-     "PARENT 'nope' is not a plugin in strategies/"),
-    ("selfish", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "selfish"'), "4h",
-     "selfish names itself as its PARENT"),
-])
-def test_metadata_and_source_refusals_go_to_meta_and_nothing_runs(cfg, plugins, tmp_path, monkeypatch,
-                                                                    name, text, tf, msg):
+@pytest.mark.parametrize("name,text,tf", [
+    ("computed", BASE.replace('"n": 40,', '"n": 4 * 10,'), "4h"),
+    ("broken", BASE.replace("def entry(self, ctx):", "def entry(self, ctx)"), "4h"),
+], ids=["computed", "broken"])
+def test_unreadable_metadata_skips_every_later_stage_and_says_so(cfg, plugins, tmp_path, monkeypatch,
+                                                                 name, text, tf):
+    # Nothing can run without literal metadata, so nothing does, on any machine; the report says why.
     monkeypatch.setattr(pf, "lookahead_failures", lambda *a: pytest.fail("ran the lookahead check"))
     monkeypatch.setattr(pf, "positions_of", lambda *a: pytest.fail("ran the plugin"))
     monkeypatch.setattr(client, "check", lambda cfg: pytest.fail("checked the sandbox"))
     report = pf.preflight(cfg, stage(tmp_path, name, text), tf)
-    assert report["ok"] is False and len(report["meta"]) == 1 and msg in report["meta"][0]
+    assert report["ok"] is False and len(report["meta"]) == 1 and report["meta"][0].startswith(f"{name}: ")
+    why = "its metadata can't be read, so the plugin can't run"
+    assert report["skipped"] == {"lookahead": why, "overlap": why}
     assert report["lookahead"] == report["overlap"] == report["mirror_of"] == [] and report["error"] is None
 
 
-def test_a_parent_that_does_not_declare_the_timeframe_is_refused(cfg, plugins, tmp_path):
-    hourly = BASE.replace('timeframes = ["1h", "4h"]', 'timeframes = ["1h"]')
-    add_plugin(plugins, "hourly_root", hourly)
-    kid = WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "hourly_root"')
-    report = pf.preflight(cfg, stage(tmp_path, "kid", kid), "4h")
-    assert report["meta"] == ["parent hourly_root declares timeframes 1h, not 4h"]
+@pytest.mark.parametrize("name,text,tf,extra,msg", [
+    ("hourly", SOUND, "15m", {}, "hourly declares timeframes 1h, 4h, not 15m"),
+    ("orphan", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "nope"'), "4h", {},
+     "PARENT 'nope' is not a plugin in strategies/"),
+    ("selfish", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "selfish"'), "4h", {},
+     "selfish names itself as its PARENT"),
+    ("twin_a", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "twin_b"'), "4h",
+     {"twin_b": WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "twin_b"')},
+     "twin_a is byte-identical to its parent twin_b; not a variation"),
+    ("kid", WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "hourly_root"'), "4h",
+     {"hourly_root": BASE.replace('timeframes = ["1h", "4h"]', 'timeframes = ["1h"]')},
+     "parent hourly_root declares timeframes 1h, not 4h"),
+], ids=["undeclared-tf", "orphan", "selfish", "byte-identical", "parent-undeclared-tf"])
+def test_a_source_refusal_still_runs_the_lookahead_check_and_the_overlap(cfg, plugins, tmp_path, monkeypatch,
+                                                                       name, text, tf, extra, msg):
+    # The judge would refuse it, but the plugin can run: the rest is checked too, at the asked timeframe.
+    for n, t in extra.items():
+        add_plugin(plugins, n, t)
+    calls = stub_runs(monkeypatch, {(name, tf): held(100), ("donchian_atr", "4h"): held(100)})
+    monkeypatch.setattr(pf, "lookahead_failures", lambda c, s: calls.append(("lookahead", s.name)) or ["x: y"])
+    report = pf.preflight(cfg, stage(tmp_path, name, text), tf)
+    assert report["ok"] is False and report["meta"] == [msg] and report["skipped"] == {}
+    assert report["lookahead"] == ["x: y"] and calls[:2] == [("lookahead", name), (name, tf)]
+    got = [(e["strategy"], e["timeframe"], e["overlap"]) for e in report["overlap"]]
+    assert got == [("donchian_atr", "4h", 1.0)]
 
 
-def test_a_byte_identical_copy_of_its_parent_is_refused(cfg, plugins, tmp_path):
-    text = WIDE_TEXT.replace('PARENT = "donchian_atr"', 'PARENT = "twin_b"')
-    add_plugin(plugins, "twin_b", text)
-    report = pf.preflight(cfg, stage(tmp_path, "twin_a", text), "4h")
-    assert report["meta"] == ["twin_a is byte-identical to its parent twin_b; not a variation"]
+def test_a_timeframe_without_a_market_skips_the_overlap_and_says_so(cfg, plugins, tmp_path, monkeypatch):
+    monkeypatch.setattr(pf, "lookahead_failures", lambda c, s: [])
+    fivem = SOUND.replace('timeframes = ["1h", "4h"]', 'timeframes = ["5m"]')
+    report = pf.preflight(cfg, stage(tmp_path, "fivem", fivem), "5m")
+    assert report["ok"] is False and report["meta"] == report["lookahead"] == report["overlap"] == []
+    assert report["skipped"] == {"overlap": "no synthetic market at 5m: its bars are 15m, resampled to multiples "
+                                            "of 15m"}
 
 
 def test_precheck_is_the_judges_source_only_refusals(plugins):
@@ -370,14 +408,16 @@ def test_precheck_is_the_judges_source_only_refusals(plugins):
         precheck(PluginSource.from_text("orphan", WIDE_TEXT.replace('"donchian_atr"', '"nope"')), "4h")
 
 
-def test_preflight_without_a_sandbox_raises_after_the_source_checks(cfg, plugins, tmp_path, monkeypatch):
+def test_preflight_without_a_sandbox_raises_unless_nothing_can_run(cfg, plugins, tmp_path, monkeypatch):
     def no(cfg):
         raise SandboxUnavailable("no landlock")
     monkeypatch.setattr(client, "check", no)
     monkeypatch.setattr(pf, "lookahead_failures", lambda *a: pytest.fail("ran the lookahead check"))
-    assert pf.preflight(cfg, stage(tmp_path, "hourly", BASE), "15m")["meta"]       # refused on any machine
-    with pytest.raises(SandboxUnavailable):
-        pf.preflight(cfg, stage(tmp_path, "sound", SOUND), "4h")
+    computed = BASE.replace('"n": 40,', '"n": 4 * 10,')
+    assert pf.preflight(cfg, stage(tmp_path, "computed", computed), "4h")["meta"]     # answered on any machine
+    for name, text, tf in (("hourly", SOUND, "15m"), ("sound", SOUND, "4h")):        # a refusal still runs code
+        with pytest.raises(SandboxUnavailable):
+            pf.preflight(cfg, stage(tmp_path, name, text), tf)
 
 
 # ---------------------------------------------------------------- the position cache
@@ -431,6 +471,7 @@ def test_a_failed_run_is_not_cached(cfg, monkeypatch, tmp_path):
     ({"ok": True}, 0),
     ({"ok": False, "lookahead": ["defaults: x"]}, 3),
     ({"ok": False, "mirror_of": ["donchian_atr@4h"]}, 3),
+    ({"ok": False, "skipped": {"overlap": "no synthetic market at 5m"}}, 3),
     (SandboxUnavailable("no landlock"), 1),
     (RuntimeError("boom"), 1),
 ])

@@ -5,18 +5,22 @@ and only on synthetic bars: never `load_bars`, never anything under data/. So th
 error lines included, carries no market data and may go back to the model. Nothing is recorded and
 no trial is spent (spec: docs/superpowers/specs/2026-10-19-proposer-design.md, "Preflight").
 
-In order, each step only if the ones before it passed:
+Three checks, each run whenever the plugin can run, so one report names every defect at once:
 1. the plugin's metadata literals and the judge's source-only refusals (`judge.precheck`);
 2. the lookahead check exactly as the judge runs it that UTC day (`judge.lookahead_failures`);
-3. position overlap on the shared synthetic market (`validate.synthetic_market`), at defaults, against
-   every other plugin in strategies/ at each timeframe it declares. A mirror of a judged plugin is
-   refused: its OOS result would be close to minus one already seen. Near-copies are only reported,
-   since which of them are refused depends on ideas, and the orchestrator applies those rules.
+3. position overlap on the shared synthetic market (`validate.synthetic_market`), at defaults and at the
+   asked timeframe, against every other plugin in strategies/ at each timeframe it declares. A mirror
+   of a judged plugin is refused: its OOS result would be close to minus one already seen. Near-copies
+   are only reported, since which of them are refused depends on ideas, and the orchestrator applies
+   those rules.
+Only metadata that can't be read stops the rest: without it the plugin can't run. A check that could
+not be made is named under `skipped`, with the reason, so an empty list always means "checked, nothing
+found". A skip fails preflight, as a failed check does: the plugin failing on the synthetic market, or
+a timeframe the market can't make. An earlier plugin that fails there holds nothing.
 
-A plugin that fails on the synthetic market fails preflight, as a crash does in the lookahead check;
-an earlier plugin that fails there holds nothing. Positions are cached per (plugin bytes, timeframe,
-market version) under `proposer.state_dir`, so in steady state only the new plugin runs; a change to the
-bars or to how the engine replays them needs a new MARKET_VERSION.
+Positions are cached per (plugin bytes, timeframe, market version) under `proposer.state_dir`, so in
+steady state only the new plugin runs; a change to the bars or to how the engine replays them needs a
+new MARKET_VERSION.
 """
 
 from __future__ import annotations
@@ -49,7 +53,8 @@ _NAMES = ["symbol", "hour"]
 
 
 def blank_report() -> dict:
-    return {"ok": False, "meta": [], "lookahead": [], "overlap": [], "mirror_of": [], "error": None}
+    """`skipped` maps a check that could not be made ("lookahead", "overlap") to why."""
+    return {"ok": False, "meta": [], "lookahead": [], "overlap": [], "mirror_of": [], "skipped": {}, "error": None}
 
 
 def cache_path(cfg, strategy_hash: str, tf: str) -> Path:
@@ -131,35 +136,21 @@ def _earlier(cfg, name: str) -> list[tuple[str, PluginSource, pd.Series]]:
 
 
 def _done(report: dict) -> dict:
-    report["ok"] = not (report["meta"] or report["lookahead"] or report["mirror_of"]) and report["error"] is None
+    report["ok"] = not (report["meta"] or report["lookahead"] or report["mirror_of"] or report["skipped"]) \
+        and report["error"] is None
     return report
 
 
-def preflight(cfg, path: Path, tf: str) -> dict:
-    """The report on the plugin file at `path`, by its file name, at tf. Raises SandboxUnavailable (and
-    any harness failure) for the caller to report; `lab preflight` turns those into `error`."""
-    report = blank_report()
-    try:
-        src = PluginSource.from_text(path.stem, path.read_bytes())
-        precheck(src, tf)
-    except PluginMetaError as e:
-        report["meta"].append(f"{e.name}: {e}")           # as the judge words it
-        return _done(report)
-    except JudgeRefused as e:
-        report["meta"].append(str(e))
-        return _done(report)
-    market(tf)                                            # NoMarket before anything runs
-    client.check(cfg)
-
-    report["lookahead"] = lookahead_failures(cfg, src)
-    if report["lookahead"]:
-        return _done(report)
+def _overlap(cfg, src: PluginSource, tf: str, report: dict) -> None:
+    """The overlap check into `report`: the listing and `mirror_of`, or why it could not be made."""
     try:
         mine = positions_of(cfg, src, tf)
+    except NoMarket as e:
+        report["skipped"]["overlap"] = str(e)
+        return
     except PluginError as e:
-        report["lookahead"].append(f"synthetic market @ {tf}: {e.reason()}")
-        return _done(report)
-
+        report["skipped"]["overlap"] = f"the plugin fails on the synthetic market @ {tf}: {e.reason()}"
+        return
     entries = []                          # rounded once: the rules here and the orchestrator's read these
     for name in list_plugins():
         if name == src.name:                              # this file itself, already in strategies/
@@ -173,4 +164,25 @@ def preflight(cfg, path: Path, tf: str) -> dict:
     listed = [e for e in entries if max(e["overlap"], e["mirror"]) >= LIST_FLOOR]
     listed.sort(key=lambda e: (-max(e["overlap"], e["mirror"]), e["strategy"], e["timeframe"]))
     report["overlap"] = listed[:LIST_TOP]
+
+
+def preflight(cfg, path: Path, tf: str) -> dict:
+    """The report on the plugin file at `path`, by its file name, at tf. Raises SandboxUnavailable (and
+    any harness failure) for the caller to report; `lab preflight` turns those into `error`. Without a
+    sandbox only unreadable metadata is answered: every other plugin goes on to run code."""
+    report = blank_report()
+    try:
+        src = PluginSource.from_text(path.stem, path.read_bytes())
+    except PluginMetaError as e:
+        report["meta"].append(f"{e.name}: {e}")           # as the judge words it
+        why = "its metadata can't be read, so the plugin can't run"
+        report["skipped"].update(lookahead=why, overlap=why)
+        return _done(report)
+    try:
+        precheck(src, tf)
+    except JudgeRefused as e:                             # the judge would refuse it; it can still run
+        report["meta"].append(str(e))
+    client.check(cfg)
+    report["lookahead"] = lookahead_failures(cfg, src)
+    _overlap(cfg, src, tf, report)
     return _done(report)
