@@ -687,6 +687,8 @@ def fast_cpus():
     return {c for c in cpus if khz(c) >= 0.9 * top}
 
 
+@pytest.mark.skipif(os.environ.get("LCE_PERF") != "1",
+                    reason="opt-in: set LCE_PERF=1 to time the levels (CPU time depends on the machine)")
 def test_levels_speed_on_683k_synthetic_bars(mod):
     b = random_bars(683_424, seed=0)
     p = P(vp_days=10)
