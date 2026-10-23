@@ -231,7 +231,8 @@ Definitions, all at the signal bar t and all computed in `prepare` as features:
 - **in_window(t):** bar t's close lies in the entry window.
 - **big(t):** |close − open| > big_bar·u, which means skip.
 
-Branch conditions (a bar meets at most one):
+Branch conditions. Rows 1 and 2, and rows 5 and 6, can match the same bar (always on the same
+side); when several match, the first row wins:
 
 | # | Condition at t | Side |
 |---|---|---|
