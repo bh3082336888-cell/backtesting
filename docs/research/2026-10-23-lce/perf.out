@@ -1,8 +1,12 @@
-lce_pct prepare, BTCUSDT 5m research bars, vp_days = 10, in a sandbox worker
-plugin b7cb43a5896d at commit 5af907d; Intel(R) Core(TM) Ultra 9 275HX; 8 of 24 cores are performance cores
+LCE prepare, BTCUSDT 5m research bars, vp_days = 10, in a sandbox worker
+commit fa0391c; Intel(R) Core(TM) Ultra 9 275HX; 8 of 24 cores are performance cores
 bars: 683,424 (2020-01-01 .. 2026-06-30), 19 columns
-load average before: 1.95 2.72 2.56
 budget (spec; recorded, not a gate): 0.30 s
 
-scheduler's placement: median 0.650 s CPU over 5 runs (0.830, 0.650, 0.650, 0.650, 0.660)
-performance cores: median 0.660 s CPU over 5 runs (0.770, 0.660, 0.650, 0.660, 0.650)
+lce_pct, plugin 5458edefef10; load average before: 1.36 1.09 0.98
+scheduler's placement: median 0.640 s CPU over 5 runs (0.790, 0.640, 0.610, 0.640, 0.600)
+performance cores: median 0.630 s CPU over 5 runs (0.760, 0.630, 0.610, 0.630, 0.600)
+
+lce_atr, plugin 181835ba5477; load average before: 1.41 1.11 0.99
+scheduler's placement: median 0.600 s CPU over 5 runs (0.760, 0.590, 0.610, 0.600, 0.600)
+performance cores: median 0.610 s CPU over 5 runs (0.710, 0.590, 0.620, 0.610, 0.610)

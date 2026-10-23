@@ -1,4 +1,4 @@
-"""lce_pct's prepare on BTCUSDT's full research 5m bars at vp_days = 10, in a sandbox worker.
+"""The LCE plugins' prepare on BTCUSDT's full research 5m bars at vp_days = 10, in a sandbox worker.
 
 The spec's performance budget ("Performance budget"): the median of 5 `prepare` calls in a sealed
 worker, in CPU seconds the worker spent, measured from outside (`Worker.prepare`, as the exam's cost
@@ -13,12 +13,14 @@ cores (the worker inherits the parent's CPU affinity), which is how Tasks 6 and 
 numbers.
 
 Run: .venv/bin/python docs/research/2026-10-23-lce/perf.py > docs/research/2026-10-23-lce/perf.out
+(both plugins; name them as arguments to time only some: perf.py lce_pct)
 """
 
 import os
 import platform
 import statistics
 import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -66,26 +68,25 @@ def cpu_model() -> str:
     return platform.processor()
 
 
-def main():
+def main(names):
     cfg = load_config()
-    src = PluginSource.read("lce_pct")
     bars = load_bars(cfg, SYMBOL, TF)
-    params = {**src.meta.params, "vp_days": 10}
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     span = pd.to_datetime(bars.open_time.iloc[[0, -1]], unit="ms", utc=True)
     fast = fast_cpus()
-    print(f"lce_pct prepare, {SYMBOL} {TF} research bars, vp_days = 10, in a sandbox worker")
-    print(f"plugin {src.hash[:12]} at commit {commit}; {cpu_model()}; {len(fast)} of "
-          f"{len(os.sched_getaffinity(0))} cores are performance cores")
+    print(f"LCE prepare, {SYMBOL} {TF} research bars, vp_days = 10, in a sandbox worker")
+    print(f"commit {commit}; {cpu_model()}; {len(fast)} of {len(os.sched_getaffinity(0))} cores are performance cores")
     print(f"bars: {len(bars):,} ({span.iloc[0]:%Y-%m-%d} .. {span.iloc[1]:%Y-%m-%d}), {bars.shape[1]} columns")
-    print(f"load average before: {' '.join(f'{x:.2f}' for x in os.getloadavg())}")
     print(f"budget (spec; recorded, not a gate): {BUDGET_S:.2f} s")
-    print()
-    for label, cpus in (("scheduler's placement", None), ("performance cores", fast)):
-        t = measure(cfg, src, bars, params, cpus)
-        print(f"{label}: median {statistics.median(t):.3f} s CPU over {RUNS} runs "
-              f"({', '.join(f'{x:.3f}' for x in t)})")
+    for name in names:
+        src = PluginSource.read(name)
+        params = {**src.meta.params, "vp_days": 10}
+        print(f"\n{name}, plugin {src.hash[:12]}; load average before: {' '.join(f'{x:.2f}' for x in os.getloadavg())}")
+        for label, cpus in (("scheduler's placement", None), ("performance cores", fast)):
+            t = measure(cfg, src, bars, params, cpus)
+            print(f"{label}: median {statistics.median(t):.3f} s CPU over {RUNS} runs "
+                  f"({', '.join(f'{x:.3f}' for x in t)})")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:] or ["lce_pct", "lce_atr"])
