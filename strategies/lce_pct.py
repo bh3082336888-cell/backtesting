@@ -93,8 +93,10 @@ class LcePct(Strategy):
             elif (ctx["open"] - stop) * side > 0:
                 # Filled at the open and closed inside this bar. The engine refuses an entry only when
                 # its fill is at or beyond the stop: the open gapped through it (taken here without the
-                # slippage the plugin can't see), or the liquidation price is inside the stop, which a
-                # stop under 3% away at leverage 3 (liquidation about 33% away) never is.
+                # slippage the plugin can't see), or the liquidation price is inside the stop. That never
+                # happens: levels are at most 1.2 steps apart, so a stop is under 1.8 steps (0.55 u) from
+                # the close (under 0.7% of price in lce_pct, about half a daily ATR in lce_atr), and
+                # liquidation at leverage 3 is about 33% away.
                 self._count(day, _won(ctx, side, stop, tgt))
         elif self._held is not None and pos is None:
             side, stop, tgt, day, exiting = self._held
