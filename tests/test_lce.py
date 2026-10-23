@@ -1,6 +1,8 @@
 """LCE plugin: point-in-time volume-profile levels (the profile against a reference even spread,
 POC/HVN/anchor/grid rules on hand-built days, causality, warm-up, dead days, u, speed), the EMA
-clouds, the six flowchart branches on hand-built bars, and the level bracket."""
+clouds, the six flowchart branches on hand-built bars, the level bracket, and the entries, exits and
+daily rules (hand-built books through the engine, and the engine's own record on the synthetic
+market)."""
 
 import itertools
 import math
@@ -14,12 +16,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from perp_lab.engine.backtest import build_arrays
+from perp_lab.engine.backtest import EngineParams, build_arrays, run_backtest
 from perp_lab.indicators import ny_session_day, true_range, wilder
-from perp_lab.strategy import Ctx, enter
+from perp_lab.session_window import in_session
+from perp_lab.strategy import Ctx, PositionView, RandomEntry, Signal, Strategy, enter
+from perp_lab.validate import synthetic_market
 from tests.conftest import flat_bars, make_bars
 from tests.sandbox_fixtures import load_class
 
+NAME = "_lce_pct"
 M5 = 300_000
 BPD = 288                      # 5m bars in a winter session day
 T0 = "2024-01-07 23:00"        # Sunday 18:00 New York (EST): a session-day start
@@ -28,11 +33,12 @@ COLS = ["z_dn_c", "z_dn2_c", "z_up_lo", "z_up_c", "z_up2_c", "z_dn_hi", "at_zone
 LEVEL_COLS = ["z_dn_c", "z_dn2_c", "z_up_lo", "z_up_c", "z_up2_c", "z_dn_hi"]
 CLOUD = ["htf", "ltf", "ltf_prev", "flip", "fast5", "slow5"]
 BRANCH = ["sig_side", "sig_branch", "in_window", "big"]
+SESSION_COLS = ["eod", "sday"]
 
 
 @pytest.fixture(scope="module")
 def mod():
-    cls = load_class("_lce_pct")
+    cls = load_class(NAME)
     return sys.modules[cls.__module__]
 
 
@@ -666,13 +672,13 @@ def test_u_day_pct_and_atr(mod):
 
 
 def test_prepare_returns_level_cloud_and_branch_features(mod):
-    cls = load_class("_lce_pct")
+    cls = load_class(NAME)
     assert cls().p["unit"] == "pct" and cls.timeframes == ["5m"]
     b = trend_bars(8 * BPD, seed=1)
     for kw in ({}, {"unit": "atr", "atr_n": 3}):
         s = cls(**kw)
         f = s.prepare(b)
-        assert list(f.columns) == COLS + CLOUD + BRANCH + ["u"] and f.index.equals(b.index)
+        assert list(f.columns) == COLS + CLOUD + BRANCH + ["u"] + SESSION_COLS and f.index.equals(b.index)
         assert all(f[c].dtype == np.float64 for c in f.columns) and not set(f.columns) & set(b.columns)
         u_d = mod.u_day(b, s.p["unit"], s.p["atr_n"])
         u = mod.u_bar(b.close, s.p["unit"], u_d)
@@ -681,14 +687,16 @@ def test_prepare_returns_level_cloud_and_branch_features(mod):
         pd.testing.assert_frame_equal(f[CLOUD], cl)
         pd.testing.assert_frame_equal(f[BRANCH], mod.branch_features(b, lv, cl, u, s.p))
         np.testing.assert_array_equal(f.u, u)
+        pd.testing.assert_frame_equal(f[SESSION_COLS], mod.session_features(b))
+        np.testing.assert_array_equal(f.sday, ny_session_day(b.open_time.to_numpy()))
         assert f.htf.notna().any() and (f.sig_side != 0).any()
-    assert cls().prepare(b.iloc[:0]).columns.tolist() == COLS + CLOUD + BRANCH + ["u"]
+    assert cls().prepare(b.iloc[:0]).columns.tolist() == COLS + CLOUD + BRANCH + ["u"] + SESSION_COLS
 
 
 def test_prepare_is_causal(mod):
     """Row t of prepare depends on bars[: t + 1] only (test_lookahead skips the plugin until it is
     renamed in Task 8)."""
-    cls = load_class("_lce_pct")
+    cls = load_class(NAME)
     b = trend_bars(14 * BPD, seed=2)
     ds = mod.day_starts(b.open_time.to_numpy())
     for kw in ({}, {"unit": "atr", "atr_n": 3}, {"vp_days": 10, "theta": 0.02}):
@@ -713,11 +721,11 @@ def clouds(mod, close, **kw):
     return mod.cloud_features(close, mod.u_bar(close, "pct", None), P(**kw))
 
 
-def trend_bars(n, seed=0, start=T0, every=2 * BPD, drift=0.00015):
+def trend_bars(n, seed=0, start=T0, every=2 * BPD, drift=0.00015, scale=0.0015):
     """random_bars whose drift switches between up, flat and down every two days, so every cloud
     state and every branch shows up."""
     reg = np.random.default_rng(seed + 1000).choice([-1.0, 0.0, 1.0], n // every + 1)
-    return random_bars(n, seed=seed, start=start, drift=np.repeat(reg, every)[:n] * drift)
+    return random_bars(n, seed=seed, start=start, drift=np.repeat(reg, every)[:n] * drift, scale=scale)
 
 
 def test_u_bar_pct_and_atr(mod):
@@ -992,7 +1000,7 @@ def test_big_bar_blocks(mod):
     assert f.big.iloc[0] == 1 and f.sig_branch.iloc[0] == 1
     assert np.isnan(mod.branch_features(*scene(u=np.nan), P()).big.iloc[0])
     # in prepare, u is 0.01169 x close for lce_pct and the day's ATR for lce_atr
-    cls = load_class("_lce_pct")
+    cls = load_class(NAME)
     b = trend_bars(20 * BPD, seed=6)
     move = (b.close - b.open).abs().to_numpy()
     for kw in ({}, {"unit": "atr"}):
@@ -1009,7 +1017,7 @@ def test_big_bar_blocks(mod):
 def test_in_window_follows_new_york_time(mod):
     """Signal-bar closes 09:40-15:45 New York time, Mon-Fri, across both daylight-saving switches
     (the Monday after each included), against the zoneinfo clock."""
-    cls = load_class("_lce_pct")
+    cls = load_class(NAME)
     s0, e0 = (int(x[:2]) * 60 + int(x[3:]) for x in (cls.session["start"], cls.session["end"]))
     for start in ("2024-03-06 00:00", "2024-10-30 00:00", "2025-03-05 00:00", "2025-10-29 00:00"):
         b = flat_bars(n=10 * BPD, tf_ms=M5, start=start)
@@ -1028,7 +1036,7 @@ def test_in_window_follows_new_york_time(mod):
 def test_branches_match_the_table_on_prepared_bars(mod):
     """sig_branch and sig_side on real prepare output equal the spec's table, row by row, first match
     wins; the window, big bars and daily rules don't touch them."""
-    cls = load_class("_lce_pct")
+    cls = load_class(NAME)
     b = trend_bars(30 * BPD, seed=15)                                  # a seed where all six fire (3, 4 are rare)
     f = cls().prepare(b)
     A = build_arrays(b, f)
@@ -1074,7 +1082,7 @@ def no_bracket(r):
 
 
 def test_bracket_geometry_long_short(mod):
-    s = load_class("_lce_pct")()
+    s = load_class(NAME)()
     assert s.bracket(ctx_of(**GRID), 1) == (97.5, 98.9)                 # halfway down to 97; 99's lower edge
     assert s.bracket(ctx_of(**GRID), -1) == (99.5, 98.1)                # halfway up to 100; 98's upper edge
     stop, tgt = s.bracket(ctx_of(**GRID), 1)
@@ -1114,7 +1122,7 @@ def test_bracket_geometry_long_short(mod):
 
 
 def test_bracket_refuses_a_side_other_than_one(mod):
-    s = load_class("_lce_pct")()
+    s = load_class(NAME)()
     for side in (0, 0.0, 2, -2, 0.5, np.nan, None):
         assert no_bracket(s.bracket(ctx_of(**GRID), side)), side
     for side in (1, 1.0, np.float64(1.0), np.int64(1)):
@@ -1123,7 +1131,7 @@ def test_bracket_refuses_a_side_other_than_one(mod):
 
 
 def test_bracket_nan_outside_window(mod):
-    s = load_class("_lce_pct")()
+    s = load_class(NAME)()
     for w in (0.0, np.nan):
         for side in (1, -1):
             assert no_bracket(s.bracket(ctx_of(**{**GRID, "in_window": w}), side))
@@ -1143,7 +1151,7 @@ def test_bracket_nan_outside_window(mod):
 def test_bracket_nan_outside_grid(mod):
     """Review Focus 4: a close beyond the outermost level (a gap) has no bracket that way, and no
     exception."""
-    s = load_class("_lce_pct")()
+    s = load_class(NAME)()
     nan = np.nan
     top = dict(close=101.5, z_dn_c=101.0, z_dn2_c=100.0, z_up_c=nan, z_up2_c=nan, z_up_lo=nan, z_dn_hi=101.1)
     near_top = dict(close=100.5, z_dn_c=100.0, z_dn2_c=99.0, z_up_c=101.0, z_up2_c=nan, z_up_lo=100.9,
@@ -1180,7 +1188,7 @@ def test_bracket_nan_outside_grid(mod):
 def test_bracket_nan_in_warmup(mod):
     """Review Focus 3: before vp_days complete days (or before lce_atr's ATR exists, or on a late
     listing) there are no levels, every bracket is NaN and no branch fires, though the window opens."""
-    cls = load_class("_lce_pct")
+    cls = load_class(NAME)
     b = trend_bars(18 * BPD, seed=12)
     late = b.iloc[100:]                                                 # the first bar mid-day
     for bars, kw, first in ((b, {}, 6), (b, {"vp_days": 10}, 11), (b, {"unit": "atr"}, 15), (late, {}, 6)):
@@ -1198,6 +1206,419 @@ def test_bracket_nan_in_warmup(mod):
             ctx.i = i
             valid += not no_bracket(s.bracket(ctx, 1))
         assert valid > 0 and (f.sig_side.iloc[k:] != 0).any(), kw
+
+
+# ------------------------------------------------------------------ entries, management and the daily rules
+
+NY = "America/New_York"
+DAY_T = "2024-01-09 15:00"             # Tuesday 10:00 New York (EST): bars close 10:05, 10:10, ... in the window
+GRID_Z = {k: v for k, v in GRID.items() if k.startswith("z_")}
+# Bars around a 98.5 close on GRID, where a long's bracket is (97.5, 98.9) and a short's (99.5, 98.1).
+QUIET = (98.5, 98.6, 98.4, 98.5)       # reaches neither the stop nor the target
+STOP_L = (98.5, 98.6, 97.4, 98.5)      # through a long's stop
+TGT_L = (98.5, 99.0, 98.4, 98.5)       # through a long's target, not its stop
+BOTH_L = (98.5, 99.0, 97.4, 98.5)      # through both
+
+
+def bar(ohlc, side=0, **kw):
+    return dict(zip(("open", "high", "low", "close"), map(float, ohlc)), sig_side=float(side), **kw)
+
+
+def mirror(rows):
+    """The same book for a short: prices reflected about 98.5 (GRID maps onto itself), sides negated."""
+    return [{**r, "open": 197 - r["open"], "high": 197 - r["low"], "low": 197 - r["high"],
+             "close": 197 - r["close"], "sig_side": -r["sig_side"]} for r in rows]
+
+
+def ny_ms(*stamps):
+    """New York wall-clock times as UTC epoch ms."""
+    return np.array([pd.Timestamp(x, tz=NY).tz_convert("UTC").value // 10**6 for x in stamps], dtype=np.int64)
+
+
+def every5(start, n):
+    """n open times 5 minutes apart from a New York wall-clock time."""
+    return ny_ms(start)[0] + M5 * np.arange(n)
+
+
+def book(rows, times=None, start=DAY_T):
+    """Hand-built 5m bars and the features entry, bracket and manage read: GRID's levels on every bar,
+    no big bar, and the clock (in_window, eod, sday) from the plugin's prepare on these bars' times. A
+    row's other keys override its features. times: open times (UTC ms); else every 5 min from start."""
+    b = flat_bars(n=len(rows), tf_ms=M5, start=start)
+    if times is not None:
+        b["open_time"] = np.asarray(times, dtype=np.int64)
+        b["close_time"] = b.open_time + M5 - 1
+        b.index = pd.to_datetime(b.open_time, unit="ms", utc=True)
+    for c in ("open", "high", "low", "close"):
+        b[c] = [r[c] for r in rows]
+    clock = load_class(NAME)().prepare(b)[["in_window", "eod", "sday"]]
+    f = pd.DataFrame({**GRID_Z, "sig_side": 0.0, "big": 0.0}, index=b.index).join(clock)
+    for j, r in enumerate(rows):
+        for k, v in r.items():
+            if k not in b.columns:
+                f.iloc[j, f.columns.get_loc(k)] = float(v)
+    return b, f
+
+
+def run_book(rows, times=None, ep=None, **params):
+    b, f = book(rows, times)
+    s = load_class(NAME)(**params)
+    return s, run_backtest(s, b, f, symbol="X", tf="5m", ep=ep or EngineParams()), f
+
+
+def ms(index):
+    """A bar index's open times, UTC epoch ms."""
+    return pd.DatetimeIndex(index).as_unit("ms").asi8
+
+
+def engine_days(r, feats):
+    """Per session day of the signal bar, from the engine's record: (trades, target exits)."""
+    day = dict(zip(ms(feats.index).tolist(), feats.sday.astype(int).tolist()))
+    out = {}
+    for t in r.trades:
+        n, w = out.get(day[t["signal_time"]], (0, 0))
+        out[day[t["signal_time"]]] = (n + 1, w + (t["exit_reason"] == "target"))
+    return out
+
+
+def reasons(r):
+    return [t["exit_reason"] for t in r.trades]
+
+
+def both_sides(rows):
+    return pytest.mark.parametrize("rows", [rows, mirror(rows)], ids=["long", "short"])
+
+
+def day0(f):
+    return int(f.sday.iloc[0])
+
+
+@pytest.mark.parametrize("flip", [False, True], ids=["long", "short"])
+def test_max_two_fills_per_day(mod, flip):
+    side = mirror if flip else list
+    # filled and stopped out in the same bar, so no position is ever seen at a close: still a fill
+    s, r, f = run_book(side([bar(QUIET, 1)] + [bar(STOP_L, 1)] * 6))
+    assert reasons(r) == ["stop", "stop"] and [t["entry_time"] for t in r.trades] == ms(f.index)[1:3].tolist()
+    assert s.days == engine_days(r, f) == {day0(f): (2, 0)}
+    # held for a few bars first
+    s, r, f = run_book(side([bar(QUIET, 1)] * 3 + [bar(STOP_L, 1)] * 4))
+    assert reasons(r) == ["stop", "stop"] and r.trades[0]["bars_held"] == 3
+    assert s.days == engine_days(r, f) == {day0(f): (2, 0)}
+    # max_trades is the limit
+    s, r, f = run_book(side([bar(QUIET, 1)] + [bar(STOP_L, 1)] * 6), max_trades=3)
+    assert reasons(r) == ["stop"] * 3 and s.days == {day0(f): (3, 0)}
+
+
+@pytest.mark.parametrize("flip", [False, True], ids=["long", "short"])
+def test_no_entry_after_win(mod, flip):
+    side = mirror if flip else list
+    for rows, want in (([bar(QUIET, 1), bar(TGT_L, 1)] + [bar(STOP_L, 1)] * 4, ["target"]),          # same bar
+                       ([bar(QUIET, 1)] * 3 + [bar(TGT_L, 1)] + [bar(STOP_L, 1)] * 4, ["target"]),   # held
+                       ([bar(QUIET, 1), bar(STOP_L, 1), bar(TGT_L, 1)] + [bar(STOP_L, 1)] * 3, ["stop", "target"])):
+        s, r, f = run_book(side(rows), max_trades=5)
+        assert reasons(r) == want
+        assert s.days == engine_days(r, f) == {day0(f): (len(want), 1)}
+
+
+@pytest.mark.parametrize("flip", [False, True], ids=["long", "short"])
+def test_breakeven_exit_is_not_a_win(mod, flip):
+    """At the close that takes best_close halfway to the target, manage moves the stop to the entry
+    price. The next bar trades through the entry and the target: the engine stops it out first, so
+    it is no win and the plugin enters again. With the stop it saw at the entry (97.5), it would have
+    called this bar a win."""
+    side = mirror if flip else list
+    sg = -1 if flip else 1
+    slip = EngineParams().slippage
+    fill = 98.5 * (1 + sg * slip)                   # a long's: 98.5197, halfway to its 98.9 target at 98.7098
+    rows = [bar(QUIET, 1), bar((98.5, 98.8, 98.4, 98.75)), bar((98.75, 99.0, 98.5, 98.6), 1)] + [bar(STOP_L, 1)] * 3
+    s, r, f = run_book(side(rows))
+    assert reasons(r) == ["stop", "stop"]
+    t = r.trades[0]
+    assert t["entry_price"] == pytest.approx(fill) and t["level_stop"] == [98.5 + sg * -1.0, t["entry_price"]]
+    assert t["exit_price"] == pytest.approx(fill * (1 - sg * slip))    # stopped at the entry price
+    assert s.days == engine_days(r, f) == {day0(f): (2, 0)}
+    # not yet halfway: no breakeven, so that bar is a win
+    rows[1] = bar((98.5, 98.8, 98.4, 98.7))
+    s, r, f = run_book(side(rows))
+    assert reasons(r) == ["target"] and r.trades[0]["level_stop"] == [99.5 if flip else 97.5]
+    assert s.days == {day0(f): (1, 1)}
+    # an EXIT the plugin sent is never a win, though the bar it fills in trades through the target
+    rows = [bar(QUIET, 1), bar(QUIET, eod=1), bar(TGT_L, 1)] + [bar(STOP_L, 1)] * 3
+    s, r, f = run_book(side(rows))
+    assert reasons(r) == ["signal", "stop"]
+    assert s.days == engine_days(r, f) == {day0(f): (2, 0)}
+
+
+def test_counters_reset_next_session_day(mod):
+    """A win on Tuesday ends Tuesday's entries, not Wednesday's; two fills on Wednesday end
+    Wednesday's. The day is the session day (18:00 -> 18:00 New York) of the signal bar."""
+    tue = [bar(QUIET, 1), bar(TGT_L, 1)] + [bar(STOP_L, 1)] * 4
+    wed = [bar(QUIET, 1)] + [bar(STOP_L, 1)] * 5
+    thu = [bar(QUIET, 1)] + [bar(STOP_L, 1)] * 5
+    times = np.concatenate([every5("2024-01-09 10:00", 6), every5("2024-01-10 10:00", 6),
+                            every5("2024-01-11 10:00", 6)])
+    s, r, f = run_book(tue + wed + thu, times=times)
+    d = ny_session_day(times[[0, 6, 12]])
+    np.testing.assert_array_equal(f.sday.iloc[[0, 6, 12]], d)
+    assert d.tolist() == [d[0], d[0] + 1, d[0] + 2]
+    assert reasons(r) == ["target", "stop", "stop", "stop", "stop"]
+    assert s.days == engine_days(r, f) == {d[0]: (1, 1), d[0] + 1: (2, 0), d[0] + 2: (2, 0)}
+    # two losses on one day leave the next day's two
+    s, r, f = run_book(wed + thu, times=times[6:])
+    assert s.days == {d[1]: (2, 0), d[2]: (2, 0)}
+
+
+@pytest.mark.parametrize("flip", [False, True], ids=["long", "short"])
+def test_rejected_signal_not_counted(mod, flip):
+    """The engine rejects an entry whose fill is at or beyond its stop (the open gapped through it).
+    That signal is no fill, so two more entries still fill that day."""
+    side = mirror if flip else list
+    gap = bar((97.0, 97.2, 96.9, 97.1))                                 # opens below a long's 97.5 stop
+    rows = [bar(QUIET, 1), gap, bar(QUIET, 1)] + [bar(STOP_L, 1)] * 4
+    s, r, f = run_book(side(rows))
+    assert r.rejected["gap_through_stop"] == 1 and reasons(r) == ["stop", "stop"]
+    assert s.days == engine_days(r, f) == {day0(f): (2, 0)}
+    # an open exactly at the stop, without slippage: rejected too (no distance to the stop)
+    rows[1] = bar((97.5, 97.6, 97.4, 97.5))
+    s, r, f = run_book(side(rows), ep=EngineParams(slippage=0.0))
+    assert r.rejected["gap_through_stop"] == 1 and reasons(r) == ["stop", "stop"]
+    assert s.days == engine_days(r, f) == {day0(f): (2, 0)}
+
+
+@pytest.mark.parametrize("flip", [False, True], ids=["long", "short"])
+def test_win_rule_matches_engine(mod, flip):
+    side = mirror if flip else list
+    # a bar through the stop and the target is a loss: the engine checks the stop first
+    s, r, f = run_book(side([bar(QUIET, 1), bar(BOTH_L, 1)] + [bar(STOP_L, 1)] * 3))
+    assert reasons(r) == ["stop", "stop"] and s.days == engine_days(r, f) == {day0(f): (2, 0)}
+    s, r, f = run_book(side([bar(QUIET, 1)] * 2 + [bar(BOTH_L, 1)] + [bar(STOP_L, 1)] * 3))
+    assert reasons(r) == ["stop", "stop"] and s.days == engine_days(r, f) == {day0(f): (2, 0)}
+    # a target is a resting limit: a high exactly at it doesn't fill, a trade through it does
+    s, r, f = run_book(side([bar(QUIET, 1), bar((98.5, 98.9, 98.4, 98.5), 1), bar(TGT_L, 1)] + [bar(STOP_L, 1)] * 3))
+    assert reasons(r) == ["target"] and r.trades[0]["bars_held"] == 2
+    assert s.days == engine_days(r, f) == {day0(f): (1, 1)}
+    # an open beyond the target (and not the stop) fills the target in that bar: a win
+    s, r, f = run_book(side([bar(QUIET, 1), bar((99.2, 99.3, 99.1, 99.2), 1)] + [bar(STOP_L, 1)] * 3))
+    assert reasons(r) == ["target"] and s.days == engine_days(r, f) == {day0(f): (1, 1)}
+
+
+def gapped(b, seed, share=0.3, scale=0.003):
+    """b with a share of its opens gapped from the previous close (high and low stretched to them)."""
+    rng = np.random.default_rng(seed)
+    b = b.copy()
+    n = len(b)
+    g = np.r_[False, rng.random(n - 1) < share]
+    o = b.open.to_numpy().copy()
+    o[g] = b.close.to_numpy()[np.flatnonzero(g) - 1] * np.exp(rng.normal(0, scale, g.sum()))
+    b["open"] = o
+    b["high"] = np.maximum(b.high, o)
+    b["low"] = np.minimum(b.low, o)
+    return b
+
+
+def test_daily_rules_match_the_engine_with_gaps(mod):
+    """Fills and wins per session day equal the engine's trades and target exits on prepared bars with
+    gapped opens (rejections, same-bar fills and closes, breakeven moves), without slippage."""
+    cls = load_class(NAME)
+    seen = {"rejected": 0, "target": 0, "stop": 0, "breakeven": 0, "same_bar": 0}
+    for seed in (31, 32):
+        b = gapped(trend_bars(40 * BPD, seed=seed), seed)
+        s = cls()
+        f = s.prepare(b)
+        r = run_backtest(s, b, f, symbol="X", tf="5m", ep=EngineParams(slippage=0.0))
+        assert s.days == engine_days(r, f)
+        seen["rejected"] += r.rejected["gap_through_stop"]
+        for t in r.trades:
+            seen[t["exit_reason"]] = seen.get(t["exit_reason"], 0) + 1
+            seen["breakeven"] += len(t["level_stop"]) > 1
+            seen["same_bar"] += t["bars_held"] == 1 and t["exit_reason"] in ("stop", "target")
+    assert all(v > 0 for v in seen.values()), seen
+
+
+class Spy(Strategy):
+    """Runs a strategy and records each manage-time call: (bar, the position, the signal)."""
+
+    def __init__(self, inner):
+        self.inner, self.p, self.calls = inner, inner.p, []
+
+    def prepare(self, bars):
+        return self.inner.prepare(bars)
+
+    def on_bar(self, ctx):
+        sig = self.inner.on_bar(ctx)
+        if ctx.position is not None:
+            pv = PositionView()
+            for k in PositionView.__slots__:
+                setattr(pv, k, getattr(ctx.position, k))
+            self.calls.append((ctx.i, pv, sig))
+        return sig
+
+
+def CALM():
+    """60 days of trend_bars at 0.04% per bar, slow enough for some positions to reach 15:55."""
+    return trend_bars(60 * BPD, seed=5, scale=0.0004)
+
+
+def managed(strategy, b):
+    spy = Spy(strategy)
+    f = spy.prepare(b)
+    r = run_backtest(spy, b, f, symbol="X", tf="5m", ep=EngineParams())
+    return spy.calls, r, build_arrays(b, f)
+
+
+def manage_rule(A, i, pv, be_frac=0.5):
+    """The spec's manage, written out: EXIT at eod; else the stop to the entry once best_close is
+    be_frac of the way to the target (unless the stop is there already); else hold."""
+    if A["eod"][i] == 1:
+        return Signal("exit")
+    s, e = pv.side, pv.entry_price
+    if s * (pv.stop - e) < 0 and s * (pv.best_close - e) >= be_frac * s * (pv.target - e):
+        return Signal("hold", e)
+    return Signal()
+
+
+def test_manage_stateless(mod):
+    """manage reads ctx only: a fresh instance, asked in reverse order, repeats every decision the
+    running strategy made, and each is the rule written out."""
+    cls = load_class(NAME)
+    calls, r, A = managed(cls(), CALM())
+    kinds = {sig.action if sig.stop is None else "breakeven" for _, _, sig in calls}
+    assert kinds == {"hold", "exit", "breakeven"} and len(r.trades) > 20
+    fresh = cls()
+    ctx = Ctx(A, "X")
+    for i, pv, sig in reversed(calls):
+        ctx.i, ctx.position = i, pv
+        assert fresh.manage(ctx) == sig == manage_rule(A, i, pv), i
+
+
+def test_random_entry_gets_same_exits(mod):
+    """RandomEntry calls the plugin's bracket and manage but never its entry or on_bar: its positions
+    get the same decisions a fresh plugin gives (breakeven, end of day), and its entries stay in the
+    window, where the bracket exists."""
+    cls = load_class(NAME)
+    rnd = RandomEntry(cls(), 0.05, seed=4)
+    calls, r, A = managed(rnd, CALM())
+    kinds = {sig.action if sig.stop is None else "breakeven" for _, _, sig in calls}
+    assert kinds == {"hold", "exit", "breakeven"} and len(r.trades) > 20
+    fresh = cls()
+    ctx = Ctx(A, "X")
+    for i, pv, sig in calls:
+        ctx.i, ctx.position = i, pv
+        assert fresh.manage(ctx) == sig, i
+        for side in (1, -1):
+            got, want = rnd.bracket(ctx, side), fresh.bracket(ctx, side)
+            assert got == want or (no_bracket(got) and no_bracket(want))
+    t = np.array([x["signal_time"] for x in r.trades])
+    assert in_session(t + M5, cls.session).all()
+    assert all(x["exit_reason"] in ("stop", "target", "signal") for x in r.trades)
+
+
+@pytest.mark.parametrize("date", ["2024-01-09", "2024-03-11", "2024-07-09", "2024-11-04"],
+                         ids=["EST", "EDT-monday-after-switch", "EDT", "EST-monday-after-switch"])
+def test_eod_exit_1555_both_dst_regimes(mod, date):
+    """A position entered at the last signal (the 15:45 close) is held through the 15:50 close and
+    sent EXIT at the 15:55 close, filling at 15:55 New York time, in summer and winter time and on the
+    Monday after each switch."""
+    times = every5(f"{date} 15:00", 18)                                  # opens 15:00 .. 16:25
+    rows = [bar(QUIET, 1 if j == 8 else 0) for j in range(18)]          # opens 15:40: closes 15:45
+    s, r, f = run_book(rows, times=times)
+    local = lambda ms: pd.Timestamp(ms, unit="ms", tz="UTC").tz_convert(NY).strftime("%Y-%m-%d %H:%M")
+    [t] = r.trades
+    assert (local(t["signal_time"]), local(t["entry_time"]), local(t["exit_time"]), t["exit_reason"]) == (
+        f"{date} 15:40", f"{date} 15:45", f"{date} 15:55", "signal")
+    close = [local(x + M5)[11:] for x in times]
+    assert f.eod.tolist() == [float(c >= "15:55") for c in close] and f.in_window.tolist() == [
+        float(c <= "15:45") for c in close]
+    # the eod column against the zoneinfo clock over the ten days up to the day (across each switch)
+    b = flat_bars(n=10 * BPD, tf_ms=M5, start=str(pd.Timestamp(date) - pd.Timedelta(days=8)))
+    eod = mod.session_features(b).eod.to_numpy()
+    c = pd.to_datetime(b.open_time + M5, unit="ms", utc=True).dt.tz_convert(NY)
+    m = (c.dt.hour * 60 + c.dt.minute).to_numpy()
+    want = (c.dt.weekday >= 5).to_numpy() | (m < 9 * 60 + 40) | (m >= 15 * 60 + 55)
+    np.testing.assert_array_equal(eod, want.astype(float))
+
+
+@pytest.mark.parametrize("day,after", [("2024-01-09", "2024-01-09 17:00"), ("2024-01-09", "2024-01-10 09:00"),
+                                       ("2024-01-09", "2024-01-10 10:00"), ("2024-01-12", "2024-01-15 10:00"),
+                                       ("2024-03-08", "2024-03-11 10:00")],
+                         ids=["evening", "next-morning", "next-window", "monday-window", "monday-after-dst"])
+def test_gap_over_1555_exits_next_bar_never_overnight(mod, day, after):
+    """The bars from 15:50 on are missing. The position entered at 15:45 is sent EXIT at the close of
+    the first bar after the gap, whatever its time (even inside the next session day's window, which
+    only the new session day gives away), and fills at the open of the bar after that."""
+    times = np.concatenate([every5(f"{day} 15:00", 10), every5(after, 4)])   # opens 15:00 .. 15:45 | after
+    rows = [bar(QUIET, 1 if j == 8 else 0) for j in range(14)]
+    s, r, f = run_book(rows, times=times)
+    [t] = r.trades
+    assert t["entry_time"] == times[9] and t["exit_reason"] == "signal" and t["exit_time"] == times[11]
+    assert f.eod.iloc[10] == 1                                          # the first bar after the gap
+    assert r.in_pos.tolist() == [False] * 9 + [True, True] + [False] * 3
+
+
+def test_no_entries_weekends(mod):
+    """Signals on every bar of a week: entries only Monday to Friday, with signal-bar closes 09:40 to
+    15:45 New York, two a day. Random entries keep to the same hours."""
+    times = every5("2024-01-08 00:00", 7 * BPD)                         # Monday .. Sunday (EST)
+    s, r, f = run_book([bar(STOP_L, 1)] * len(times), times=times)
+    t = np.array([x["signal_time"] for x in r.trades])
+    local = pd.to_datetime(t, unit="ms", utc=True).tz_convert(NY)
+    assert (local.weekday < 5).all() and in_session(t + M5, load_class(NAME).session).all()
+    assert pd.Series(local.date).value_counts().sort_index().tolist() == [2] * 5
+    assert local.strftime("%H:%M").tolist() == ["09:35", "09:40"] * 5    # the first two window closes
+    # a weekend bar with a signal and a bracket: entry holds
+    A = build_arrays(*book([bar(QUIET, 1)] * BPD, times=every5("2024-01-13 00:00", BPD)))
+    ctx, s = Ctx(A, "X"), load_class(NAME)()
+    for i in range(BPD):
+        ctx.i = i
+        assert s.entry(ctx) == Signal()
+    # random entries, drawn on every bar, either side
+    b, f = book([bar(STOP_L, 1)] * len(times), times=times)
+    rnd = RandomEntry(load_class(NAME)(), 1.0, seed=1)
+    side = np.where(np.random.default_rng(1).random(len(b)) < 0.5, 1.0, -1.0)
+    rr = run_backtest(rnd, b, f.assign(_rand=side), symbol="X", tf="5m", ep=EngineParams())
+    t = np.array([x["signal_time"] for x in rr.trades])
+    assert len(t) > 50 and in_session(t + M5, load_class(NAME).session).all()
+
+
+@pytest.fixture(scope="module")
+def market_runs():
+    """The plugin through the engine on each symbol of the 5m synthetic market."""
+    cls = load_class(NAME)
+    out = {}
+    for sym, b in synthetic_market.market("5m").items():
+        s = cls()
+        f = s.prepare(b)
+        out[sym] = s, run_backtest(s, b, f, symbol=sym, tf="5m", ep=EngineParams()), f
+    return out
+
+
+def test_trades_on_synthetic_5m_market(market_runs):
+    n = {sym: len(r.trades) for sym, (_, r, _) in market_runs.items()}
+    assert all(k > 0 for k in n.values()), n
+
+
+def test_daily_rules_match_the_engine_on_the_synthetic_market(market_runs):
+    """Per session day, the plugin's fills are the engine's trades and its wins the engine's target
+    exits; no day has more than max_trades trades, or a trade after a target exit; every signal is in
+    the declared session and every trade is flat by 15:55 New York on the day it entered."""
+    session = load_class(NAME).session
+    two = wins = 0
+    for sym, (s, r, f) in market_runs.items():
+        days = engine_days(r, f)
+        assert s.days == days, sym
+        assert max(n for n, _ in days.values()) <= 2
+        two += sum(n == 2 for n, _ in days.values())
+        wins += sum(w for _, w in days.values())
+        by_day = {}
+        for t in r.trades:
+            by_day.setdefault(int(ny_session_day(np.array([t["signal_time"]]))[0]), []).append(t["exit_reason"])
+        assert all("target" not in x[:-1] for x in by_day.values()), sym
+        sig = np.array([t["signal_time"] for t in r.trades])
+        assert in_session(sig + M5, session).all()
+        ent = pd.to_datetime([t["entry_time"] for t in r.trades], unit="ms", utc=True).tz_convert(NY)
+        ext = pd.to_datetime([t["exit_time"] for t in r.trades], unit="ms", utc=True).tz_convert(NY)
+        assert (ext.date == ent.date).all() and (ext.strftime("%H:%M") <= "15:55").all()
+    assert two > 0 and wins > 0
 
 
 # ------------------------------------------------------------------ speed

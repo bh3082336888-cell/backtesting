@@ -5,8 +5,11 @@ unit u; in lce_pct u = 0.01169 x price. Levels are point-in-time: at each New Yo
 D (18:00) they are drawn from the last vp_days complete session days before D, and stay fixed until
 the next D.
 
-So far this file holds the levels, the EMA clouds, the six flowchart branches and the bracket. The
-entries, exits and daily rules come next.
+On a bar whose close is in the entry window (09:40-15:45 New York, Mon-Fri) a flowchart branch enters
+its side with the level bracket, unless the bar is big, the session day (18:00 -> 18:00 New York, of
+the signal bar) already has max_trades filled entries or a win. A position moves its stop to the
+entry price once its best close is be_frac of the way to the target, and exits at the close of the
+15:55 bar (or of the first bar after a gap over it).
 """
 
 import math
@@ -16,7 +19,7 @@ import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
 from perp_lab.indicators import ny_offset_ms, ny_session_day, ny_weekday_minute, wilder
-from perp_lab.strategy import Strategy
+from perp_lab.strategy import EXIT, HOLD, Signal, Strategy, enter
 
 # Literals of the model, not params: the sensitivity check perturbs params only.
 PCT_U = 0.01169                  # lce_pct: u = 0.01169 x price (ES's median ATR(14) / close)
@@ -35,8 +38,10 @@ CLOUD_M = (1, 3, 6, 12, 24)      # the 5m, 15m, 30m, 1h and 2h clouds: EMA lengt
 M_2H = 24                        # the 2h cloud: HTF and LTF wait for its slow EMA
 CLOUDS = ["htf", "ltf", "ltf_prev", "flip", "fast5", "slow5"]
 BRANCHES = ["sig_side", "sig_branch", "in_window", "big"]
+SESSION_COLS = ["eod", "sday"]
 SIDES = np.array([0.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0])      # by branch: 0 (none), 1 .. 6
 ENTRY_FROM, ENTRY_TO = 9 * 60 + 40, 15 * 60 + 45                # signal-bar closes 09:40-15:45 New York
+HELD_FROM, HELD_TO = 9 * 60 + 40, 15 * 60 + 55                  # positions held at closes in [09:40, 15:55)
 
 _DAY, _HOUR = 86_400_000, 3_600_000
 _BAR = 300_000                   # a 5m bar closes 5 minutes after it opens
@@ -53,14 +58,95 @@ class LcePct(Strategy):
     timeframes = ["5m"]
     session = {"tz": "America/New_York", "days": [0, 1, 2, 3, 4], "start": "09:40", "end": "15:45"}
 
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        # The daily rules' memory, for entry only (manage never reads it). Keyed by the session day of
+        # the signal bar. A new instance per run, as the sandbox makes.
+        self._fills: dict[int, int] = {}
+        self._wins: dict[int, int] = {}
+        self._sent = None       # the entry sent at the last close: (side, stop, target, day)
+        self._held = None       # the position held at the last close: (side, stop, target, day, exiting)
+
+    @property
+    def days(self) -> dict:
+        """Per session day (of the signal bar): (filled entries, wins) so far. A copy, read-only."""
+        return {d: (n, self._wins.get(d, 0)) for d, n in self._fills.items()}
+
     def prepare(self, bars):
         p = self.p
         u_d = u_day(bars, p["unit"], p["atr_n"])
         lv = level_features(bars, u_d, p)
         u = u_bar(bars["close"], p["unit"], u_d)
         cl = cloud_features(bars["close"], u, p)
-        return pd.concat([lv, cl, branch_features(bars, lv, cl, u, p),
-                          pd.DataFrame({"u": u}, index=bars.index)], axis=1)
+        clock = close_clock(bars["open_time"])
+        return pd.concat([lv, cl, branch_features(bars, lv, cl, u, p, clock),
+                          pd.DataFrame({"u": u}, index=bars.index), session_features(bars, clock)], axis=1)
+
+    def on_bar(self, ctx):
+        """First what the engine did with the last close's signal (a fill, a win), then entry when
+        flat and manage when in a position."""
+        pos = ctx.position
+        if self._sent is not None:
+            side, stop, tgt, day = self._sent
+            if pos is not None:
+                self._count(day, False)
+            elif (ctx["open"] - stop) * side > 0:
+                # Filled at the open and closed inside this bar. The engine refuses an entry only when
+                # its fill is at or beyond the stop: the open gapped through it (taken here without the
+                # slippage the plugin can't see), or the liquidation price is inside the stop, which a
+                # stop under 3% away at leverage 3 (liquidation about 33% away) never is.
+                self._count(day, _won(ctx, side, stop, tgt))
+        elif self._held is not None and pos is None:
+            side, stop, tgt, day, exiting = self._held
+            if day is not None and not exiting and _won(ctx, side, stop, tgt):
+                self._wins[day] = self._wins.get(day, 0) + 1
+        if pos is None:
+            sig = self.entry(ctx)
+            self._held = None
+            self._sent = None
+            if sig.action in ("long", "short"):
+                self._sent = (1 if sig.action == "long" else -1, sig.stop, sig.target, int(ctx["sday"]))
+            return sig
+        day = self._sent[3] if self._sent is not None else self._held[3] if self._held is not None else None
+        sig = self.manage(ctx)
+        stop, tgt = pos.stop, pos.target
+        if sig.action == "hold":                        # what the engine keeps in force for the next bar
+            if sig.stop is not None and (sig.stop - stop) * pos.side > 0:
+                stop = sig.stop
+            if sig.target is not None:
+                tgt = sig.target
+        self._held = (pos.side, stop, tgt, day, sig.action == "exit")
+        self._sent = None
+        return sig
+
+    def _count(self, day, won):
+        self._fills[day] = self._fills.get(day, 0) + 1
+        if won:
+            self._wins[day] = self._wins.get(day, 0) + 1
+
+    def entry(self, ctx):
+        """The bar's branch side with the bracket, in the window, on a bar that isn't big, while the
+        session day has fewer than max_trades filled entries and no win."""
+        side = ctx["sig_side"]
+        if (side != 1 and side != -1) or ctx["in_window"] != 1 or ctx["big"] != 0:
+            return HOLD
+        day = int(ctx["sday"])
+        if self._fills.get(day, 0) >= self.p["max_trades"] or self._wins.get(day, 0):
+            return HOLD
+        side = int(side)
+        return enter(side, *self.bracket(ctx, side))
+
+    def manage(self, ctx):
+        """EXIT at eod. Otherwise the stop to the entry price once best_close is be_frac of the way to
+        the target, unless the stop is there or past it already. Reads ctx only: RandomEntry calls it
+        without ever calling entry."""
+        if ctx["eod"] == 1:
+            return EXIT
+        pos = ctx.position
+        s, e = pos.side, pos.entry_price
+        if s * (pos.stop - e) < 0 and s * (pos.best_close - e) >= self.p["be_frac"] * s * (pos.target - e):
+            return Signal("hold", float(e))
+        return HOLD
 
     def bracket(self, ctx, side):
         """Long: stop halfway between the base level Z (the highest centre <= close) and the level
@@ -79,6 +165,15 @@ class LcePct(Strategy):
         if ok and ctx["in_window"] == 1 and math.isfinite(stop) and math.isfinite(tgt) and math.isfinite(c):
             return float(stop), float(tgt)
         return math.nan, None
+
+
+def _won(ctx, side, stop, target) -> bool:
+    """Whether a position closed in this bar closed at its target, as the engine decides: the stop
+    first (at the open, then the bar's range), and a target needs a trade through it. (Liquidation is
+    left out: see on_bar.)"""
+    if side > 0:
+        return ctx["low"] > stop and ctx["high"] > target
+    return ctx["high"] < stop and ctx["low"] < target
 
 
 # ---------------------------------------------------------------- session days
@@ -728,11 +823,18 @@ def cloud_features(close: pd.Series, u: np.ndarray, p: dict) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- branches
 
-def branch_features(bars: pd.DataFrame, lv: pd.DataFrame, cl: pd.DataFrame, u: np.ndarray, p: dict) -> pd.DataFrame:
+def close_clock(open_time):
+    """New York weekday (Mon = 0) and minute of the day of each 5m bar's close (open time + 5 min)."""
+    return ny_weekday_minute(np.asarray(open_time, dtype=np.int64) + _BAR)
+
+
+def branch_features(bars: pd.DataFrame, lv: pd.DataFrame, cl: pd.DataFrame, u: np.ndarray, p: dict,
+                    clock=None) -> pd.DataFrame:
     """Per bar: the flowchart branch (1-6; 0 for none) and its side, the first matching row winning;
     whether the bar's close lies in the entry window; and whether its body is too big to chase
     (|close - open| > big_bar x u; NaN without u). The branch ignores the window, big bars and the
-    daily rules (the entry applies them), and is 0 where any of its inputs is NaN."""
+    daily rules (the entry applies them), and is 0 where any of its inputs is NaN. clock: the bars'
+    close_clock, if at hand."""
     lo, hi = bars["low"].to_numpy(float), bars["high"].to_numpy(float)
     op, c = bars["open"].to_numpy(float), bars["close"].to_numpy(float)
     htf, ltf, lp, fl, f5, s5 = (cl[k].to_numpy(float) for k in CLOUDS)
@@ -747,9 +849,28 @@ def branch_features(bars: pd.DataFrame, lv: pd.DataFrame, cl: pd.DataFrame, u: n
     for x in (htf, ltf, lp, fl, f5, s5, at, tch, lo, hi, c):
         known &= ~np.isnan(x)
     br = np.select(rows, [1, 2, 3, 4, 5, 6], 0) * known
-    wd, mi = ny_weekday_minute(bars["open_time"].to_numpy(np.int64) + _BAR)
+    wd, mi = close_clock(bars["open_time"]) if clock is None else clock
     inw = (wd < 5) & (mi >= ENTRY_FROM) & (mi <= ENTRY_TO)
     u = np.asarray(u, dtype=float)
     big = np.where(np.isnan(u), np.nan, np.abs(c - op) > p["big_bar"] * u)
     cols = [SIDES[br], br.astype(float), inw.astype(float), big]
     return pd.DataFrame(dict(zip(BRANCHES, cols)), index=bars.index)
+
+
+# ---------------------------------------------------------------- session
+
+def session_features(bars: pd.DataFrame, clock=None) -> pd.DataFrame:
+    """Per bar: eod, 1 when a position is to be closed at this bar's close: its New York close is not
+    in [09:40, 15:55) on Mon-Fri, or the bar is in a later session day than the bar before it (after a
+    gap over the 15:55 close that ends inside a window); and sday, the bar's session day (18:00 -> 18:00
+    New York, epoch days, as ny_session_day). clock: the bars' close_clock, if at hand."""
+    t = bars["open_time"].to_numpy(np.int64)
+    n = len(t)
+    wd, mi = close_clock(t) if clock is None else clock
+    ds = day_starts(t)
+    sday = np.repeat(np.arange(len(ds) - 1, dtype=np.int64), np.diff(ds))
+    if n:
+        sday += ny_session_day(t[:1])[0]
+    eod = (wd >= 5) | (mi < HELD_FROM) | (mi >= HELD_TO)
+    eod[1:] |= sday[1:] != sday[:-1]
+    return pd.DataFrame(dict(zip(SESSION_COLS, (eod.astype(float), sday.astype(float)))), index=bars.index)
