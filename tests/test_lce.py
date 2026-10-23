@@ -316,6 +316,48 @@ def test_walk_matches_reference_walk(mod):
             assert row.tolist() == ref, (i, up)
 
 
+def low_edge_days():
+    """vp_days 5: every POC and the anchor at 92.65 (row 26 of [90, 110]). Day 3's bar [90, 90.23] is the
+    window low and alone covers rows 0 and 1 (exactly equal) and part of row 2; day 4's bar
+    [109.77, 110] is the window high and alone covers rows 198 and 199 and part of row 197."""
+    b = days_bars([flat_day({92.65: (150, 7.31)}) for _ in range(7)])
+    cols = [b.columns.get_loc(c) for c in ("open", "high", "low", "close", "volume")]
+    b.iloc[3 * BPD + 200, cols] = [90.1, 90.23, 90.0, 90.1, 5.37]       # zero-volume filler bars before
+    b.iloc[4 * BPD + 200, cols] = [109.9, 110.0, 109.77, 109.9, 4.91]
+    return b
+
+
+def test_rows_a_bar_covers_from_its_low_tie_exactly(mod):
+    """Regression: a row starting exactly at a bar's low (row 0 always starts at one) is summed like
+    the full rows above it, so exact ties stay ties and the down walk takes the lowest row."""
+    from fractions import Fraction as Fr
+    b = low_edge_days()
+    lo, hi, vol = arrays(b)
+    ds = mod.day_starts(b.open_time.to_numpy())
+    w = slice(ds[1], ds[6])
+    exact = {}
+    for j in (0, 1, 2, 197, 198, 199):                                  # independent exact reference
+        a_, b_ = Fr(90) + j * Fr(20) / 200, Fr(90) + (j + 1) * Fr(20) / 200
+        tot = Fr(0)
+        for l_, h_, v_ in zip(lo[w], hi[w], vol[w]):
+            l_, h_ = Fr(l_), Fr(h_)
+            if h_ > l_:
+                tot += Fr(v_) * max(min(b_, h_) - max(a_, l_), 0) / (h_ - l_)
+            elif min(int((l_ - 90) / 20 * 200), 199) == j:
+                tot += Fr(v_)
+        exact[j] = tot
+    assert exact[0] == exact[1] > exact[2] > 0 and exact[199] == exact[198] > exact[197] > 0
+    vp = mod._profiles(lo, hi, vol, ds, 5, None)[0][6]
+    p = mod.profile(lo[w], hi[w], vol[w], 90.0, 110.0, 200)
+    for x in (vp, p):
+        assert x[0] == x[1] and x[198] == x[199]                        # bit-equal, as the exact rows are
+        np.testing.assert_allclose(x[list(exact)], [float(v) for v in exact.values()], rtol=1e-9)
+    # the down window from the anchor 92.65 with a 3.05 step is [88.99, 90.21]: rows 0 and 1 only
+    lv, fb = mod.day_levels(lo, hi, vol, ds, 6, 5, 3.05, 1.0)
+    assert not fb and np.isclose(lv, 92.65).any()
+    assert np.isclose(lv, 90.05).any() and not np.isclose(lv, 90.15).any()
+
+
 def test_zones_never_overlap(mod):
     b = random_bars(40 * BPD, seed=7)
     lo, hi, vol = arrays(b)

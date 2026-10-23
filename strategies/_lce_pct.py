@@ -139,41 +139,43 @@ def _fixed(total):
 class _Work:
     """Work arrays for _spread, reused across passes."""
 
-    __slots__ = ("x", "fl", "m", "i", "w", "d")
+    __slots__ = ("x", "fl", "c", "m", "i", "w", "d")
 
     def __init__(self, shape):
         self.x, self.fl = np.empty((2, *shape)), np.empty((2, *shape), dtype=np.intp)
-        self.m = np.empty(shape, dtype=np.intp)
+        self.c, self.m = np.empty(shape, dtype=np.intp), np.empty(shape, dtype=np.intp)
         self.i, self.w, self.d = np.empty((2, *shape), dtype=np.intp), np.empty((2, *shape)), np.empty((2, *shape))
 
 
 def _spread(lh, vb, vf, edge, scale, hq, base, b):
     """bincount entries that spread each bar's volume evenly over the rows its [lo, hi] covers.
     lh = [lo, hi]; rows are unit steps of x = (price - edge) x scale (x >= 0; row floor(x)); hq = the
-    row height x the fixed-point scale. A bar's first row gets its overlap with the bar, its last row
-    the rest (a bar inside one row: all of it), and every row in between one row's worth, all in units
-    of the bar's volume per unit price (the caller multiplies the binned rows by the row height).
-    Fills b.i = [first, last] + base with b.w = those amounts, and b.d = [+1 row, -1 row] in fixed
-    point: a difference array the caller bins at [first + 1, last] (it adds 1 to b.i[0]). vf (flat
-    bars' volume) may be None when there are no flat bars."""
-    x, fl, m = b.x, b.fl, b.m
+    row height x the fixed-point scale. Every row the bar covers fully, from row ceil(x_lo) up to its
+    last row, gets one row's worth in fixed point; its first row gets what lies below ceil(x_lo) (nothing
+    when x_lo is a row edge) and its last row what lies in it (a bar inside one row: all of it, in the
+    first row's entry plus a negative last one), in units of the bar's volume per unit price (the
+    caller multiplies the binned rows by the row height). Fills b.i = [first, last] + base with
+    b.w = those amounts, b.c with ceil(x_lo), and b.d = [+1 row, -1 row] in fixed point: a difference
+    array the caller bins at [ceil(x_lo), last]. vf (flat bars' volume) may be None when there are no
+    flat bars."""
+    x, fl, c, m = b.x, b.fl, b.c, b.m
     np.subtract(lh, edge, out=x)
     np.multiply(x, scale, out=x)
     np.copyto(fl, x, casting="unsafe")                                      # floor, as x >= 0
     (xl, xh), (first, last), (w0, w1) = x, fl, b.w
-    np.add(first, 1, out=m)
-    np.subtract(m, xl, out=w0)
+    np.add(first, xl > first, out=c)                                        # ceil(x_lo): the first full row
+    np.subtract(c, xl, out=w0)
     w0 *= vb
     if vf is not None:
         w0 += vf * scale
-    np.maximum(last, m, out=m)                                              # first + 1 for a bar inside one row:
-    np.subtract(xh, m, out=w1)                                              # w1 < 0 takes back w0's excess
+    np.maximum(last, c, out=m)                                              # c = last + 1 for a bar inside one
+    np.subtract(xh, m, out=w1)                                              # row: w1 < 0 takes back w0's excess
     w1 *= vb
-    np.subtract(last, first, out=m)
+    np.subtract(last, c, out=m)                                             # full rows c .. last - 1
     d0, d1 = b.d
     np.multiply(vb, hq, out=d0)
     np.rint(d0, out=d0)
-    d0 *= m >= 2
+    d0 *= m >= 1
     np.negative(d0, out=d1)
     np.add(fl, base, out=b.i)
 
@@ -184,11 +186,12 @@ def _pass(lh, vb, vf, grid, r, b=None):
     n = lh.shape[1]
     b = b or _Work(lh.shape[1:])
     edge, scale, h, hq = grid
-    _spread(lh, vb, vf, edge, scale, hq, (np.arange(n) * r)[:, None], b)
+    base = (np.arange(n) * r)[:, None]
+    _spread(lh, vb, vf, edge, scale, hq, base, b)
     ii = b.i.reshape(-1)
     direct = np.bincount(ii, weights=b.w.reshape(-1), minlength=n * r).reshape(n, r)
     direct *= h
-    b.i[0] += 1
+    np.add(b.c, base, out=b.i[0])
     return direct, np.bincount(ii, weights=b.d.reshape(-1), minlength=n * r).reshape(n, r)
 
 
