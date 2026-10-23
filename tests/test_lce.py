@@ -24,7 +24,7 @@ from perp_lab.validate import synthetic_market
 from tests.conftest import flat_bars, make_bars
 from tests.sandbox_fixtures import load_class
 
-NAME = "_lce_pct"
+NAME = "lce_pct"
 M5 = 300_000
 BPD = 288                      # 5m bars in a winter session day
 T0 = "2024-01-07 23:00"        # Sunday 18:00 New York (EST): a session-day start
@@ -694,8 +694,8 @@ def test_prepare_returns_level_cloud_and_branch_features(mod):
 
 
 def test_prepare_is_causal(mod):
-    """Row t of prepare depends on bars[: t + 1] only (test_lookahead skips the plugin until it is
-    renamed in Task 8)."""
+    """Row t of prepare depends on bars[: t + 1] only, on 5m bars and every grid corner (test_lookahead
+    checks the plugin, signals included, on its 1h synthetic bars)."""
     cls = load_class(NAME)
     b = trend_bars(14 * BPD, seed=2)
     ds = mod.day_starts(b.open_time.to_numpy())
