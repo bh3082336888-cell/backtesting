@@ -1,0 +1,8 @@
+lce_pct prepare, BTCUSDT 5m research bars, vp_days = 10, in a sandbox worker
+plugin b7cb43a5896d at commit 5af907d; Intel(R) Core(TM) Ultra 9 275HX; 8 of 24 cores are performance cores
+bars: 683,424 (2020-01-01 .. 2026-06-30), 19 columns
+load average before: 1.95 2.72 2.56
+budget (spec; recorded, not a gate): 0.30 s
+
+scheduler's placement: median 0.650 s CPU over 5 runs (0.830, 0.650, 0.650, 0.650, 0.660)
+performance cores: median 0.660 s CPU over 5 runs (0.770, 0.660, 0.650, 0.660, 0.650)

@@ -1626,7 +1626,8 @@ def test_daily_rules_match_the_engine_on_the_synthetic_market(market_runs):
 # The brief's fail-fast line was 0.18 s with a 4-sub-point profile, which misses the exact spread by
 # 0.07-0.28 L1 (see test_profile_close_to_exact_spread); the exact spread costs more. Reached: 0.24 s
 # CPU on an idle performance core, 0.26 s with the machine busy; the line leaves room for that noise.
-# The binding gate is Task 8's 0.30 s for all of prepare in a sandbox worker.
+# The spec's 0.30 s for all of prepare in a sandbox worker is recorded, not a gate (user decision
+# 2026-10-23): docs/research/2026-10-23-lce/perf.out.
 SPEED_LIMIT_S = 0.30
 
 
