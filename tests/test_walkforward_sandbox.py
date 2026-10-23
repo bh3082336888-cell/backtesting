@@ -315,12 +315,35 @@ def test_plugin_without_session_unchanged():
         pd.testing.assert_series_equal(wfm._compact(res, "X", {}, None, tf="5m", session=session)["flat_bars"], old)
 
 
+def _with_session(session: dict) -> PluginSource:
+    return PluginSource.from_text("donchian_atr", DONCHIAN.replace(
+        '    timeframes = ["1h", "4h"]\n', f'    timeframes = ["1h", "4h"]\n    session = {session!r}\n'))
+
+
 def test_run_chunk_passes_the_plugin_session(tmp_path, monkeypatch):
     seen = []
     real = wfm._compact
     monkeypatch.setattr(wfm, "_compact", lambda *a, **k: seen.append((a, k)) or real(*a, **k))
     cfg = market_config(tmp_path)
-    src = PluginSource.from_text("donchian_atr", DONCHIAN)
+    src = _with_session(LCE_SESSION)
+    assert src.meta.session == LCE_SESSION
     wfm._init_worker(str(cfg.path))
     wfm.run_chunk((src, "BTCUSDT", "4h", [({}, "BTCUSDT", "4h", None, None, None)], None, False))
-    assert seen[0][0][-1] == src.meta.session == {} and seen[0][0][-2] == "4h"
+    assert seen[0][0][-1] == LCE_SESSION and seen[0][0][4] == "4h"
+
+
+@pytest.mark.parametrize("window, outside", [("09:40", True), ("00:00", False)])
+def test_the_verdict_counts_oos_entries_outside_the_session(tmp_path, plugins, window, outside):
+    # 4h closes land on 4-hour UTC marks: never inside a 09:40-09:41 New York window, always inside all day.
+    session = {"tz": "America/New_York", "days": [0, 1, 2, 3, 4, 5, 6], "start": window,
+               "end": "09:41" if outside else "23:59"}
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1, src=_with_session(session))
+    n = rec["metrics"]["trades"]
+    assert n > 0
+    if outside:
+        assert rec["outside_session"] == n
+        assert f"{n} OOS entries outside its declared session" in rec["fail_reasons"]
+    else:
+        assert rec["outside_session"] == 0
+        assert not any("outside its declared session" in f for f in rec["fail_reasons"])

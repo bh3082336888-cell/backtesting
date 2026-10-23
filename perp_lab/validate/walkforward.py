@@ -93,8 +93,8 @@ def _bars(symbol: str, tf: str) -> pd.DataFrame:
 LEVEL_COLS = ("level_time", "level_stop", "level_target")
 
 
-def _compact(res: BacktestResult, symbol: str, params: dict, seed, keep_levels: bool = False,
-             tf: str = "", session: dict | None = None) -> dict:
+def _compact(res: BacktestResult, symbol: str, params: dict, seed, tf: str, keep_levels: bool = False,
+             session: dict | None = None) -> dict:
     """What a walk-forward keeps of one continuous run. The trades' stop/target path (`LEVEL_COLS`)
     only with `keep_levels`: only the walk-forward grid's trades are charted. `flat_bars` counts the
     bars flat at their close and, for a plugin that declares a `session`, closing inside it: the
@@ -126,7 +126,7 @@ def run_chunk(args) -> list[dict]:
         for params, _, _, overrides, seed, rand in jobs:
             ep = EngineParams.from_config(cfg, symbol, **(overrides or {}))
             res = b.backtest(params, ep, random=None if seed is None else (seed, *rand))
-            out.append(_compact(res, symbol, params, seed, keep_levels, tf, src.meta.session))
+            out.append(_compact(res, symbol, params, seed, tf, keep_levels, src.meta.session))
     return out
 
 
