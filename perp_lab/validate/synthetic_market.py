@@ -3,7 +3,9 @@
 Each symbol is a single 5m path from `synthetic_bars` (fixed seeds and start date, never the
 day-pinned holdout span, so the market is the same every day), resampled to each coarser timeframe.
 A 1h plugin and its 4h twin then see the same prices, and their positions on the hourly grid can be
-compared. Positions measured here are cached by MARKET_VERSION: bump it whenever the bars change.
+compared. The path's per-bar volatility is scaled by sqrt(5m/15m) so 15m and coarser bars keep the
+volatility they had at a 15m base. Positions measured here are cached by MARKET_VERSION: bump it whenever
+the bars change.
 """
 
 from __future__ import annotations
@@ -19,6 +21,9 @@ MARKET_VERSION = 2
 SYMBOLS = ("SYN1", "SYN2", "SYN3", "SYN4")
 DAYS = 180
 BASE_MS = TF_MS["5m"]
+# synthetic_bars' noise is per bar whatever the timeframe; scaling it by sqrt(5m / 15m) keeps the 15m and
+# coarser bars about as volatile as they were when the path was 15m.
+VOL_SCALE = (BASE_MS / TF_MS["15m"]) ** 0.5
 _SUMMED = ("volume", "quote_volume", "trades", "taker_buy_volume", "taker_buy_quote_volume", "funding_charge")
 
 
@@ -28,7 +33,7 @@ class NoMarket(ValueError):
 
 def _path(i: int) -> pd.DataFrame:
     bars = synthetic_bars(n=DAYS * 86_400_000 // BASE_MS, seed=100 + i, start="2023-01-01", funding_every=96,
-                          tf_ms=BASE_MS)                              # funding every 8 hours
+                          tf_ms=BASE_MS, vol_scale=VOL_SCALE)          # funding every 8 hours
     return with_moving_columns(bars, seed=200 + i)
 
 

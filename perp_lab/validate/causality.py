@@ -26,15 +26,16 @@ H = 3_600_000
 CUTS = [400, 1100, 1777, 2500]
 
 
-def synthetic_bars(n=3000, seed=0, start="2023-01-01", funding_every=8, tf_ms=H):
-    """Synthetic perp bars with regimes, trends and funding extremes."""
+def synthetic_bars(n=3000, seed=0, start="2023-01-01", funding_every=8, tf_ms=H, vol_scale=1.0):
+    """Synthetic perp bars with regimes, trends and funding extremes. vol_scale multiplies the drift,
+    return and high/low noise magnitudes (1.0 leaves every draw as it was)."""
     rng = np.random.default_rng(seed)
-    drift = np.repeat(rng.normal(0, 0.002, n // 200 + 1), 200)[:n]
-    r = drift + rng.normal(0, 0.01, n)
+    drift = np.repeat(rng.normal(0, 0.002 * vol_scale, n // 200 + 1), 200)[:n]
+    r = drift + rng.normal(0, 0.01 * vol_scale, n)
     close = 100 * np.exp(np.cumsum(r))
     open_ = np.r_[100.0, close[:-1]]
-    hi = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.004, n)))
-    lo = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.004, n)))
+    hi = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 0.004 * vol_scale, n)))
+    lo = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 0.004 * vol_scale, n)))
     t0 = int(pd.Timestamp(start, tz="UTC").value // 10**6)
     ot = t0 + np.arange(n) * tf_ms
     fc = np.zeros(n)

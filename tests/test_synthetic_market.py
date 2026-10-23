@@ -4,7 +4,7 @@ import pytest
 
 from perp_lab.config import TF_MS
 from perp_lab.validate.causality import synthetic_bars, with_moving_columns
-from perp_lab.validate.synthetic_market import DAYS, MARKET_VERSION, SYMBOLS, market
+from perp_lab.validate.synthetic_market import DAYS, MARKET_VERSION, SYMBOLS, VOL_SCALE, market
 
 
 def test_the_market_is_one_path_at_every_timeframe():
@@ -30,7 +30,7 @@ def test_the_market_is_fixed():
     m = market("5m")
     assert tuple(m) == SYMBOLS and market("5m") is m                 # built once per timeframe
     base = with_moving_columns(synthetic_bars(n=DAYS * 288, seed=102, start="2023-01-01", funding_every=96,
-                                              tf_ms=300_000), seed=202)
+                                              tf_ms=300_000, vol_scale=VOL_SCALE), seed=202)
     pd.testing.assert_frame_equal(m["SYN3"], base)
     assert m["SYN1"].index[0] == pd.Timestamp("2023-01-01", tz="UTC")
     assert not m["SYN1"].close.equals(m["SYN2"].close)                # one path per symbol
@@ -67,3 +67,15 @@ def test_funding_is_charged_once_whatever_the_timeframe():
 def test_no_market_below_5m(tf):      # finer than 5m, or unknown
     with pytest.raises(ValueError, match="no synthetic market"):
         market(tf)
+
+
+def test_synthetic_bars_vol_scale_defaults_to_one_and_scales_the_noise():
+    a = synthetic_bars(n=4000, seed=3)
+    pd.testing.assert_frame_equal(a, synthetic_bars(n=4000, seed=3, vol_scale=1.0))
+    half = synthetic_bars(n=4000, seed=3, vol_scale=0.5)               # the same draws, halved
+    sd = lambda b: np.log(b.close).diff().std()
+    assert sd(half) == pytest.approx(0.5 * sd(a), rel=1e-6)
+
+
+def test_the_5m_market_is_scaled_to_the_old_15m_volatility():
+    assert VOL_SCALE == pytest.approx(3 ** -0.5)

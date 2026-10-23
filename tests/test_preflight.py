@@ -36,8 +36,7 @@ TWIN_1H = (BASE.replace('params = {"n": 40, "atr_n": 14, "atr_mult": 3.0}',
 # donchian_atr turned over. Negating the side in entry() alone is not enough: that breakout fade
 # exits on its own trail and holds other hours (mirror overlap about 0.33 on the synthetic market).
 # A mirror holds donchian_atr's cells on the other side, so it is out where donchian_atr is out:
-# donchian_atr's chandelier stop is its target, and its own stop is as far as donchian_atr's target
-# (so the engine refuses the same entries: on the 5m-built market the ATR is wide and most are refused).
+# donchian_atr's chandelier stop is its target, and its own stop is far away.
 MIRROR = '''"""donchian_atr turned over: short its breakouts, long its breakdowns, flat when it is flat."""
 from perp_lab.indicators import atr, donchian_prior
 from perp_lab.strategy import HOLD, Signal, Strategy, enter
@@ -53,8 +52,7 @@ class Mirror(Strategy):
         return bars[[]].assign(dc_hi=hi, dc_lo=lo, atr=atr(bars, self.p["atr_n"]))
 
     def bracket(self, ctx, side):
-        d = self.p["atr_mult"] * ctx["atr"]
-        return ctx["close"] - side * d, ctx["close"] + side * d
+        return ctx["close"] * (1 - side * 0.25), ctx["close"] + side * self.p["atr_mult"] * ctx["atr"]
 
     def entry(self, ctx):
         c = ctx["close"]
