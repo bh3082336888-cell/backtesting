@@ -65,14 +65,16 @@ class LcePct(Strategy):
         """Long: stop halfway between the base level Z (the highest centre <= close) and the level
         below it, target the lower edge of the lowest zone above the close; short mirrored. A NaN stop
         (no entry) unless the bar is in the entry window and stop < close < target (target < close <
-        stop for a short)."""
+        stop for a short), and for any side other than +1 or -1."""
         c = ctx["close"]
-        if side > 0:
+        if side == 1:
             stop, tgt = (ctx["z_dn_c"] + ctx["z_dn2_c"]) / 2, ctx["z_up_lo"]
             ok = stop < c < tgt
-        else:
+        elif side == -1:
             stop, tgt = (ctx["z_up_c"] + ctx["z_up2_c"]) / 2, ctx["z_dn_hi"]
             ok = tgt < c < stop
+        else:
+            return math.nan, None
         if ok and ctx["in_window"] == 1 and math.isfinite(stop) and math.isfinite(tgt) and math.isfinite(c):
             return float(stop), float(tgt)
         return math.nan, None

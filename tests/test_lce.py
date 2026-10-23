@@ -1113,6 +1113,15 @@ def test_bracket_geometry_long_short(mod):
     assert n_ok > 300
 
 
+def test_bracket_refuses_a_side_other_than_one(mod):
+    s = load_class("_lce_pct")()
+    for side in (0, 0.0, 2, -2, 0.5, np.nan, None):
+        assert no_bracket(s.bracket(ctx_of(**GRID), side)), side
+    for side in (1, 1.0, np.float64(1.0), np.int64(1)):
+        assert s.bracket(ctx_of(**GRID), side) == (97.5, 98.9), side
+    assert s.bracket(ctx_of(**GRID), -1.0) == (99.5, 98.1)
+
+
 def test_bracket_nan_outside_window(mod):
     s = load_class("_lce_pct")()
     for w in (0.0, np.nan):
