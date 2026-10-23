@@ -336,6 +336,12 @@ grid setting `vp_days = 10`. Measure it before the first trial. **This spec's ca
 If it can't be met, stop and report the measured cost. A plugin that can't be examined can't
 enter the book, and raising `exam_cpu_hours` is the user's call.
 
+**Decision (user, 2026-10-23):** the budget can't be met. Task 6 measured the levels alone at
+0.34–0.35 s in a worker; the whole `prepare` is expected near 0.5 s. Continue anyway. The trials
+don't depend on the exam budget. If LCE is promoted, the user decides then between raising
+`exam_cpu_hours` and making the streamed exam cheaper. The measured cost is recorded, not used
+as a gate.
+
 ## Looks at real data before the trials
 
 This follows the trial-7 note (`docs/research/2026-10-18-strategy-research.md`, section 8).
