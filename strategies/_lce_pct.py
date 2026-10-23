@@ -32,6 +32,7 @@ R_MIN = 0.05                     # a step under 1/20 row (thousands of levels) m
 FEATURES = ["z_dn_c", "z_dn2_c", "z_up_lo", "z_up_c", "z_up2_c", "z_dn_hi", "at_zone", "touched", "anchor_fb",
             "spacing_u"]
 CLOUD_M = (1, 3, 6, 12, 24)      # the 5m, 15m, 30m, 1h and 2h clouds: EMA lengths x M on 5m bars
+M_2H = 24                        # the 2h cloud: HTF and LTF wait for its slow EMA
 CLOUDS = ["htf", "ltf", "ltf_prev", "flip", "fast5", "slow5"]
 BRANCHES = ["sig_side", "sig_branch", "in_window", "big"]
 SIDES = np.array([0.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0])      # by branch: 0 (none), 1 .. 6
@@ -711,7 +712,8 @@ def cloud_features(close: pd.Series, u: np.ndarray, p: dict) -> pd.DataFrame:
         st[m] = _state(fast, slow, slope, p["theta"])
         if m == 1:
             fast5, slow5 = fast, slow
-    warm = np.isnan(slow)                                                   # the 2h slow EMA, the last one
+        if m == M_2H:
+            warm = np.isnan(slow)                                           # until the 2h slow EMA exists
     out = np.empty((n, len(CLOUDS)), order="F")                             # column-major: one block, no copy
     out[:, 0] = _htf(st[6], st[12], st[24])
     ltf = out[:, 1]
