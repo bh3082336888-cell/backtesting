@@ -36,7 +36,8 @@ TWIN_1H = (BASE.replace('params = {"n": 40, "atr_n": 14, "atr_mult": 3.0}',
 # donchian_atr turned over. Negating the side in entry() alone is not enough: that breakout fade
 # exits on its own trail and holds other hours (mirror overlap about 0.33 on the synthetic market).
 # A mirror holds donchian_atr's cells on the other side, so it is out where donchian_atr is out:
-# donchian_atr's chandelier stop is its target, and its own stop is far away.
+# donchian_atr's chandelier stop is its target, and its own stop is as far as donchian_atr's target
+# (so the engine refuses the same entries: on the 5m-built market the ATR is wide and most are refused).
 MIRROR = '''"""donchian_atr turned over: short its breakouts, long its breakdowns, flat when it is flat."""
 from perp_lab.indicators import atr, donchian_prior
 from perp_lab.strategy import HOLD, Signal, Strategy, enter
@@ -52,7 +53,8 @@ class Mirror(Strategy):
         return bars[[]].assign(dc_hi=hi, dc_lo=lo, atr=atr(bars, self.p["atr_n"]))
 
     def bracket(self, ctx, side):
-        return ctx["close"] * (1 - side * 0.25), ctx["close"] + side * self.p["atr_mult"] * ctx["atr"]
+        d = self.p["atr_mult"] * ctx["atr"]
+        return ctx["close"] - side * d, ctx["close"] + side * d
 
     def entry(self, ctx):
         c = ctx["close"]
@@ -392,11 +394,11 @@ def test_a_source_refusal_still_runs_the_lookahead_check_and_the_overlap(cfg, pl
 
 def test_a_timeframe_without_a_market_skips_the_overlap_and_says_so(cfg, plugins, tmp_path, monkeypatch):
     monkeypatch.setattr(pf, "lookahead_failures", lambda c, s: [])
-    fivem = SOUND.replace('timeframes = ["1h", "4h"]', 'timeframes = ["5m"]')
-    report = pf.preflight(cfg, stage(tmp_path, "fivem", fivem), "5m")
+    onem = SOUND.replace('timeframes = ["1h", "4h"]', 'timeframes = ["1m"]')
+    report = pf.preflight(cfg, stage(tmp_path, "onem", onem), "1m")
     assert report["ok"] is False and report["meta"] == report["lookahead"] == report["overlap"] == []
-    assert report["skipped"] == {"overlap": "no synthetic market at 5m: its bars are 15m, resampled to multiples "
-                                            "of 15m"}
+    assert report["skipped"] == {"overlap": "no synthetic market at 1m: its bars are 5m, resampled to multiples "
+                                            "of 5m"}
 
 
 def test_precheck_is_the_judges_source_only_refusals(plugins):
