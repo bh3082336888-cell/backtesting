@@ -347,3 +347,22 @@ def test_the_verdict_counts_oos_entries_outside_the_session(tmp_path, plugins, w
     else:
         assert rec["outside_session"] == 0
         assert not any("outside its declared session" in f for f in rec["fail_reasons"])
+
+
+@pytest.mark.parametrize("close_hour", [4, 0])
+def test_the_outside_session_count_uses_the_bar_close_not_the_signal_time(tmp_path, plugins, monkeypatch, close_hour):
+    # A 4h bar signalled at open hour h closes at h+4. UTC window [close_hour:00, close_hour:01]
+    # holds exactly the trades signalled at (close_hour - 4) mod 24: dropping or mis-adding the shift moves the count.
+    real, got = pipeline.walkforward, []
+    monkeypatch.setattr(pipeline, "walkforward", lambda *a, **k: got.append(real(*a, **k)) or got[-1])
+    session = {"tz": "UTC", "days": [0, 1, 2, 3, 4, 5, 6], "start": f"{close_hour:02d}:00",
+               "end": f"{close_hour:02d}:01"}
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1, src=_with_session(session))
+    hours = (got[0].oos_trades.signal_time // 3_600_000) % 24
+    inside = int((hours == (close_hour - 4) % 24).sum())
+    unshifted = int((hours == close_hour).sum())
+    assert inside != unshifted and len(hours) > inside
+    assert rec["outside_session"] == len(hours) - inside
+    reasons = [f for f in rec["fail_reasons"] if "outside its declared session" in f]
+    assert reasons == ([f"{len(hours) - inside} OOS entries outside its declared session"] if len(hours) > inside else [])
