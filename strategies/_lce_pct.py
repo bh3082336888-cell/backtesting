@@ -26,6 +26,7 @@ HVN_QUANTILE = 0.7               # ... and at least the 70th percentile of the p
 WIN_LO, WIN_HI = 0.8, 1.2        # the next level is searched for in [0.8, 1.2] x step
 BEYOND = 10                      # levels past each edge of the visible range
 EPS = 1e-9                       # tolerance on the search window's edges, in rows
+TIE = 1e-9                       # volumes within 1e-9 x the profile's largest row are equal (ties: lowest row)
 R_MIN = 0.05                     # a step under 1/20 row (thousands of levels) means a broken profile: no levels
 FEATURES = ["z_dn_c", "z_dn2_c", "z_up_lo", "z_up_c", "z_up2_c", "z_dn_hi", "at_zone", "touched", "anchor_fb",
             "spacing_u"]
@@ -227,12 +228,19 @@ def poc(lo, hi, vol) -> float:
     if not (hi_e > lo_e and np.sum(vol) > 0):
         return math.nan
     p = profile(lo, hi, vol, lo_e, hi_e, SVP_ROWS)
-    return lo_e + (p.argmax() + 0.5) * ((hi_e - lo_e) / SVP_ROWS)
+    return lo_e + (_top(p[None])[0] + 0.5) * ((hi_e - lo_e) / SVP_ROWS)
+
+
+def _top(p):
+    """Per row of p, the lowest index whose volume ties the largest (within TIE)."""
+    mx = p.max(1, keepdims=True)
+    return (p >= mx - TIE * mx).argmax(1)
 
 
 def hvn(p) -> np.ndarray:
     """High-volume nodes of a profile (or of each row of a 2-D stack): the largest row within +-2 rows
-    (ties count), at least the 70th percentile of the profile, and not empty."""
+    (ties count), at least the 70th percentile of the profile, and not empty; within TIE x the
+    profile's largest row counts as equal."""
     p = np.asarray(p, float)
     p2 = np.atleast_2d(p)
     n = p2.shape[1]
@@ -240,7 +248,8 @@ def hvn(p) -> np.ndarray:
     mx = pad[:, :n]
     for k in range(1, 2 * HVN_REACH + 1):
         mx = np.maximum(mx, pad[:, k:k + n])
-    out = (p2 == mx) & (p2 >= np.quantile(p2, HVN_QUANTILE, axis=1, keepdims=True)) & (p2 > 0)
+    tol = TIE * p2.max(1, keepdims=True)
+    out = (p2 >= mx - tol) & (p2 >= np.quantile(p2, HVN_QUANTILE, axis=1, keepdims=True) - tol) & (p2 > 0)
     return out[0] if p.ndim == 1 else out
 
 
@@ -337,7 +346,7 @@ def _profiles(lo, hi, vol, ds, vp_days, want):
     vb, vf = _density(lo, hi, vol)
     vd, vi, sd, sn = _bin(lo, hi, vb, vf, ds, max(int(gi[0]) - vp_days, 0), int(gi[-1]), vp_days, wg, dg)
     vp[gi] = _rows(vd[gi], vi[gi], wq[:, None], VP_ROWS)
-    row = _rows(sd[si_], sn[si_], dq[:, None], SVP_ROWS).argmax(1)
+    row = _top(_rows(sd[si_], sn[si_], dq[:, None], SVP_ROWS))
     pc[si_] = dlo[si_] + (row + 0.5) * ((dhi[si_] - dlo[si_]) / SVP_ROWS)
     return vp, pc, lw, hw, good
 
@@ -346,8 +355,8 @@ def _profiles(lo, hi, vol, ds, vp_days, want):
 
 def _anchor(vp, lo_edge, h, pocs, hz):
     """Per window, the anchor row: the HVN with the most POCs within +-hz of its centre, then the
-    higher volume, then the lower row; and whether no HVN had any POC that close (the fallback).
-    vp (windows, rows) must have volume in every window."""
+    higher volume (within TIE: equal), then the lower row; and whether no HVN had any POC that close
+    (the fallback). vp (windows, rows) must have volume in every window."""
     w, j = np.nonzero(hvn(vp))                                              # by window, then row
     c = lo_edge[w] + (j + 0.5) * h[w]
     near = (np.abs(pocs[w] - c[:, None]) <= hz[w, None]).sum(1)             # a NaN POC never counts
@@ -356,17 +365,18 @@ def _anchor(vp, lo_edge, h, pocs, hz):
     best = np.maximum.reduceat(near, starts)
     cand = near == best[w]
     top = np.maximum.reduceat(np.where(cand, vol, -1.0), starts)
-    cand &= vol == top[w]
+    cand &= vol >= top[w] - TIE * vp.max(1)[w]
     return np.minimum.reduceat(np.where(cand, j, vp.shape[1]), starts), best == 0
 
 
 def _walk_one(p, x, r, up):
     """Reference walk for one window, in rows: from the level at row coordinate x, the next level is
-    the highest-volume row whose centre is in [x + 0.8 r, x + 1.2 r] (ties: the lowest row), or x + r
-    if no row centre of the profile is in it; it ends when the window lies above the profile.
-    Mirrored downwards. r = step / row height."""
+    the highest-volume row whose centre is in [x + 0.8 r, x + 1.2 r] (ties, within TIE: the lowest
+    row), or x + r if no row centre of the profile is in it; it ends when the window lies above the
+    profile. Mirrored downwards. r = step / row height."""
     a_, b_ = WIN_LO * r, WIN_HI * r
     p = list(p)
+    tol = TIE * max(p)
     top = len(p) - 1
     out = []
     while True:
@@ -380,7 +390,8 @@ def _walk_one(p, x, r, up):
                 return out
         if a <= b:
             seg = p[a:b + 1]
-            x = float(a + seg.index(max(seg)))
+            mx = max(seg) - tol
+            x = float(a + next(k for k, v in enumerate(seg) if v >= mx))
         else:
             x = x + r if up else x - r
         out.append(x)
@@ -392,6 +403,7 @@ def _walk(vp, x0, r, up):
     nv, rows = vp.shape
     top = rows - 1
     a_, b_ = WIN_LO * r, WIN_HI * r
+    tol = TIE * vp.max(1)
     x = np.asarray(x0, float).copy()
     act = np.arange(nv)
     steps = []
@@ -415,7 +427,7 @@ def _walk(vp, x0, r, up):
             cols = a[si, None] + np.arange(wid)
             vals = vp[act[si, None], np.minimum(cols, top)]
             vals[cols > b[si, None]] = -np.inf
-            xa[si] = a[si] + vals.argmax(1)
+            xa[si] = a[si] + (vals >= (vals.max(1) - tol[act[si]])[:, None]).argmax(1)
         ns = np.flatnonzero(~snap)
         xa[ns] += r[act[ns]] if up else -r[act[ns]]
         x[act] = xa

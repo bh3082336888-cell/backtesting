@@ -191,10 +191,12 @@ def test_hvn_rule(mod):
     vp = rng.gamma(0.5, 1.0, (50, 200)) * (rng.random((50, 200)) < 0.6)
     got = mod.hvn(vp)
     for i in range(50):
-        q = np.quantile(vp[i], 0.7)
+        q, tol = np.quantile(vp[i], 0.7), 1e-9 * vp[i].max()
         for j in range(200):
             near = vp[i, max(j - 2, 0):j + 3]
-            assert got[i, j] == (vp[i, j] == near.max() and vp[i, j] >= q and vp[i, j] > 0)
+            assert got[i, j] == (vp[i, j] >= near.max() - tol and vp[i, j] >= q - tol and vp[i, j] > 0)
+    p = np.array([0, 5, 5 * (1 - 1e-12), 0, 1.0])                       # within 1e-9 of the largest: a tie
+    assert np.flatnonzero(mod.hvn(p)).tolist() == [1, 2]
 
 
 # ------------------------------------------------------------------ anchor and grid (hand-built days)
@@ -252,6 +254,23 @@ def test_anchor_ties(mod):
     a, f = mod._anchor(np.repeat(vp, 2, 0), np.zeros(2), np.ones(2),
                        np.array([cases[0][0], cases[1][0]]), np.array([0.5, 0.5]))
     assert a.tolist() == [120, 20] and f.tolist() == [False, False]
+
+
+def test_near_equal_volumes_tie(mod):
+    """Volumes 1e-12 apart (float noise: decimal ticks aren't exact in binary) are ties: the lowest row,
+    not whichever rounding made larger."""
+    vp = np.zeros((1, 200))
+    vp[0, 100] = 50.0
+    vp[0, [89, 90]] = [3.0, 3.0 * (1 + 1e-12)]                          # down window from 100 (r = 10): 88..92
+    vp[0, [109, 110]] = [4.0, 4.0 * (1 + 1e-12)]                        # up window: 108..112
+    for up, row in ((False, 89), (True, 109)):
+        assert mod._walk(vp, np.array([100]), np.array([10.0]), up)[0][0] == row
+        assert mod._walk_one(vp[0], 100.0, 10.0, up)[0] == row
+    assert mod._top(np.array([[1.0, 3.0, 3.0 * (1 + 1e-12), 2.0]])).tolist() == [1]
+    two = np.zeros((1, 200))
+    two[0, [20, 120]] = [8.0, 8.0 * (1 + 1e-12)]                        # one POC each: the volume ties
+    a, fb = mod._anchor(two, np.zeros(1), np.ones(1), np.array([[20.5, 120.5]]), np.array([0.5]))
+    assert (a[0], fb[0]) == (20, False)
 
 
 def bump_days(bump_at, bump_vol=3.0):
