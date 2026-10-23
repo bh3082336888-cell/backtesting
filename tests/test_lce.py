@@ -2,8 +2,9 @@
 POC/HVN/anchor/grid rules on hand-built days, causality, warm-up, dead days, u, speed), the EMA
 clouds, the six flowchart branches on hand-built bars, the level bracket, and the entries, exits and
 daily rules (hand-built books through the engine, and the engine's own record on the synthetic
-market)."""
+market); and lce_atr, lce_pct with only its unit (and name, claim and PARENT) changed."""
 
+import difflib
 import itertools
 import math
 import os
@@ -21,7 +22,7 @@ from perp_lab.indicators import ny_session_day, true_range, wilder
 from perp_lab.session_window import in_session
 from perp_lab.strategy import Ctx, PositionView, RandomEntry, Signal, Strategy, enter
 from perp_lab.validate import synthetic_market
-from tests.conftest import flat_bars, make_bars
+from tests.conftest import REPO, flat_bars, make_bars
 from tests.sandbox_fixtures import load_class
 
 NAME = "lce_pct"
@@ -1619,6 +1620,32 @@ def test_daily_rules_match_the_engine_on_the_synthetic_market(market_runs):
         ext = pd.to_datetime([t["exit_time"] for t in r.trades], unit="ms", utc=True).tz_convert(NY)
         assert (ext.date == ent.date).all() and (ext.strftime("%H:%M") <= "15:55").all()
     assert two > 0 and wins > 0
+
+
+# ------------------------------------------------------------------ lce_atr
+
+PCT_CLAIM = ("Taken at Tradewriter's ES-sized levels in fixed percentages, trades that follow his six-branch "
+             "EMA-cloud flowchart at volume-profile levels during US equity hours earn more than random entries "
+             "with the same exits, net of costs.")
+ATR_CLAIM = ("Taken at Tradewriter's ES-sized levels in multiples of daily ATR, trades that follow his six-branch "
+             "EMA-cloud flowchart at volume-profile levels during US equity hours earn more than random entries "
+             "with the same exits, net of costs.")
+
+
+def test_atr_differs_only_in_unit():
+    """lce_atr is lce_pct with exactly four changes: its hypothesis line, PARENT = "lce_pct" after the
+    imports, the class name and the unit. Every rule and constant is shared."""
+    pct = (REPO / "strategies" / "lce_pct.py").read_text().splitlines()
+    atr = (REPO / "strategies" / "lce_atr.py").read_text().splitlines()
+    ops = difflib.SequenceMatcher(None, pct, atr, autojunk=False).get_opcodes()
+    changes = [(op, pct[i1:i2], atr[j1:j2]) for op, i1, i2, j1, j2 in ops if op != "equal"]
+    assert changes == [
+        ("replace", ['"""' + PCT_CLAIM], ['"""' + ATR_CLAIM]),
+        ("insert", [], ["", 'PARENT = "lce_pct"']),
+        ("replace", ["class LcePct(Strategy):"], ["class LceAtr(Strategy):"]),
+        ("replace", ['              "unit": "pct"}'], ['              "unit": "atr"}']),
+    ]
+    assert load_class("lce_atr").params == {**load_class(NAME).params, "unit": "atr"}
 
 
 # ------------------------------------------------------------------ speed
