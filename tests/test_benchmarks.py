@@ -116,3 +116,16 @@ def test_a_no_trade_benchmark_still_carries_a_long_share(cfg):
     wf.oos_trades = wf.oos_trades.iloc[0:0]
     out = benchmarks.random_entry(cfg, wf, seeds=2)
     assert out["beats_random"] is False and out["long_share"] == 0.5
+
+
+def test_random_prob_uses_session_flat_bars(cfg, monkeypatch):
+    from tests.test_walkforward_sandbox import LCE_SESSION, _flat_run
+    from perp_lab.validate import walkforward as wfm
+    res = _flat_run(n=2 * 288)
+    flat = wfm._compact(res, "A", {}, None, tf="5m", session=LCE_SESSION)["flat_bars"].sum()
+    wf = make_wf()
+    wf.oos_flat_bars = {"A": float(flat), "B": 100.0}
+    seen = []
+    monkeypatch.setattr(benchmarks, "run_many", lambda cfg, src, jobs, workers, stderr_dir: seen.extend(jobs) or [])
+    benchmarks.random_entry(cfg, wf, seeds=1)
+    assert seen[0][5][0] == pytest.approx(1 / flat) and flat < (~res.in_pos).sum()

@@ -5,10 +5,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
+from perp_lab.config import TF_MS
 from perp_lab.plugins import PluginSource, require_timeframe
 from perp_lab.runs import MIN_OOS_TRADES_PER_COIN, new_run_id, per_coin_min, repo_commit, verdict, write_run
+from perp_lab.session_window import in_session
 from perp_lab.store import db
 from perp_lab.validate.benchmarks import buy_and_hold, random_entry, regime_split
 from perp_lab.validate.gross import before_costs
@@ -101,7 +104,9 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
     reg = regime_split(wf.oos_trades)
     monthly = monthly_table(wf.oos_portfolio)
     n_coins = listed_coins(wf.oos_daily, oa, ob)
-    status, fails = verdict(wf.oos_summary, rnd, sens, n_coins)
+    outside = (0 if wf.oos_trades.empty else int((~in_session(
+        wf.oos_trades.signal_time.to_numpy(dtype=np.int64) + TF_MS[tf], src.meta.session)).sum()))
+    status, fails = verdict(wf.oos_summary, rnd, sens, n_coins, outside)
 
     rec = {
         "run_id": rid, "strategy": name, "strategy_hash": src.hash,
@@ -119,7 +124,7 @@ def validate_strategy(cfg, name: str, tf: str, symbols=None, seeds=None, workers
         "monte_carlo": mc, "buy_and_hold": bh["portfolio"],
         "regime_split": reg.reset_index().to_dict("records") if len(reg) else [],
         "folds": [{k: v for k, v in f.items()} for f in wf.selected],
-        "status": status, "fail_reasons": fails,
+        "status": status, "fail_reasons": fails, "outside_session": outside,
         "costs": cfg["costs"], "account": cfg["account"],
         "parent_run_id": parent_run_id, "lineage_id": lineage_id,
         "created_at": datetime.now(timezone.utc).isoformat(), "notes": notes,

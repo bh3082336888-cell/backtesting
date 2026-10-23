@@ -52,3 +52,13 @@ def test_the_oos_trade_minimum_scales_with_coins():
 
 def test_the_exam_minimum_scales_but_never_below_the_floor(cfg):
     assert [holdout_min_trades(cfg, n) for n in (2, 8, 17)] == [10, 10, 22]
+
+
+def test_verdict_outside_session_fails():
+    status, fails = verdict({"sharpe": 1.0, "trades": 64}, OK_RND, OK_SENS, 17, 3)
+    assert status == "noise" and fails == ["3 OOS entries outside its declared session"]
+
+
+def test_verdict_outside_session_zero_passes():
+    assert verdict({"sharpe": 1.0, "trades": 64}, OK_RND, OK_SENS, 17, 0)[0] == "candidate"
+    assert verdict({"sharpe": 1.0, "trades": 64}, OK_RND, OK_SENS, 17)[0] == "candidate"

@@ -35,12 +35,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from perp_lab.config import Config, load_config
+from perp_lab.config import TF_MS, Config, load_config
 from perp_lab.data.store import load_bars, research_symbols
 from perp_lab.engine.backtest import BacktestResult, EngineParams
 from perp_lab.engine.metrics import daily_returns, portfolio_returns, sharpe, summarize
 from perp_lab.plugins import PluginSource
 from perp_lab.runs import per_coin_min
+from perp_lab.session_window import in_session
 from perp_lab.sandbox import client
 
 log = logging.getLogger(__name__)
@@ -92,13 +93,19 @@ def _bars(symbol: str, tf: str) -> pd.DataFrame:
 LEVEL_COLS = ("level_time", "level_stop", "level_target")
 
 
-def _compact(res: BacktestResult, symbol: str, params: dict, seed, keep_levels: bool = False) -> dict:
+def _compact(res: BacktestResult, symbol: str, params: dict, seed, keep_levels: bool = False,
+             tf: str = "", session: dict | None = None) -> dict:
     """What a walk-forward keeps of one continuous run. The trades' stop/target path (`LEVEL_COLS`)
-    only with `keep_levels`: only the walk-forward grid's trades are charted."""
+    only with `keep_levels`: only the walk-forward grid's trades are charted. `flat_bars` counts the
+    bars flat at their close and, for a plugin that declares a `session`, closing inside it: the
+    random-entry benchmark fires at the strategy's frequency over the bars it could trade."""
     dr = daily_returns(res.equity, res.time)
     idx = pd.to_datetime(res.time, unit="ms", utc=True)
     expo = pd.Series(res.in_pos.astype(float), index=idx).resample("1D").mean()
-    flat_daily = pd.Series((~res.in_pos).astype(float), index=idx).resample("1D").sum()
+    flat = ~res.in_pos
+    if session:
+        flat = flat & in_session(np.asarray(res.time, dtype=np.int64) + TF_MS[tf], session)
+    flat_daily = pd.Series(flat.astype(float), index=idx).resample("1D").sum()
     trades = pd.DataFrame(res.trades)
     if not keep_levels:
         trades = trades.drop(columns=[c for c in LEVEL_COLS if c in trades.columns])
@@ -119,7 +126,7 @@ def run_chunk(args) -> list[dict]:
         for params, _, _, overrides, seed, rand in jobs:
             ep = EngineParams.from_config(cfg, symbol, **(overrides or {}))
             res = b.backtest(params, ep, random=None if seed is None else (seed, *rand))
-            out.append(_compact(res, symbol, params, seed, keep_levels))
+            out.append(_compact(res, symbol, params, seed, keep_levels, tf, src.meta.session))
     return out
 
 
