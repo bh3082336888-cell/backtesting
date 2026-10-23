@@ -66,13 +66,18 @@ def days_bars(days):
     return bars_of(pr, vo)
 
 
-def random_bars(n, seed=0, scale=0.0015, start=T0):
-    """BTC-like 5m bars: 0.15% per-bar moves, a 0.08% wick, lognormal volume."""
+def random_bars(n, seed=0, scale=0.0015, start=T0, price0=30000.0, tick=None):
+    """BTC-like 5m bars: 0.15% per-bar moves, a 0.08% wick, lognormal volume; on a price tick if given
+    (coarse-tick coins: open and close on the tick, high and low the ticks outside them)."""
     rng = np.random.default_rng(seed)
-    close = 30000 * np.exp(np.cumsum(rng.normal(0, scale, n)))
-    op = np.r_[30000.0, close[:-1]]
+    close = price0 * np.exp(np.cumsum(rng.normal(0, scale, n)))
+    op = np.r_[price0, close[:-1]]
     hi = np.maximum(op, close) * (1 + np.abs(rng.normal(0, scale / 2, n)))
     lo = np.minimum(op, close) * (1 - np.abs(rng.normal(0, scale / 2, n)))
+    if tick:
+        close, op = np.round(close / tick) * tick, np.round(op / tick) * tick
+        hi = np.maximum(np.ceil(hi / tick) * tick, np.maximum(op, close))
+        lo = np.minimum(np.floor(lo / tick) * tick, np.minimum(op, close))
     b = flat_bars(n=n, price=1.0, tf_ms=M5, start=start)
     b["open"], b["high"], b["low"], b["close"] = op, hi, lo, close
     b["volume"] = rng.lognormal(5, 1, n)
@@ -440,6 +445,84 @@ def test_level_features_columns_and_lookups(mod):
     at = f.at_zone.to_numpy()
     for t in range(ds[6] + 10, len(b), 101):
         assert f.touched.iloc[t] == float(at[t - 5:t + 1].max())
+
+
+def reference_levels(lo, hi, vol, close, sd, D, vp):
+    """An independent reference, in price space with plain loops: session day D's sorted levels, the
+    anchor fallback and u, or None without levels. sd: each bar's session-day number."""
+    win = range(D - vp, D)
+    if D - vp <= sd[0] or any(not (sd == x).any() for x in win):
+        return None
+    u = 0.01169 * close[np.flatnonzero(sd < D)[-1]]
+    s, hz = 0.303 * u, 0.103 * u / 2
+    m = (sd >= D - vp) & (sd < D)
+    L, H = lo[m].min(), hi[m].max()
+    if not (H > L and vol[m].sum() > 0):
+        return None
+    h = (H - L) / 200
+    p = exact_spread(lo[m], hi[m], vol[m], L, H, 200)
+    tol = 1e-9 * p.max()                                                # volumes this close are ties
+    cen = L + (np.arange(200) + 0.5) * h
+    pocs = []
+    for x in win:
+        k = sd == x
+        l0, h0 = lo[k].min(), hi[k].max()
+        if h0 > l0 and vol[k].sum() > 0:
+            q = exact_spread(lo[k], hi[k], vol[k], l0, h0, 100)
+            pocs.append(l0 + (np.flatnonzero(q >= q.max() * (1 - 1e-9))[0] + 0.5) * (h0 - l0) / 100)
+    q70 = np.quantile(p, 0.7)
+    hv = [j for j in range(200) if p[j] >= p[max(j - 2, 0):j + 3].max() - tol and p[j] >= q70 - tol and p[j] > 0]
+    near = {j: sum(abs(x - cen[j]) <= hz for x in pocs) for j in hv}
+    best = max(near.values())
+    top = max(p[j] for j in hv if near[j] == best)
+    a = min(j for j in hv if near[j] == best and p[j] >= top - tol)
+    lev = [cen[a]]
+    for sg in (1, -1):                                                  # up, then down
+        c, beyond = cen[a], 0
+        while beyond < 10:
+            w0, w1 = sorted((c + sg * 0.8 * s, c + sg * 1.2 * s))
+            js = np.flatnonzero((cen >= w0 - 1e-9 * h) & (cen <= w1 + 1e-9 * h))
+            c = cen[js[p[js] >= p[js].max() - tol][0]] if len(js) else c + sg * s
+            lev.append(c)
+            beyond += c > H if sg > 0 else c < L
+    return np.sort(lev), best == 0, u, (L, H, h)
+
+
+@pytest.mark.parametrize("coin,kw", [("btc", {}), ("doge", {"price0": 0.1, "tick": 1e-5, "scale": 0.002}),
+                                     ("xrp", {"price0": 0.5, "tick": 1e-4, "scale": 0.002})])
+@pytest.mark.parametrize("vp", [5, 10])
+def test_levels_match_an_independent_reference(mod, coin, kw, vp):
+    seed = 21 if coin == "btc" else {5: 0, 10: 7}[vp]                    # coarse-tick days rounding once got wrong
+    b = random_bars(16 * BPD + 50, seed=seed, start="2024-01-07 12:00", **kw)  # a partial first day
+    lo, hi, vol, close = (b[c].to_numpy() for c in ("low", "high", "volume", "close"))
+    sd = ny_session_day(b.open_time.to_numpy())
+    u = np.full(len(b), np.nan)
+    for D in np.unique(sd)[1:]:
+        u[sd == D] = 0.01169 * close[np.flatnonzero(sd < D)[-1]]
+    f = mod.level_features(b, u, P(vp_days=vp)).to_numpy()
+    checked = 0
+    for D in np.unique(sd):
+        rows = np.flatnonzero(sd == D)
+        ref = reference_levels(lo, hi, vol, close, sd, D, vp)
+        if ref is None:
+            assert np.isnan(f[rows]).all(), D
+            continue
+        lev, fb, ud, (L, H, h) = ref
+        hz = 0.103 * ud / 2
+        ins = lev[(lev >= L) & (lev <= H)]
+        for t in rows:
+            c = close[t]
+            dn, up = lev[lev <= c], lev[lev >= c]
+            ul, dh = (lev - hz)[lev - hz > c], (lev + hz)[lev + hz < c]
+            want = [dn[-1] if len(dn) else np.nan, dn[-2] if len(dn) > 1 else np.nan, ul[0] if len(ul) else np.nan,
+                    up[0] if len(up) else np.nan, up[1] if len(up) > 1 else np.nan, dh[-1] if len(dh) else np.nan,
+                    float(((lev - hz <= hi[t]) & (lev + hz >= lo[t])).any()), np.nan, float(fb),
+                    np.median(np.diff(ins)) / ud]
+            np.testing.assert_allclose(f[t, [0, 1, 2, 3, 4, 5, 6, 8]], np.array(want)[[0, 1, 2, 3, 4, 5, 6, 8]],
+                                       rtol=0, atol=1e-7 * h, err_msg=f"{coin} vp{vp} day {D} bar {t}")
+            assert f[t, 9] == pytest.approx(want[9], rel=1e-9)
+        checked += 1
+    assert checked == 16 - vp - 1 + 1                                   # days vp+1 .. 15 after the partial day 0
 
 
 def test_close_on_a_level_and_outside_the_grid(mod):
