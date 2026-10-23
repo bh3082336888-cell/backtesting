@@ -8,8 +8,10 @@ strategy is run and no bar is loaded.
     "promoted"               the decision is promote; else
     "no signal"              before_costs sharpe <= before_costs random_p95 (the before-costs pass's OOS
                              Sharpe doesn't beat its own random-entry p95); else
-    "signal eaten by costs"  random_entry beats_random is false (the net run doesn't beat its random p95);
-    "other: <reasons>"       otherwise: both beat random, and the failing reasons name the gate.
+    "signal eaten by costs"  random_entry beats_random is False (the net run doesn't beat its random p95);
+    "other: <reasons>"       beats_random is True: both beat random, and the failing reasons name the gate.
+  A missing or non-finite before-costs input, or a missing random_entry block, a missing beats_random or a
+  value that isn't a bool, prints "n/a (...)": never a kill kind.
   Per trade, in bp of notional, means over the OOS trades: gross = (pnl_gross + slippage) / notional
     (before fees, slippage and funding: `pnl_gross` is after slippage), fees, slippage, funding, and
     net = pnl; gross - fees - slippage - funding = net, trade by trade.
@@ -56,15 +58,15 @@ def fmt(x, spec=".3f") -> str:
     return "n/a" if num(x) is None else format(x, spec)
 
 
-def bp(x: pd.Series) -> pd.Series:
+def bp(x: pd.Series, trades: pd.DataFrame) -> pd.Series:
     """Per trade, in bp of the trade's notional."""
-    return x / t.notional * 1e4
+    return x / trades.notional * 1e4
 
 
 def kill_kind(v: dict, s: dict) -> str:
     if v["decision"] == "promote":
         return "promoted"
-    bc, rnd = s.get("before_costs"), s.get("random_entry") or {}
+    bc, rnd = s.get("before_costs"), s.get("random_entry")
     if not bc:
         return "n/a (the run has no before_costs block)"
     sh, p95 = num(bc.get("sharpe")), num(bc.get("random_p95"))
@@ -72,7 +74,14 @@ def kill_kind(v: dict, s: dict) -> str:
         return f"n/a (before_costs sharpe {fmt(bc.get('sharpe'))}, random_p95 {fmt(bc.get('random_p95'))})"
     if sh <= p95:
         return "no signal"
-    if not rnd.get("beats_random"):
+    if not isinstance(rnd, dict):
+        return "n/a (the run has no random_entry block)"
+    if "beats_random" not in rnd:
+        return "n/a (random_entry has no beats_random)"
+    beats = rnd["beats_random"]
+    if type(beats) is not bool:
+        return f"n/a (random_entry beats_random is {beats!r}, not a bool)"
+    if beats is False:
         return "signal eaten by costs"
     return "other: " + "; ".join(v["reasons"])
 
@@ -114,13 +123,13 @@ if t.empty:
 print(f"\n{len(t)} OOS trades, signal {pd.to_datetime(t.signal_time.min(), unit='ms', utc=True).date()} .. "
       f"exit {pd.to_datetime(t.exit_time.max(), unit='ms', utc=True)}")
 slip = t["slippage"] if "slippage" in t else None
-gross = None if slip is None else bp(t.pnl_gross + slip)
+gross = None if slip is None else bp(t.pnl_gross + slip, t)
 print("per trade, bp of notional (mean): "
-      f"gross {fmt(None if gross is None else gross.mean(), '.2f')}, fees {bp(t.fees).mean():.2f}, "
-      f"slippage {fmt(None if slip is None else bp(slip).mean(), '.2f')}, funding {bp(t.funding).mean():.2f}, "
-      f"net {bp(t.pnl).mean():.2f}")
+      f"gross {fmt(None if gross is None else gross.mean(), '.2f')}, fees {bp(t.fees, t).mean():.2f}, "
+      f"slippage {fmt(None if slip is None else bp(slip, t).mean(), '.2f')}, funding {bp(t.funding, t).mean():.2f}, "
+      f"net {bp(t.pnl, t).mean():.2f}")
 if gross is not None:
-    gap = (gross - bp(t.fees) - bp(slip) - bp(t.funding) - bp(t.pnl)).abs().max()
+    gap = (gross - bp(t.fees, t) - bp(slip, t) - bp(t.funding, t) - bp(t.pnl, t)).abs().max()
     print(f"  gross - fees - slippage - funding - net, largest per trade: {gap:.1e} bp")
 
 day = ny_session_day(t.signal_time.to_numpy(np.int64))
