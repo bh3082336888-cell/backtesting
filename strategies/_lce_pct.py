@@ -5,7 +5,8 @@ unit u; in lce_pct u = 0.01169 x price. Levels are point-in-time: at each New Yo
 D (18:00) they are drawn from the last vp_days complete session days before D, and stay fixed until
 the next D.
 
-So far this file holds the levels. The clouds, branches, bracket and exits come next.
+So far this file holds the levels, the EMA clouds, the six flowchart branches and the bracket. The
+entries, exits and daily rules come next.
 """
 
 import math
@@ -14,7 +15,7 @@ import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
-from perp_lab.indicators import ny_offset_ms, ny_session_day, wilder
+from perp_lab.indicators import ny_offset_ms, ny_session_day, ny_weekday_minute, wilder
 from perp_lab.strategy import Strategy
 
 # Literals of the model, not params: the sensitivity check perturbs params only.
@@ -30,8 +31,14 @@ TIE = 1e-9                       # volumes within 1e-9 x the profile's largest r
 R_MIN = 0.05                     # a step under 1/20 row (thousands of levels) means a broken profile: no levels
 FEATURES = ["z_dn_c", "z_dn2_c", "z_up_lo", "z_up_c", "z_up2_c", "z_dn_hi", "at_zone", "touched", "anchor_fb",
             "spacing_u"]
+CLOUD_M = (1, 3, 6, 12, 24)      # the 5m, 15m, 30m, 1h and 2h clouds: EMA lengths x M on 5m bars
+CLOUDS = ["htf", "ltf", "ltf_prev", "flip", "fast5", "slow5"]
+BRANCHES = ["sig_side", "sig_branch", "in_window", "big"]
+SIDES = np.array([0.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0])      # by branch: 0 (none), 1 .. 6
+ENTRY_FROM, ENTRY_TO = 9 * 60 + 40, 15 * 60 + 45                # signal-bar closes 09:40-15:45 New York
 
 _DAY, _HOUR = 86_400_000, 3_600_000
+_BAR = 300_000                   # a 5m bar closes 5 minutes after it opens
 _CHUNK = 64                      # source days binned together (keeps the work arrays in cache)
 _BLOCK = 1 << 15                 # bars mapped together
 _STRAGGLERS = 8                  # the grid walk finishes the last few long walks one at a time
@@ -47,7 +54,28 @@ class LcePct(Strategy):
 
     def prepare(self, bars):
         p = self.p
-        return level_features(bars, u_day(bars, p["unit"], p["atr_n"]), p)
+        u_d = u_day(bars, p["unit"], p["atr_n"])
+        lv = level_features(bars, u_d, p)
+        u = u_bar(bars["close"], p["unit"], u_d)
+        cl = cloud_features(bars["close"], u, p)
+        return pd.concat([lv, cl, branch_features(bars, lv, cl, u, p),
+                          pd.DataFrame({"u": u}, index=bars.index)], axis=1)
+
+    def bracket(self, ctx, side):
+        """Long: stop halfway between the base level Z (the highest centre <= close) and the level
+        below it, target the lower edge of the lowest zone above the close; short mirrored. A NaN stop
+        (no entry) unless the bar is in the entry window and stop < close < target (target < close <
+        stop for a short)."""
+        c = ctx["close"]
+        if side > 0:
+            stop, tgt = (ctx["z_dn_c"] + ctx["z_dn2_c"]) / 2, ctx["z_up_lo"]
+            ok = stop < c < tgt
+        else:
+            stop, tgt = (ctx["z_up_c"] + ctx["z_up2_c"]) / 2, ctx["z_dn_hi"]
+            ok = tgt < c < stop
+        if ok and ctx["in_window"] == 1 and math.isfinite(stop) and math.isfinite(tgt) and math.isfinite(c):
+            return float(stop), float(tgt)
+        return math.nan, None
 
 
 # ---------------------------------------------------------------- session days
@@ -602,3 +630,122 @@ def level_features(bars: pd.DataFrame, u_d: np.ndarray, p: dict) -> pd.DataFrame
         o[:, 8] = np.repeat(fbd[k0:k1], pk)
         o[:, 9] = np.repeat(sud[k0:k1], pk)
     return pd.DataFrame(out, index=bars.index, columns=FEATURES, copy=False)
+
+
+# ---------------------------------------------------------------- clouds
+
+def u_bar(close: pd.Series, unit: str, u_d: np.ndarray) -> np.ndarray:
+    """Per bar, the u of the cloud slopes and big: 0.01169 x the bar's close ("pct"), or its session
+    day's u_d ("atr")."""
+    if unit == "pct":
+        return PCT_U * np.asarray(close, dtype=float)
+    if unit == "atr":
+        return np.array(u_d, dtype=float)
+    raise ValueError(f"unknown unit {unit!r}: 'pct' or 'atr'")
+
+
+def _shift(x, k):
+    """x delayed by k bars (NaN before)."""
+    out = np.full(len(x), np.nan)
+    out[k:] = x[:max(len(x) - k, 0)]
+    return out
+
+
+def _signed(pos, neg, *inputs):
+    """+1 where pos, -1 where neg (never both), else 0; NaN where any of the inputs is NaN."""
+    out = pos.astype(float)
+    out -= neg
+    nan = np.isnan(inputs[0])
+    for x in inputs[1:]:
+        nan |= np.isnan(x)
+    np.copyto(out, np.nan, where=nan)
+    return out
+
+
+def _state(fast, slow, slope, theta):
+    """+1: fast above slow and the cloud rising at theta or more; -1 mirrored; else 0. NaN if any is."""
+    return _signed((fast > slow) & (slope >= theta), (fast < slow) & (slope <= -theta), fast, slow, slope)
+
+
+def _htf(s30, s1h, s2h):
+    """Higher timeframe: +1 if at least two of the 30m, 1h and 2h clouds are +1 and none is -1; -1
+    mirrored; else 0 (ranging). NaN if any is."""
+    up = (s30 == 1).astype(np.int8) + (s1h == 1) + (s2h == 1)
+    dn = (s30 == -1).astype(np.int8) + (s1h == -1) + (s2h == -1)
+    return _signed((up >= 2) & (dn == 0), (dn >= 2) & (up == 0), s30, s1h, s2h)
+
+
+def _ltf(s5, s15):
+    """Lower timeframe: +1 if the 5m and 15m clouds are both +1; -1 if both -1; else 0 (choppy). NaN if
+    either is."""
+    return _signed((s5 == 1) & (s15 == 1), (s5 == -1) & (s15 == -1), s5, s15)
+
+
+def _flip(fast, slow):
+    """+1 where the fast EMA ends above the slow from at or below it (bullish), -1 mirrored, else 0. NaN
+    where this bar's or the previous bar's EMAs are."""
+    f0, s0 = _shift(fast, 1), _shift(slow, 1)
+    return _signed((fast > slow) & (f0 <= s0), (fast < slow) & (f0 >= s0), fast, slow, f0, s0)
+
+
+def cloud_features(close: pd.Series, u: np.ndarray, p: dict) -> pd.DataFrame:
+    """Per bar: the HTF and LTF states (and the LTF one bar earlier), the 5m flip, and the 5m cloud's
+    EMAs. Cloud k is EMA(ema_fast x M) against EMA(ema_slow x M) of the 5m closes; its slope is the
+    change of the cloud's mid over M bars in u per hour. A cloud without u (NaN or not positive) has no
+    state. HTF, LTF and LTF(t-1) are NaN until the 2h slow EMA exists."""
+    c = pd.Series(np.asarray(close, dtype=float))
+    n = len(c)
+    u = np.asarray(u, dtype=float)
+    has_u = np.isfinite(u) & (u > 0)
+    st = {}
+    for m in CLOUD_M:
+        nf, ns = int(p["ema_fast"]) * m, int(p["ema_slow"]) * m
+        fast = c.ewm(span=nf, adjust=False, min_periods=nf).mean().to_numpy()
+        slow = c.ewm(span=ns, adjust=False, min_periods=ns).mean().to_numpy()
+        mid = (fast + slow) / 2
+        slope = np.full(n, np.nan)
+        np.divide(mid[m:] - mid[:max(n - m, 0)], u[m:], out=slope[m:], where=has_u[m:])
+        slope *= 12 / m
+        st[m] = _state(fast, slow, slope, p["theta"])
+        if m == 1:
+            fast5, slow5 = fast, slow
+    warm = np.isnan(slow)                                                   # the 2h slow EMA, the last one
+    out = np.empty((n, len(CLOUDS)), order="F")                             # column-major: one block, no copy
+    out[:, 0] = _htf(st[6], st[12], st[24])
+    ltf = out[:, 1]
+    ltf[:] = _ltf(st[1], st[3])
+    np.copyto(out[:, 0], np.nan, where=warm)
+    np.copyto(ltf, np.nan, where=warm)
+    out[:, 2] = _shift(ltf, 1)
+    out[:, 3] = _flip(fast5, slow5)
+    out[:, 4], out[:, 5] = fast5, slow5
+    return pd.DataFrame(out, index=getattr(close, "index", None), columns=CLOUDS, copy=False)
+
+
+# ---------------------------------------------------------------- branches
+
+def branch_features(bars: pd.DataFrame, lv: pd.DataFrame, cl: pd.DataFrame, u: np.ndarray, p: dict) -> pd.DataFrame:
+    """Per bar: the flowchart branch (1-6; 0 for none) and its side, the first matching row winning;
+    whether the bar's close lies in the entry window; and whether its body is too big to chase
+    (|close - open| > big_bar x u; NaN without u). The branch ignores the window, big bars and the
+    daily rules (the entry applies them), and is 0 where any of its inputs is NaN."""
+    lo, hi = bars["low"].to_numpy(float), bars["high"].to_numpy(float)
+    op, c = bars["open"].to_numpy(float), bars["close"].to_numpy(float)
+    htf, ltf, lp, fl, f5, s5 = (cl[k].to_numpy(float) for k in CLOUDS)
+    at, tch = lv["at_zone"].to_numpy(float), lv["touched"].to_numpy(float)
+    rows = [(htf == 1) & (ltf == 1) & (at == 1) & (lo <= f5) & (c > s5),      # dipped into the cloud, held
+            (htf == 1) & (fl == 1) & (tch == 1),
+            (htf == 0) & (lp == 1) & (fl == -1) & (tch == 1),
+            (htf == 0) & (lp == -1) & (fl == 1) & (tch == 1),
+            (htf == -1) & (fl == -1) & (tch == 1),
+            (htf == -1) & (ltf == -1) & (at == 1) & (hi >= f5) & (c < s5)]    # ripped into it, failed
+    known = np.ones(len(c), dtype=bool)
+    for x in (htf, ltf, lp, fl, f5, s5, at, tch, lo, hi, c):
+        known &= ~np.isnan(x)
+    br = np.select(rows, [1, 2, 3, 4, 5, 6], 0) * known
+    wd, mi = ny_weekday_minute(bars["open_time"].to_numpy(np.int64) + _BAR)
+    inw = (wd < 5) & (mi >= ENTRY_FROM) & (mi <= ENTRY_TO)
+    u = np.asarray(u, dtype=float)
+    big = np.where(np.isnan(u), np.nan, np.abs(c - op) > p["big_bar"] * u)
+    cols = [SIDES[br], br.astype(float), inw.astype(float), big]
+    return pd.DataFrame(dict(zip(BRANCHES, cols)), index=bars.index)

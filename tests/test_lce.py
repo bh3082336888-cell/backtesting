@@ -1,6 +1,9 @@
 """LCE plugin: point-in-time volume-profile levels (the profile against a reference even spread,
-POC/HVN/anchor/grid rules on hand-built days, causality, warm-up, dead days, u, speed)."""
+POC/HVN/anchor/grid rules on hand-built days, causality, warm-up, dead days, u, speed), the EMA
+clouds, the six flowchart branches on hand-built bars, and the level bracket."""
 
+import itertools
+import math
 import os
 import sys
 import time
@@ -11,7 +14,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from perp_lab.engine.backtest import build_arrays
 from perp_lab.indicators import ny_session_day, true_range, wilder
+from perp_lab.strategy import Ctx, enter
 from tests.conftest import flat_bars, make_bars
 from tests.sandbox_fixtures import load_class
 
@@ -21,6 +26,8 @@ T0 = "2024-01-07 23:00"        # Sunday 18:00 New York (EST): a session-day star
 COLS = ["z_dn_c", "z_dn2_c", "z_up_lo", "z_up_c", "z_up2_c", "z_dn_hi", "at_zone", "touched", "anchor_fb",
         "spacing_u"]
 LEVEL_COLS = ["z_dn_c", "z_dn2_c", "z_up_lo", "z_up_c", "z_up2_c", "z_dn_hi"]
+CLOUD = ["htf", "ltf", "ltf_prev", "flip", "fast5", "slow5"]
+BRANCH = ["sig_side", "sig_branch", "in_window", "big"]
 
 
 @pytest.fixture(scope="module")
@@ -30,7 +37,8 @@ def mod():
 
 
 def P(**kw):
-    p = {"vp_days": 5, "step": 0.303, "zone": 0.103, "wait_bars": 6, "atr_n": 14, "unit": "pct"}
+    p = {"ema_fast": 20, "ema_slow": 50, "vp_days": 5, "step": 0.303, "zone": 0.103, "big_bar": 0.303,
+         "theta": 0.01, "wait_bars": 6, "atr_n": 14, "unit": "pct"}
     return {**p, **kw}
 
 
@@ -58,19 +66,20 @@ def flat_day(spots, filler=None):
     return pr, vo
 
 
-def days_bars(days):
+def days_bars(days, start=T0):
     pr, vo = [], []
     for p_, v_ in days:
         pr += p_
         vo += v_
-    return bars_of(pr, vo)
+    return bars_of(pr, vo, start=start)
 
 
-def random_bars(n, seed=0, scale=0.0015, start=T0, price0=30000.0, tick=None):
+def random_bars(n, seed=0, scale=0.0015, start=T0, price0=30000.0, tick=None, drift=0.0):
     """BTC-like 5m bars: 0.15% per-bar moves, a 0.08% wick, lognormal volume; on a price tick if given
-    (coarse-tick coins: open and close on the tick, high and low the ticks outside them)."""
+    (coarse-tick coins: open and close on the tick, high and low the ticks outside them). drift: added
+    to each bar's log return (a number or one per bar)."""
     rng = np.random.default_rng(seed)
-    close = price0 * np.exp(np.cumsum(rng.normal(0, scale, n)))
+    close = price0 * np.exp(np.cumsum(rng.normal(0, scale, n) + drift))
     op = np.r_[price0, close[:-1]]
     hi = np.maximum(op, close) * (1 + np.abs(rng.normal(0, scale / 2, n)))
     lo = np.minimum(op, close) * (1 - np.abs(rng.normal(0, scale / 2, n)))
@@ -278,7 +287,7 @@ def test_near_equal_volumes_tie(mod):
     assert (a[0], fb[0]) == (20, False)
 
 
-def bump_days(bump_at, bump_vol=3.0):
+def bump_days(bump_at, bump_vol=3.0, start=T0):
     """Days 0..5 of flat bars on [90, 110] with every POC at 100 (anchor 100.05) and an optional bump."""
     edge = {90.0: (1, 0.1), 110.0: (1, 0.1)}
     spots = {**edge, 100.0: (100, 10.0)}
@@ -286,7 +295,7 @@ def bump_days(bump_at, bump_vol=3.0):
         spots[bump_at] = (10, bump_vol)
     days = [flat_day(spots) for _ in range(6)]
     days.append(flat_day({**edge, 100.0: (10, 1.0)}))
-    return days_bars(days)
+    return days_bars(days, start)
 
 
 def test_grid_snaps_to_volume_within_window(mod):
@@ -656,13 +665,530 @@ def test_u_day_pct_and_atr(mod):
         mod.u_day(b, "points", 3)
 
 
-def test_prepare_returns_the_level_features(mod):
+def test_prepare_returns_level_cloud_and_branch_features(mod):
     cls = load_class("_lce_pct")
-    s = cls()
-    assert s.p["unit"] == "pct" and cls.timeframes == ["5m"]
-    b = random_bars(8 * BPD, seed=1)
-    pd.testing.assert_frame_equal(s.prepare(b), mod.level_features(b, mod.u_day(b, "pct", 14), s.p))
-    assert s.prepare(b.iloc[:0]).columns.tolist() == COLS
+    assert cls().p["unit"] == "pct" and cls.timeframes == ["5m"]
+    b = trend_bars(8 * BPD, seed=1)
+    for kw in ({}, {"unit": "atr", "atr_n": 3}):
+        s = cls(**kw)
+        f = s.prepare(b)
+        assert list(f.columns) == COLS + CLOUD + BRANCH + ["u"] and f.index.equals(b.index)
+        assert all(f[c].dtype == np.float64 for c in f.columns) and not set(f.columns) & set(b.columns)
+        u_d = mod.u_day(b, s.p["unit"], s.p["atr_n"])
+        u = mod.u_bar(b.close, s.p["unit"], u_d)
+        lv, cl = mod.level_features(b, u_d, s.p), mod.cloud_features(b.close, u, s.p)
+        pd.testing.assert_frame_equal(f[COLS], lv)
+        pd.testing.assert_frame_equal(f[CLOUD], cl)
+        pd.testing.assert_frame_equal(f[BRANCH], mod.branch_features(b, lv, cl, u, s.p))
+        np.testing.assert_array_equal(f.u, u)
+        assert f.htf.notna().any() and (f.sig_side != 0).any()
+    assert cls().prepare(b.iloc[:0]).columns.tolist() == COLS + CLOUD + BRANCH + ["u"]
+
+
+def test_prepare_is_causal(mod):
+    """Row t of prepare depends on bars[: t + 1] only (test_lookahead skips the plugin until it is
+    renamed in Task 8)."""
+    cls = load_class("_lce_pct")
+    b = trend_bars(14 * BPD, seed=2)
+    ds = mod.day_starts(b.open_time.to_numpy())
+    for kw in ({}, {"unit": "atr", "atr_n": 3}, {"vp_days": 10, "theta": 0.02}):
+        full = cls(**kw).prepare(b)
+        assert (full.sig_side != 0).any()
+        for cut in (1, 2, 7, 23, 50, 1300, ds[11], ds[11] + 1, ds[12] + 150, len(b) - 1):
+            pd.testing.assert_frame_equal(cls(**kw).prepare(b.iloc[:cut]), full.iloc[:cut], check_exact=True)
+
+
+# ------------------------------------------------------------------ clouds
+
+MS = (1, 3, 6, 12, 24)                 # 5m, 15m, 30m, 1h, 2h
+WARM = 50 * 24 - 1                     # the 2h slow EMA (1200 bars) exists from this bar on
+
+
+def ramp(n, k, price0=100.0):
+    """Closes rising by k (in log) per bar."""
+    return pd.Series(price0 * np.exp(k * np.arange(n)))
+
+
+def clouds(mod, close, **kw):
+    return mod.cloud_features(close, mod.u_bar(close, "pct", None), P(**kw))
+
+
+def trend_bars(n, seed=0, start=T0, every=2 * BPD, drift=0.00015):
+    """random_bars whose drift switches between up, flat and down every two days, so every cloud
+    state and every branch shows up."""
+    reg = np.random.default_rng(seed + 1000).choice([-1.0, 0.0, 1.0], n // every + 1)
+    return random_bars(n, seed=seed, start=start, drift=np.repeat(reg, every)[:n] * drift)
+
+
+def test_u_bar_pct_and_atr(mod):
+    b = random_bars(3 * BPD, seed=2)
+    ud = np.linspace(1.0, 2.0, len(b))
+    np.testing.assert_array_equal(mod.u_bar(b.close, "pct", ud), 0.01169 * b.close.to_numpy())
+    np.testing.assert_array_equal(mod.u_bar(b.close, "atr", ud), ud)
+    with pytest.raises(ValueError):
+        mod.u_bar(b.close, "points", ud)
+
+
+def test_cloud_states_up_down_flat(mod):
+    n, tail = 6000, slice(4000, None)                                  # the 2h EMAs' start-up has died out
+    for k, want in ((2e-4, 1.0), (-2e-4, -1.0), (0.0, 0.0)):           # about +-0.2 u per hour, and flat
+        f = clouds(mod, ramp(n, k))
+        assert list(f.columns) == CLOUD and all(f[c].dtype == np.float64 for c in CLOUD)
+        for c in ("htf", "ltf", "ltf_prev"):
+            assert (f[c].iloc[tail] == want).all(), (k, c)
+        assert (np.sign(f.fast5 - f.slow5).iloc[tail] == want).all()
+        assert (f.flip.iloc[tail] == 0).all()
+    # rising at about 0.015 u per hour: +1 at theta 0.01, flat at theta 0.02 although fast > slow
+    slow = ramp(n, 0.015 * 0.01169 / 12)
+    f = clouds(mod, slow)
+    assert (f.htf.iloc[tail] == 1).all() and (f.ltf.iloc[tail] == 1).all()
+    f = clouds(mod, slow, theta=0.02)
+    assert (f.htf.iloc[tail] == 0).all() and (f.ltf.iloc[tail] == 0).all() and (f.fast5 > f.slow5).iloc[tail].all()
+    # states are NaN until the 2h slow EMA exists (HTF until its slope does, 24 bars later)
+    c = ramp(n, 2e-4)
+    f = clouds(mod, c)
+    assert f.htf.first_valid_index() == WARM + 24
+    assert f.ltf.first_valid_index() == WARM and f.ltf_prev.first_valid_index() == WARM + 1
+    assert f.htf.iloc[WARM + 24:].notna().all() and f.ltf.iloc[WARM:].notna().all()
+    np.testing.assert_array_equal(f.fast5, c.ewm(span=20, adjust=False, min_periods=20).mean())
+    np.testing.assert_array_equal(f.slow5, c.ewm(span=50, adjust=False, min_periods=50).mean())
+    # no unit (lce_atr before its ATR exists, or a zero ATR): no states, and no warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        for bad in (np.nan, 0.0):
+            g = mod.cloud_features(c, np.full(n, bad), P())
+            assert g[["htf", "ltf", "ltf_prev"]].isna().all().all()
+            np.testing.assert_array_equal(g.fast5, f.fast5)
+
+
+def test_cloud_state_rule(mod):
+    """+1: fast above slow and the slope at least theta; -1 mirrored; else 0; NaN if any input is."""
+    fast = np.array([2, 2, 2, 2, 1, 1, 1, 1, 1, np.nan, 2, 2.0])
+    slow = np.array([1, 1, 1, 1, 2, 2, 2, 1, 1, 1, np.nan, 1.0])
+    slope = np.array([0.01, 0.0099, -0.5, 0.5, -0.01, -0.0099, 0.5, 0.5, -0.5, 0.5, 0.5, np.nan])
+    want = [1, 0, 0, 1, -1, 0, 0, 0, 0, np.nan, np.nan, np.nan]
+    np.testing.assert_array_equal(mod._state(fast, slow, slope, 0.01), want)
+
+
+def ref_clouds(close, u, fast=20, slow=50, theta=0.01):
+    """Independent reference: each EMA by its recursion in a plain loop, then the spec's rules bar by
+    bar. Returns the columns, each cloud's states, and the bars rounding could decide (fast within
+    1e-9 of slow, or a slope within 1e-9 of theta, at the bar or the one before)."""
+    x = np.asarray(close, float)
+    n = len(x)
+
+    def ema(m):
+        a, y, out = 2 / (m + 1), x[0], np.full(n, np.nan)
+        for i in range(n):
+            y = (1 - a) * y + a * x[i]
+            if i >= m - 1:
+                out[i] = y
+        return out
+
+    st, tie = {}, np.full(n, np.inf)
+    for M in MS:
+        f, s = ema(fast * M), ema(slow * M)
+        mid = (f + s) / 2
+        st[M] = np.full(n, np.nan)
+        for t in range(M, n):
+            if np.isnan(s[t]) or np.isnan(mid[t - M]) or not u[t] > 0:
+                continue
+            slope = (mid[t] - mid[t - M]) / u[t] * 12 / M
+            st[M][t] = 1 if f[t] > s[t] and slope >= theta else -1 if f[t] < s[t] and slope <= -theta else 0
+            tie[t] = min(tie[t], abs(f[t] - s[t]) / x[t], abs(abs(slope) - theta))
+        if M == 1:
+            f5, s5 = f, s
+            tie = np.minimum(tie, np.abs(f - s) / x)
+        if M == 24:
+            warm = np.isnan(s)
+    htf, ltf, flip = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    for t in range(n):
+        h = [st[6][t], st[12][t], st[24][t]]
+        if not np.isnan(h).any():
+            up, dn = h.count(1), h.count(-1)
+            htf[t] = 1 if up >= 2 and dn == 0 else -1 if dn >= 2 and up == 0 else 0
+        lt = [st[1][t], st[3][t]]
+        if not np.isnan(lt).any() and not warm[t]:
+            ltf[t] = lt[0] if lt[0] == lt[1] else 0
+        if t and not np.isnan([f5[t], s5[t], f5[t - 1], s5[t - 1]]).any():
+            flip[t] = (1 if f5[t] > s5[t] and f5[t - 1] <= s5[t - 1] else
+                       -1 if f5[t] < s5[t] and f5[t - 1] >= s5[t - 1] else 0)
+    near = tie < 1e-9
+    near[1:] |= near[:-1]
+    cols = {"htf": htf, "ltf": ltf, "ltf_prev": np.r_[np.nan, ltf[:-1]], "flip": flip, "fast5": f5, "slow5": s5}
+    return cols, st, near
+
+
+def test_cloud_features_match_reference(mod):
+    b = trend_bars(16 * BPD, seed=3)                                   # a seed with every HTF case below
+    u = mod.u_bar(b.close, "pct", None)
+    f = mod.cloud_features(b.close, u, P())
+    want, st, near = ref_clouds(b.close, u)
+    np.testing.assert_allclose(f.fast5, want["fast5"], rtol=1e-12)
+    np.testing.assert_allclose(f.slow5, want["slow5"], rtol=1e-12)
+    assert near.mean() < 0.001
+    for c in ("htf", "ltf", "ltf_prev", "flip"):
+        np.testing.assert_array_equal(f[c].to_numpy()[~near], want[c][~near], err_msg=c)
+    # the data hold every case of the HTF rule: (+1s, -1s) among the 30m, 1h and 2h clouds
+    ok = np.flatnonzero(~np.isnan(want["htf"]))
+    hc = np.array([st[M][ok] for M in (6, 12, 24)])
+    seen = set(zip((hc == 1).sum(0).tolist(), (hc == -1).sum(0).tolist()))
+    assert {(3, 0), (2, 0), (2, 1), (0, 3), (0, 2), (1, 2), (1, 1), (1, 0), (0, 1), (0, 0)} <= seen
+    for v in (-1, 0, 1):
+        assert (f.htf == v).any() and (f.ltf == v).any() and (f.flip == v).any()
+
+
+def test_htf_two_of_three_none_opposing(mod):
+    vals = [-1.0, 0.0, 1.0, np.nan]
+    h = np.array(list(itertools.product(vals, repeat=3))).T
+    for s, g in zip(h.T.tolist(), mod._htf(*h)):
+        if np.isnan(s).any():
+            assert np.isnan(g), s
+        else:
+            up, dn = s.count(1.0), s.count(-1.0)
+            assert g == (1 if up >= 2 and dn == 0 else -1 if dn >= 2 and up == 0 else 0), s
+    spot = np.array([[1, 1, 0], [1, 1, -1], [1, 0, 0], [-1, -1, 0], [-1, -1, 1], [-1, 0, 0], [1, 1, 1]], float).T
+    assert mod._htf(*spot).tolist() == [1, 0, 0, -1, 0, 0, 1]
+    lt = np.array(list(itertools.product(vals, repeat=2))).T
+    for s, g in zip(lt.T.tolist(), mod._ltf(*lt)):
+        if np.isnan(s).any():
+            assert np.isnan(g), s
+        else:
+            assert g == (s[0] if s[0] == s[1] else 0), s
+
+
+def test_flip_detection(mod):
+    fast = np.array([1, 1, 2, 2, 1, 1, 3, 3, 0, np.nan, 2, 3.0])
+    slow = np.array([2, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 2.0])
+    want = [np.nan, 0, 1, 0, -1, 0, 1, 0, -1, np.nan, np.nan, 0]       # from equal counts as a flip
+    np.testing.assert_array_equal(mod._flip(fast, slow), want)
+    assert mod._flip(np.empty(0), np.empty(0)).shape == (0,)
+    # a V: down, then up; the 5m fast EMA crosses the slow once, a few bars after the turn
+    v = pd.Series(100 * np.exp(np.r_[np.arange(3000) * -2e-4, -0.5998 + np.arange(1, 1001) * 2e-4]))
+    f = clouds(mod, v)
+    up, dn = np.flatnonzero(f.flip == 1), np.flatnonzero(f.flip == -1)
+    assert len(dn) == 0 and len(up) == 1 and 3000 < up[0] < 3060
+    t = up[0]
+    assert f.fast5[t] > f.slow5[t] and f.fast5[t - 1] <= f.slow5[t - 1]
+    assert np.isnan(f.flip[:50]).all() and f.flip[50:].notna().all()   # slow5 exists from bar 49
+
+
+# ------------------------------------------------------------------ the six branches
+
+WIN_T = "2024-01-09 15:00"             # Tuesday 10:00 New York (EST): the bar closes at 10:05, in the window
+
+
+def scene(**kw):
+    """One in-window bar and its features, matching no branch unless kw says otherwise. Returns
+    branch_features' (bars, lv, cl, u)."""
+    v = dict(open=100.25, high=100.5, low=99.8, close=100.1, htf=0.0, ltf=0.0, ltf_prev=0.0, flip=0.0,
+             fast5=100.3, slow5=100.0, at_zone=0.0, touched=0.0, u=1.169)
+    v.update(kw)
+    b = flat_bars(n=1, tf_ms=M5, start=WIN_T)
+    for c in ("open", "high", "low", "close"):
+        b[c] = float(v[c])
+    lv = pd.DataFrame({c: [float(v[c])] for c in ("at_zone", "touched")}, index=b.index)
+    cl = pd.DataFrame({c: [float(v[c])] for c in CLOUD}, index=b.index)
+    return b, lv, cl, np.array([float(v["u"])])
+
+
+def branch_of(mod, p=None, **kw):
+    f = mod.branch_features(*scene(**kw), p or P())
+    assert f.in_window.iloc[0] == 1
+    return int(f.sig_branch.iloc[0]), int(f.sig_side.iloc[0])
+
+
+# each branch: a bar that fires it, changes that each make it a non-signal, changes it still fires on
+B1 = dict(htf=1, ltf=1, ltf_prev=1, at_zone=1, touched=1, fast5=100.3, slow5=100.0, open=100.35, high=100.5,
+          low=100.2, close=100.4)                                       # dipped into the cloud and held
+B2 = dict(htf=1, ltf=0, ltf_prev=0, flip=1, touched=1, fast5=100.02, slow5=100.0, open=99.95, high=100.15,
+          low=99.9, close=100.1)
+B3 = dict(htf=0, ltf=0, ltf_prev=1, flip=-1, touched=1, fast5=99.98, slow5=100.0, open=100.05, high=100.1,
+          low=99.85, close=99.9)
+B4 = dict(htf=0, ltf=0, ltf_prev=-1, flip=1, touched=1, fast5=100.02, slow5=100.0, open=99.95, high=100.15,
+          low=99.9, close=100.1)
+B5 = dict(htf=-1, ltf=0, ltf_prev=0, flip=-1, touched=1, fast5=99.98, slow5=100.0, open=100.05, high=100.1,
+          low=99.85, close=99.9)
+B6 = dict(htf=-1, ltf=-1, ltf_prev=-1, at_zone=1, touched=1, fast5=99.7, slow5=100.0, open=99.65, high=99.8,
+          low=99.5, close=99.6)                                         # ripped into the cloud and failed
+SCENES = {
+    1: (B1, 1, [dict(htf=0), dict(htf=-1), dict(ltf=0), dict(ltf=-1), dict(at_zone=0), dict(low=100.31),
+                dict(close=100.0, low=99.9, open=100.1), dict(close=99.9, low=99.8, open=100.0)],
+        [dict(low=100.3), dict(ltf_prev=0)]),
+    2: (B2, 1, [dict(htf=0), dict(htf=-1), dict(flip=0), dict(flip=-1), dict(touched=0)],
+        [dict(ltf=-1), dict(ltf=1), dict(ltf_prev=-1)]),               # "bearish or choppy" and all
+    3: (B3, -1, [dict(htf=1), dict(ltf_prev=0), dict(ltf_prev=-1), dict(flip=0), dict(flip=1), dict(touched=0)],
+        [dict(ltf=-1), dict(ltf=1)]),                                   # LTF at t-1, not at t
+    4: (B4, 1, [dict(htf=-1), dict(ltf_prev=0), dict(ltf_prev=1), dict(flip=0), dict(flip=-1), dict(touched=0)],
+        [dict(ltf=1), dict(ltf=-1)]),
+    5: (B5, -1, [dict(htf=0), dict(htf=1), dict(flip=0), dict(flip=1), dict(touched=0)],
+        [dict(ltf=1), dict(ltf=-1, at_zone=0), dict(ltf_prev=1)]),
+    6: (B6, -1, [dict(htf=0), dict(htf=1), dict(ltf=0), dict(ltf=1), dict(at_zone=0), dict(high=99.69),
+                dict(close=100.0, high=100.1, open=99.9), dict(close=100.1, high=100.2, open=99.9)],
+        [dict(high=99.7), dict(ltf_prev=0)]),
+}
+INPUTS = ["htf", "ltf", "ltf_prev", "flip", "fast5", "slow5", "at_zone", "touched", "low", "high", "close"]
+
+
+def check_branch(mod, k):
+    base, side, misses, edges = SCENES[k]
+    assert branch_of(mod, **base) == (k, side)
+    for m in misses:
+        assert branch_of(mod, **{**base, **m}) == (0, 0), m
+    for e in edges:
+        assert branch_of(mod, **{**base, **e}) == (k, side), e
+    for c in INPUTS:                                                    # any NaN input: no branch
+        assert branch_of(mod, **{**base, c: np.nan}) == (0, 0), c
+
+
+def test_branch_1(mod):
+    check_branch(mod, 1)
+
+
+def test_branch_2(mod):
+    check_branch(mod, 2)
+
+
+def test_branch_3(mod):
+    check_branch(mod, 3)
+
+
+def test_branch_4(mod):
+    check_branch(mod, 4)
+
+
+def test_branch_5(mod):
+    check_branch(mod, 5)
+
+
+def test_branch_6(mod):
+    check_branch(mod, 6)
+
+
+def test_first_matching_branch_wins(mod):
+    assert branch_of(mod, **{**B1, "flip": 1}) == (1, 1)                # rows 1 and 2 both match
+    assert branch_of(mod, **{**B1, "flip": 1, "close": 99.9, "low": 99.8, "open": 100.0}) == (2, 1)
+    assert branch_of(mod, **{**B6, "flip": -1}) == (5, -1)              # rows 5 and 6 both match
+    assert branch_of(mod, **{**B6, "flip": -1, "touched": 0}) == (6, -1)
+    assert branch_of(mod, **{**B6, "flip": -1, "at_zone": 0}) == (5, -1)
+    # rows of several bars at once keep to their own row
+    rows = [B1, {**B1, "flip": 1}, B2, B3, B4, B5, B6, {**B6, "flip": -1}, {}]
+    parts = [scene(**r) for r in rows]
+    b, lv, cl = (pd.concat([x[j] for x in parts]) for j in range(3))
+    b["open_time"] = b.open_time.to_numpy() + M5 * np.arange(len(b))
+    f = mod.branch_features(b, lv, cl, np.concatenate([x[3] for x in parts]), P())
+    assert f.sig_branch.tolist() == [1, 1, 2, 3, 4, 5, 6, 5, 0]
+    assert f.sig_side.tolist() == [1, 1, 1, -1, 1, -1, -1, -1, 0]
+
+
+def test_big_bar_blocks(mod):
+    """big = |close - open| > big_bar u, strictly, either way (u from u_bar). Task 8's entry skips a big
+    bar; the branch is still written, so trades can be attributed to branches."""
+    p = P(big_bar=0.25)                                                 # u 4: the line is exactly 1.0
+    for o, c, want in ((100.0, 101.0, 0.0), (100.0, 101.5, 1.0), (101.0, 100.0, 0.0), (101.5, 100.0, 1.0)):
+        f = mod.branch_features(*scene(open=o, close=c, high=max(o, c), low=min(o, c), u=4.0), p)
+        assert f.big.iloc[0] == want
+    f = mod.branch_features(*scene(**{**B1, "open": 99.0, "low": 99.0}), P())
+    assert f.big.iloc[0] == 1 and f.sig_branch.iloc[0] == 1
+    assert np.isnan(mod.branch_features(*scene(u=np.nan), P()).big.iloc[0])
+    # in prepare, u is 0.01169 x close for lce_pct and the day's ATR for lce_atr
+    cls = load_class("_lce_pct")
+    b = trend_bars(20 * BPD, seed=6)
+    move = (b.close - b.open).abs().to_numpy()
+    for kw in ({}, {"unit": "atr"}):
+        s = cls(**kw)
+        f = s.prepare(b)
+        u = 0.01169 * b.close.to_numpy() if not kw else mod.u_day(b, "atr", 14)
+        np.testing.assert_array_equal(f.u, u)
+        want = np.where(np.isnan(u), np.nan, move > 0.303 * u)
+        np.testing.assert_array_equal(f.big, want)
+        if not kw:                                                      # lce_atr's u (a daily ATR) is too wide here
+            assert 0 < f.big.sum() < len(b) / 2
+
+
+def test_in_window_follows_new_york_time(mod):
+    """Signal-bar closes 09:40-15:45 New York time, Mon-Fri, across both daylight-saving switches
+    (the Monday after each included), against the zoneinfo clock."""
+    cls = load_class("_lce_pct")
+    s0, e0 = (int(x[:2]) * 60 + int(x[3:]) for x in (cls.session["start"], cls.session["end"]))
+    for start in ("2024-03-06 00:00", "2024-10-30 00:00", "2025-03-05 00:00", "2025-10-29 00:00"):
+        b = flat_bars(n=10 * BPD, tf_ms=M5, start=start)
+        none = pd.DataFrame(np.nan, index=b.index, columns=COLS)
+        f = mod.branch_features(b, none, pd.DataFrame(np.nan, index=b.index, columns=CLOUD),
+                                np.full(len(b), 1.0), P())
+        close = pd.to_datetime(b.open_time + M5, unit="ms", utc=True).dt.tz_convert("America/New_York")
+        m = (close.dt.hour * 60 + close.dt.minute).to_numpy()
+        want = ((close.dt.weekday < 5).to_numpy() & (m >= s0) & (m <= e0)).astype(float)
+        np.testing.assert_array_equal(f.in_window.to_numpy(), want)
+        days = close[want == 1].dt.date
+        assert (days.value_counts() == 74).all() and days.nunique() >= 6  # 09:40 .. 15:45: 74 closes a day
+        assert (f.sig_side == 0).all() and (f.sig_branch == 0).all()    # no features: no branch
+
+
+def test_branches_match_the_table_on_prepared_bars(mod):
+    """sig_branch and sig_side on real prepare output equal the spec's table, row by row, first match
+    wins; the window, big bars and daily rules don't touch them."""
+    cls = load_class("_lce_pct")
+    b = trend_bars(30 * BPD, seed=15)                                  # a seed where all six fire (3, 4 are rare)
+    f = cls().prepare(b)
+    A = build_arrays(b, f)
+    got = f.sig_branch.to_numpy()
+    for t in range(len(b)):
+        x = [A[c][t] for c in INPUTS]
+        htf, ltf, ltf_prev, flip, fast5, slow5, at_zone, touched, low, high, close = x
+        if np.isnan(x).any():
+            want = 0
+        elif htf == 1 and ltf == 1 and at_zone == 1 and low <= fast5 and close > slow5:
+            want = 1
+        elif htf == 1 and flip == 1 and touched == 1:
+            want = 2
+        elif htf == 0 and ltf_prev == 1 and flip == -1 and touched == 1:
+            want = 3
+        elif htf == 0 and ltf_prev == -1 and flip == 1 and touched == 1:
+            want = 4
+        elif htf == -1 and flip == -1 and touched == 1:
+            want = 5
+        elif htf == -1 and ltf == -1 and at_zone == 1 and high >= fast5 and close < slow5:
+            want = 6
+        else:
+            want = 0
+        assert got[t] == want, t
+    np.testing.assert_array_equal(f.sig_side, np.array([0, 1, 1, -1, 1, -1, -1])[got.astype(int)])
+    assert set(np.unique(got)) == {0, 1, 2, 3, 4, 5, 6}
+    on = got > 0
+    assert (f.in_window[on] == 0).any() and (f.big[on] == 1).any()     # written regardless of both
+
+
+# ------------------------------------------------------------------ the bracket
+
+GRID = dict(z_dn_c=98.0, z_dn2_c=97.0, z_up_c=99.0, z_up2_c=100.0, z_up_lo=98.9, z_dn_hi=98.1, close=98.5,
+            in_window=1.0)                                              # levels 97, 98, 99, 100; zones +-0.1
+
+
+def ctx_of(**cols):
+    return Ctx({k: np.array([float(v)]) for k, v in cols.items()}, "X")
+
+
+def no_bracket(r):
+    return math.isnan(r[0]) and r[1] is None
+
+
+def test_bracket_geometry_long_short(mod):
+    s = load_class("_lce_pct")()
+    assert s.bracket(ctx_of(**GRID), 1) == (97.5, 98.9)                 # halfway down to 97; 99's lower edge
+    assert s.bracket(ctx_of(**GRID), -1) == (99.5, 98.1)                # halfway up to 100; 98's upper edge
+    stop, tgt = s.bracket(ctx_of(**GRID), 1)
+    assert type(stop) is float and type(tgt) is float
+    inside = {**GRID, "close": 98.05, "z_dn_hi": 97.1}                  # in 98's zone: its edge isn't beyond
+    assert s.bracket(ctx_of(**inside), 1) == (97.5, 98.9) and s.bracket(ctx_of(**inside), -1) == (99.5, 97.1)
+    on = {**GRID, "close": 98.0, "z_up_c": 98.0, "z_up2_c": 99.0, "z_dn_hi": 97.1}   # on 98: Z both ways
+    assert s.bracket(ctx_of(**on), 1) == (97.5, 98.9) and s.bracket(ctx_of(**on), -1) == (98.5, 97.1)
+    # valid only if stop < close < target (target < close < stop for a short)
+    for side, bad in ((1, dict(z_up_lo=98.5)), (1, dict(z_dn_c=99.0, z_dn2_c=98.0)),
+                      (-1, dict(z_dn_hi=98.5)), (-1, dict(z_up_c=98.0, z_up2_c=99.0))):
+        assert no_bracket(s.bracket(ctx_of(**{**GRID, **bad}), side)), (side, bad)
+        assert not no_bracket(s.bracket(ctx_of(**{**GRID, **bad}), -side))      # only that side
+    # on prepared bars: the formula wherever it is valid and the bar is in the window
+    b = trend_bars(12 * BPD, seed=3)
+    f = s.prepare(b)
+    A = build_arrays(b, f)
+    ctx = Ctx(A, "X")
+    n_ok = 0
+    for i in range(len(b)):
+        ctx.i = i
+        c = A["close"][i]
+        for side in (1, -1):
+            if side > 0:
+                st, tg = (A["z_dn_c"][i] + A["z_dn2_c"][i]) / 2, A["z_up_lo"][i]
+                ok = st < c < tg
+            else:
+                st, tg = (A["z_up_c"][i] + A["z_up2_c"][i]) / 2, A["z_dn_hi"][i]
+                ok = tg < c < st
+            r = s.bracket(ctx, side)
+            if ok and A["in_window"][i] == 1:
+                assert r == (st, tg), (i, side)
+                n_ok += 1
+            else:
+                assert no_bracket(r), (i, side)
+    assert n_ok > 300
+
+
+def test_bracket_nan_outside_window(mod):
+    s = load_class("_lce_pct")()
+    for w in (0.0, np.nan):
+        for side in (1, -1):
+            assert no_bracket(s.bracket(ctx_of(**{**GRID, "in_window": w}), side))
+    assert enter(1, *s.bracket(ctx_of(**{**GRID, "in_window": 0.0}), 1)).action == "hold"
+    assert enter(1, *s.bracket(ctx_of(**GRID), 1)).action == "long"
+    # prepared bars: never a bracket on a bar outside the window (nights, weekends), levels or not
+    b = trend_bars(12 * BPD, seed=3)
+    f = s.prepare(b)
+    ctx = Ctx(build_arrays(b, f), "X")
+    out = np.flatnonzero(f.in_window.to_numpy() == 0)
+    assert f.z_dn_c.iloc[out].notna().sum() > 1000
+    for i in out:
+        ctx.i = i
+        assert no_bracket(s.bracket(ctx, 1)) and no_bracket(s.bracket(ctx, -1)), i
+
+
+def test_bracket_nan_outside_grid(mod):
+    """Review Focus 4: a close beyond the outermost level (a gap) has no bracket that way, and no
+    exception."""
+    s = load_class("_lce_pct")()
+    nan = np.nan
+    top = dict(close=101.5, z_dn_c=101.0, z_dn2_c=100.0, z_up_c=nan, z_up2_c=nan, z_up_lo=nan, z_dn_hi=101.1)
+    near_top = dict(close=100.5, z_dn_c=100.0, z_dn2_c=99.0, z_up_c=101.0, z_up2_c=nan, z_up_lo=100.9,
+                    z_dn_hi=100.1)
+    bottom = dict(close=95.5, z_dn_c=nan, z_dn2_c=nan, z_up_c=96.0, z_up2_c=97.0, z_up_lo=95.9, z_dn_hi=nan)
+    near_bottom = dict(close=96.5, z_dn_c=96.0, z_dn2_c=nan, z_up_c=97.0, z_up2_c=98.0, z_up_lo=96.9,
+                       z_dn_hi=96.1)
+    for cols, long_ok, short_ok in ((top, False, False), (near_top, True, False), (bottom, False, False),
+                                    (near_bottom, False, True)):
+        ctx = ctx_of(**cols, in_window=1.0)
+        assert no_bracket(s.bracket(ctx, 1)) != long_ok and no_bracket(s.bracket(ctx, -1)) != short_ok, cols
+    # on prepared bars: Tuesday 10:00-10:20 New York, gaps above and below the day's grid
+    b = bump_days(102.72, start="2024-01-09 23:00")                     # day 6 is Tuesday's session
+    lo, hi, vol = arrays(b)
+    ds = mod.day_starts(b.open_time.to_numpy())
+    u = 0.01169 * b.close.iloc[ds[6] - 1]
+    lv, _ = mod.day_levels(lo, hi, vol, ds, 6, 5, 0.303 * u, 0.103 * u)
+    k = ds[6] + 192                                                     # opens 10:00, closes 10:05
+    gaps = [lv[-1] + 1.0, lv[0] - 1.0, (lv[-2] + lv[-1]) / 2, (lv[0] + lv[1]) / 2]
+    cols = [b.columns.get_loc(c) for c in ("open", "high", "low", "close")]
+    for j, price in enumerate(gaps):
+        b.iloc[k + j, cols] = price
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        f = s.prepare(b)
+    assert not np.isinf(f.to_numpy()).any()
+    ctx = Ctx(build_arrays(b, f), "X")
+    for j, (long_ok, short_ok) in enumerate([(False, False), (False, False), (True, False), (False, True)]):
+        ctx.i = k + j
+        assert f.in_window.iloc[k + j] == 1
+        assert no_bracket(s.bracket(ctx, 1)) != long_ok and no_bracket(s.bracket(ctx, -1)) != short_ok, j
+
+
+def test_bracket_nan_in_warmup(mod):
+    """Review Focus 3: before vp_days complete days (or before lce_atr's ATR exists, or on a late
+    listing) there are no levels, every bracket is NaN and no branch fires, though the window opens."""
+    cls = load_class("_lce_pct")
+    b = trend_bars(18 * BPD, seed=12)
+    late = b.iloc[100:]                                                 # the first bar mid-day
+    for bars, kw, first in ((b, {}, 6), (b, {"vp_days": 10}, 11), (b, {"unit": "atr"}, 15), (late, {}, 6)):
+        s = cls(**kw)
+        f = s.prepare(bars)
+        k = mod.day_starts(bars.open_time.to_numpy())[first]
+        assert f.in_window.iloc[:k].sum() > 0 and f.z_dn_c.iloc[:k].isna().all()
+        assert (f.sig_side.iloc[:k] == 0).all() and (f.sig_branch.iloc[:k] == 0).all()
+        ctx = Ctx(build_arrays(bars, f), "X")
+        for i in range(k):
+            ctx.i = i
+            assert no_bracket(s.bracket(ctx, 1)) and no_bracket(s.bracket(ctx, -1)), (kw, i)
+        valid = 0
+        for i in range(k, len(bars)):
+            ctx.i = i
+            valid += not no_bracket(s.bracket(ctx, 1))
+        assert valid > 0 and (f.sig_side.iloc[k:] != 0).any(), kw
 
 
 # ------------------------------------------------------------------ speed
