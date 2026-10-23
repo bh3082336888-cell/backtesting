@@ -13,6 +13,7 @@ from perp_lab.cli import app
 from perp_lab.judge import budget
 from perp_lab.judge.exam import ExamResult
 from perp_lab.judge.budget import WithdrawRefused
+from perp_lab.judge.diagnostics import diagnostics
 from perp_lab.judge.judge import VERDICT_KEYS, attempt_exam, exam_pending, judge, verdict_path, withdraw
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
@@ -301,7 +302,10 @@ def _numbers(o):
 
 def test_the_verdict_never_carries_holdout_numbers(cfg, plugins):
     budget.init_log(cfg)
-    j = judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(0.003))
+    promoted_j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG))
+    judged_diag = json.loads(Path(promoted_j["verdict_path"]).read_text())["diagnostics"]
+    j = attempt_exam(cfg, promoted_j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=end_after(200),
+                     cost_fn=no_cost)
     text = Path(j["verdict_path"]).read_text()
     out = json.loads(text)
     h = db.run_row(cfg, j["holdout_run_id"])
@@ -309,12 +313,68 @@ def test_the_verdict_never_carries_holdout_numbers(cfg, plugins):
     assert set(out) == VERDICT_KEYS and out["holdout_status"] == "passed"
     assert not any(math.isclose(x, s, rel_tol=1e-9) for x in _numbers(out) for s in secret)
     assert j["holdout_run_id"] not in text
+    # the diagnostics come from the walk-forward run alone: the passed exam leaves them as judged
+    wf_dir = db.run_row(cfg, j["child_run_id"])["run_dir"]
+    assert out["diagnostics"] is not None and out["diagnostics"] == judged_diag
+    assert out["diagnostics"] == diagnostics(cfg, wf_dir, data="judged", earlier=[])
+    assert db.get_judgement_by_id(cfg, j["id"])["diagnostics_run_id"] == j["child_run_id"]
 
 
 def test_cli_exam_with_nothing_pending(cfg):
     budget.init_log(cfg)
     r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
     assert r.exit_code == 0 and "no pending exams" in r.output
+
+
+def _proposer_promotion(cfg):
+    budget.init_log(cfg)
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG), judged_by="proposer")
+    assert j["decision"] == "promote"
+    return j["id"]
+
+
+def test_a_proposer_judgement_records_who_judged(cfg, plugins):
+    jid = _proposer_promotion(cfg)
+    assert db.get_judgement_by_id(cfg, jid)["judged_by"] == "proposer"
+    j = judge(cfg, "donchian_atr_wide", "4h", validate=StubValidate(FAMILY))
+    assert db.get_judgement_by_id(cfg, j["id"])["judged_by"] is None
+
+
+def test_a_bare_exam_skips_a_proposer_promotion_and_spends_nothing(cfg, plugins):
+    jid = _proposer_promotion(cfg)
+    out = exam_pending(cfg, run=boom, data_fn=no_gaps, end_fn=end_after(200), cost_fn=no_cost)
+    assert len(out) == 1 and out[0]["id"] == jid and out[0]["awaiting_review"]
+    assert budget.reads_used(cfg) == 0
+    got = db.get_judgement_by_id(cfg, jid)
+    assert (got["holdout_status"], got["holdout_reason"]) == ("pending", "awaiting_exam")
+
+
+def test_exam_by_id_examines_a_proposer_promotion(cfg, plugins):
+    jid = _proposer_promotion(cfg)
+    out = exam_pending(cfg, only_id=jid, run=stub_run(0.003), data_fn=no_gaps, end_fn=end_after(200),
+                       cost_fn=no_cost)
+    assert len(out) == 1 and out[0]["holdout_status"] == "passed" and budget.reads_used(cfg) == 1
+
+
+def test_a_bare_exam_still_examines_a_human_promotion(cfg, plugins):
+    budget.init_log(cfg)
+    judge(cfg, "donchian_atr", "4h", validate=StubValidate(ROOT_STRONG))
+    out = exams(cfg, stub_run(0.003))
+    assert out[0]["holdout_status"] == "passed" and not out[0].get("awaiting_review")
+
+
+def test_exam_by_id_of_an_unknown_judgement_is_refused(cfg):
+    budget.init_log(cfg)
+    r = CliRunner().invoke(app, ["exam", "--id", "99", "--config", str(cfg.path)])
+    assert r.exit_code == 2 and "no judgement with id 99" in r.output
+
+
+def test_cli_exam_prints_the_review_command(cfg, plugins):
+    jid = _proposer_promotion(cfg)
+    r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
+    assert r.exit_code == 0
+    assert f"donchian_atr @ 4h: awaiting review: lab exam --id {jid}" in r.output
+    assert budget.reads_used(cfg) == 0
 
 
 @pytest.fixture
@@ -496,6 +556,20 @@ def test_lab_judge_never_runs_an_exam(cfg, plugins, monkeypatch):
     assert budget.reads_used(cfg) == 0
 
 
+def test_lab_judge_proposer_marks_the_judgement_and_a_bare_exam_skips_it(cfg, plugins, monkeypatch):
+    import perp_lab.judge.judge as jm
+    budget.init_log(cfg)
+    monkeypatch.setattr(jm, "judge", partial(jm.judge, validate=StubValidate(ROOT_STRONG)))
+    r = CliRunner().invoke(app, ["judge", "donchian_atr", "--proposer", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+    [j] = db.pending_judgements(cfg)
+    assert j["judged_by"] == "proposer"
+    r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
+    assert r.exit_code == 0, r.output
+    assert f"donchian_atr @ 4h: awaiting review: lab exam --id {j['id']}" in r.output
+    assert budget.reads_used(cfg) == 0
+
+
 def test_a_retry_uses_the_window_stored_at_the_mint(cfg, plugins):
     budget.init_log(cfg)
     j = promoted(cfg)
@@ -603,7 +677,7 @@ def test_lab_exam_prints_why_the_data_is_refused(cfg, monkeypatch):
     import perp_lab.judge.judge as jm
     waiting = {"strategy": "s", "timeframe": "1h", "holdout_status": "pending", "holdout_reason": "incomplete_data",
                "detail": [CCXT_MONTH, "run `lab backfill` ..."]}
-    monkeypatch.setattr(jm, "exam_pending", lambda cfg: [waiting])
+    monkeypatch.setattr(jm, "exam_pending", lambda cfg, only_id=None: [waiting])
     r = CliRunner().invoke(app, ["exam", "--config", str(cfg.path)])
     assert r.exit_code == 0 and "s @ 1h: pending (incomplete_data)" in r.output
     assert f"  {CCXT_MONTH}" in r.output and "lab backfill" in r.output
@@ -979,3 +1053,87 @@ def test_cli_withdraw_refuses_a_read_already_minted(cfg, plugins):
     crash(cfg, j["id"])
     r = CliRunner().invoke(app, ["withdraw", "donchian_atr", "--tf", "4h", "--reason", WHY, "--config", str(cfg.path)])
     assert r.exit_code == 2 and "refused:" in r.output and "holds its family's read" in r.output
+
+
+# --- the judge-exam lock (perp_lab/runlock.py): the exam's side ---
+
+def _pending(cfg):
+    budget.init_log(cfg)
+    j = judged(cfg, "donchian_atr", ROOT_STRONG, stub_run(0.003), days=100)     # too short: stays pending
+    assert (j["holdout_status"], j["holdout_reason"]) == ("pending", "too_short")
+    return j
+
+
+def _shared_nb_fails(cfg):
+    import fcntl
+    with open(cfg.runs_dir / ".plugin-runs.lock", "a+") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return False
+        except BlockingIOError:
+            return True
+
+
+def test_an_exam_holds_the_run_lock_exclusively_while_it_runs(cfg, plugins):
+    j = _pending(cfg)
+    seen = []
+
+    def end_fn(cfg_, syms, tf):
+        seen.append(_shared_nb_fails(cfg_))
+        return cfg_.holdout_start + pd.Timedelta(days=200)
+
+    r = attempt_exam(cfg, j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=end_fn, cost_fn=no_cost)
+    assert r["holdout_status"] == "passed" and seen and all(seen)
+    assert not _shared_nb_fails(cfg)                    # released afterwards
+
+
+def test_an_exam_waits_for_a_running_judge(cfg, plugins):
+    from perp_lab import runlock
+    j = _pending(cfg)
+    started, finished = threading.Event(), threading.Event()
+    out = {}
+
+    def end_fn(cfg_, syms, tf):
+        started.set()
+        return cfg_.holdout_start + pd.Timedelta(days=200)
+
+    def exam():
+        out["r"] = attempt_exam(cfg, j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=end_fn,
+                                cost_fn=no_cost)
+        finished.set()
+
+    with runlock.plugin_runs(cfg):
+        t = threading.Thread(target=exam, daemon=True)
+        t.start()
+        assert not started.wait(0.3)                    # blocked behind the judge
+    assert started.wait(2)                              # it runs once the judge has left
+    assert finished.wait(30)                            # (the lookahead probe after it takes a few seconds)
+    t.join(2)
+    assert out["r"]["holdout_status"] == "passed"
+
+
+def test_early_returns_do_not_wait_for_a_running_judge(cfg, plugins):
+    # The exclusive lock comes after the non-blocking ones: an in_progress or already-decided
+    # judgement answers at once, even while a judge holds the shared lock.
+    from perp_lab import runlock
+    j = _pending(cfg)
+    done = {}
+
+    def call(key, jid):
+        done[key] = attempt_exam(cfg, jid, run=boom, data_fn=no_gaps, end_fn=end_after(200))
+
+    with runlock.plugin_runs(cfg):
+        with budget.exam_lock(cfg, j["id"]) as mine:
+            assert mine
+            t = threading.Thread(target=call, args=("busy", j["id"]), daemon=True)
+            t.start()
+            t.join(2)
+            assert not t.is_alive() and done["busy"]["in_progress"] is True
+    decided = attempt_exam(cfg, j["id"], run=stub_run(0.003), data_fn=no_gaps, end_fn=end_after(200),
+                           cost_fn=no_cost)
+    assert decided["holdout_status"] == "passed"
+    with runlock.plugin_runs(cfg):
+        t = threading.Thread(target=call, args=("decided", decided["id"]), daemon=True)
+        t.start()
+        t.join(2)
+        assert not t.is_alive() and done["decided"]["holdout_status"] == decided["holdout_status"]

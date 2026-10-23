@@ -9,8 +9,12 @@ from perp_lab.cli import app
 from perp_lab.config import Config
 from perp_lab.sandbox import client
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
-from perp_lab.judge.judge import VERDICT_KEYS, JudgeRefused, judge, lookahead_failures
+from perp_lab.judge.diagnostics import diagnostics
+from perp_lab.judge.judge import (VERDICT_KEYS, JudgeRefused, TransientFailure, judge, lookahead_failures,
+                                  verdict_path)
+from perp_lab.plugins import PluginSource
 from perp_lab.store import db
+from perp_lab.strategy import plugin_hash
 from tests.judge_fixtures import (CHEATER, NOISE, STRONG, WEAK, WIDE_TEXT, StubValidate, add_plugin,
                                   plugins, series)  # noqa: F401
 from tests.conftest import REAL_PLUGINS, REPO, market_config
@@ -328,6 +332,16 @@ def test_the_dated_check_covers_the_holdout_up_to_a_month_past_today(cfg, plugin
     assert any(f.startswith("holdout-dated: ") and "features at cut" in f for f in fails)
 
 
+def test_the_dated_span_is_the_same_at_any_hour_of_one_utc_day(cfg, plugins, monkeypatch):
+    seen = []
+    monkeypatch.setattr("perp_lab.judge.judge.dated_lookahead_failures", lambda c, s, until, **k: seen.append(until) or [])
+    monkeypatch.setattr("perp_lab.judge.judge.causality_failures", lambda *a, **k: [])
+    for t in ("2026-10-21 00:05", "2026-10-21 23:55"):
+        monkeypatch.setattr("perp_lab.judge.judge._now", lambda t=t: pd.Timestamp(t, tz="UTC"))
+        lookahead_failures(cfg, PluginSource.read("donchian_atr"))
+    assert seen[0] == seen[1] == pd.Timestamp("2026-11-20", tz="UTC")
+
+
 @pytest.mark.parametrize("name", REAL_PLUGINS)
 def test_real_plugins_pass_a_long_dated_window(cfg, name, monkeypatch):
     from perp_lab.judge.judge import dated_lookahead_failures
@@ -412,17 +426,62 @@ def test_a_plugin_error_in_the_walk_forward_is_a_recorded_kill(cfg, plugins, cap
     with caplog.at_level("WARNING", logger="perp_lab.judge.judge"):
         j = judge(cfg, "donchian_atr", "4h", validate=_failing(v, "donchian_atr", err))
     assert j["decision"] == "kill" and j["reasons"] == ["plugin_error: exception: ValueError: boom"]
+    assert json.loads(Path(j["verdict_path"]).read_text())["reasons"] == ["plugin_error: exception: ValueError"]
     assert j["child_run_id"] is None and (j["holdout_status"], j["holdout_reason"]) == ("n/a", "n/a")
     assert "Traceback: boom" in caplog.text
     assert db.read_table(cfg, db.judgements).shape[0] == 1
     assert "Traceback" not in Path(j["verdict_path"]).read_text()
+    assert db.trial_stats(cfg)[0] == 1
+
+
+def test_the_verdict_names_a_builtin_exception_type_only(cfg, plugins):
+    err = PluginError("exception", "ValueError", "secret 123")
+    j = judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", err))
+    v = json.loads(Path(j["verdict_path"]).read_text())
+    assert v["reasons"] == ["plugin_error: exception: ValueError"] and "secret" not in json.dumps(v)
+    assert "verdict_reasons" not in v
+    assert db.get_judgement_by_id(cfg, j["id"])["reasons"] == ["plugin_error: exception: ValueError: secret 123"]
+
+
+def test_a_plugin_defined_exception_type_becomes_other():
+    assert PluginError("exception", "Btc_up_3pct", "m").public_reason() == "plugin_error: exception: other"
+
+
+def test_a_kind_without_an_exception_keeps_only_its_kind():
+    assert PluginError("protocol", "", "x").public_reason() == "plugin_error: protocol"
+
+
+def test_a_plugin_error_after_real_bars_raises_n(cfg, plugins):
+    err = PluginError("exception", "ValueError", "boom")
+    judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", err))
+    assert db.trial_stats(cfg)[0] == 1
+
+
+def test_a_harness_crash_after_real_bars_raises_n(cfg, plugins):
+    with pytest.raises(RuntimeError):
+        judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", RuntimeError("engine")))
+    assert db.trial_stats(cfg)[0] == 1 and db.read_table(cfg, db.judgements).empty
+
+
+def test_judging_the_same_bytes_again_adds_no_trial(cfg, plugins):
+    with pytest.raises(RuntimeError):
+        judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", RuntimeError("x")))
+    judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    assert db.trial_stats(cfg)[0] == 1
+    assert db.trial_attempts(cfg, plugin_hash("donchian_atr"), "4h") == 2
+
+
+def test_a_lookahead_kill_registers_no_trial(cfg, plugins):
+    add_plugin(plugins, "cheater", CHEATER)
+    judge(cfg, "cheater", "4h", validate=StubValidate({}))
+    assert db.trial_stats(cfg)[0] == 0 and db.read_table(cfg, db.trials).empty
 
 
 def test_a_plugin_error_in_a_child_with_a_parent_records_no_edge(cfg, plugins):
     v = StubValidate({"donchian_atr": ("candidate", STRONG)})
     j = judge(cfg, "donchian_atr_wide", "4h",
-              validate=_failing(v, "donchian_atr_wide", PluginError("cpu_limit")))
-    assert j["decision"] == "kill" and j["reasons"] == ["plugin_error: cpu_limit"]
+              validate=_failing(v, "donchian_atr_wide", PluginError("exception", "KeyError", "x")))
+    assert j["decision"] == "kill" and j["reasons"] == ["plugin_error: exception: KeyError: x"]
     assert j["child_run_id"] is None and db.read_table(cfg, db.lineage_edges).empty
 
 
@@ -539,3 +598,84 @@ def test_the_judge_refuses_when_the_parent_cannot_run_on_the_childs_data(cfg, pl
         judge(cfg, "donchian_atr_wide", "4h", validate=v)
     assert v.calls == ["donchian_atr", "donchian_atr_wide", "donchian_atr"]
     assert db.read_table(cfg, db.judgements).empty and db.read_table(cfg, db.lineage_edges).empty
+
+
+def test_a_transient_failure_records_nothing_but_the_trial(cfg, plugins):
+    with pytest.raises(TransientFailure):
+        judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", PluginError("died")))
+    assert db.read_table(cfg, db.judgements).empty
+    assert db.trial_attempts(cfg, plugin_hash("donchian_atr"), "4h") == 1 and db.trial_stats(cfg)[0] == 1
+
+
+def test_a_transient_failure_on_the_third_attempt_is_a_kill(cfg, plugins):
+    run = _failing(StubValidate({}), "donchian_atr", PluginError("timeout"))
+    for _ in range(2):
+        with pytest.raises(TransientFailure):
+            judge(cfg, "donchian_atr", "4h", validate=run)
+    j = judge(cfg, "donchian_atr", "4h", validate=run)
+    assert j["decision"] == "kill" and j["reasons"] == ["plugin_error: timeout"]
+
+
+def test_a_transient_failure_then_a_clean_run_is_judged(cfg, plugins):
+    with pytest.raises(TransientFailure):
+        judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", PluginError("cpu_limit")))
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    assert j["child_run_id"] is not None and db.trial_stats(cfg)[0] == 1
+
+
+def test_cli_transient_failure_exits_1(cfg, plugins, monkeypatch):
+    def boom(*a, **k): raise TransientFailure("died")
+    monkeypatch.setattr("perp_lab.judge.judge.judge", boom)
+    r = CliRunner().invoke(app, ["judge", "donchian_atr", "--tf", "4h", "--config", str(cfg.path)])
+    assert r.exit_code == 1 and "the trial is registered" in r.output
+
+
+def test_a_verdict_is_schema_2_with_diagnostics(cfg, plugins):
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    v = json.loads(Path(j["verdict_path"]).read_text())
+    assert v["schema"] == 2 and v["diagnostics"]["data"] == "judged"
+    assert v["diagnostics"] == diagnostics(cfg, db.run_row(cfg, j["child_run_id"])["run_dir"], data="judged",
+                                           earlier=[])
+    assert db.get_judgement_by_id(cfg, j["id"])["diagnostics_run_id"] == j["child_run_id"]
+
+
+def test_a_verdict_file_writes_its_keys_in_sorted_order(cfg, plugins):
+    # insertion order could say what came first (a fold's combo, a step's result): no dict keeps it
+    j = judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    v = json.loads(Path(j["verdict_path"]).read_text())
+    assert list(v) == sorted(v) and list(v["diagnostics"]) == sorted(v["diagnostics"])
+
+
+def test_overlap_lists_earlier_judgements_only(cfg, plugins):
+    v = StubValidate({"donchian_atr": ("noise", NOISE), "donchian_atr_wide": ("candidate", STRONG)})
+    a = judge(cfg, "donchian_atr", "4h", validate=v)
+    b = judge(cfg, "donchian_atr_wide", "4h", validate=v)
+    first = json.loads(Path(a["verdict_path"]).read_text())["diagnostics"]["overlap"]
+    wide = json.loads(Path(b["verdict_path"]).read_text())["diagnostics"]["overlap"]
+    assert first == {"position": [], "mirror": [], "correlation": []}
+    assert wide["position"] == [{"strategy": "donchian_atr", "timeframe": "4h", "value": 1.0}]
+    assert [(x["strategy"], x["timeframe"]) for x in wide["correlation"]] == [("donchian_atr", "4h")]
+
+
+@pytest.mark.parametrize("how", ["lookahead", "plugin error"])
+def test_a_kill_without_a_run_has_no_diagnostics(cfg, plugins, how):
+    if how == "lookahead":
+        add_plugin(plugins, "cheater", CHEATER)
+        j = judge(cfg, "cheater", "4h", validate=StubValidate({}))
+    else:
+        err = PluginError("exception", "ValueError", "boom")
+        j = judge(cfg, "donchian_atr", "4h", validate=_failing(StubValidate({}), "donchian_atr", err))
+    v = json.loads(Path(j["verdict_path"]).read_text())
+    assert j["child_run_id"] is None and set(v) == VERDICT_KEYS
+    assert v["schema"] == 2 and v["diagnostics"] is None
+
+
+def test_a_failure_in_the_diagnostics_still_writes_the_verdict(cfg, plugins, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("diagnostics")
+    monkeypatch.setattr("perp_lab.judge.judge.diagnostics", boom)
+    with pytest.raises(RuntimeError, match="diagnostics"):
+        judge(cfg, "donchian_atr", "4h", validate=StubValidate({"donchian_atr": ("noise", NOISE)}))
+    j = db.get_judgement(cfg, plugin_hash("donchian_atr"), "4h")
+    v = json.loads(verdict_path(cfg, "donchian_atr", "4h", j["strategy_hash"]).read_text())
+    assert v["decision"] == "kill" and v["diagnostics"] is None and v["schema"] == 2

@@ -127,6 +127,7 @@ judgements = sa.Table(
     sa.Column("lineage_id", sa.String(64), index=True),
     sa.Column("decision", sa.String(16), nullable=False),          # promote | kill
     sa.Column("reasons", sa.JSON, nullable=False),
+    sa.Column("verdict_reasons", sa.JSON),      # what the public verdict says when it differs from reasons
     sa.Column("dsr", sa.Float), sa.Column("n_trials", sa.Integer), sa.Column("sr0", sa.Float),
     sa.Column("parent_passed", sa.Boolean), sa.Column("beats_parent_frac", sa.Float),
     sa.Column("holdout_status", sa.String(16), nullable=False),    # n/a | pending | passed | failed | blocked | withdrawn
@@ -134,6 +135,24 @@ judgements = sa.Table(
     sa.Column("holdout_run_id", sa.String(64), sa.ForeignKey("runs.run_id"), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True)),
     sa.Column("updated_at", sa.DateTime(timezone=True)),
+    # The verdict's diagnostics block (walk-forward data only), and the run it was computed from: the
+    # judged run, or a later walk-forward run of the same plugin version on today's data (a refresh).
+    sa.Column("diagnostics", sa.JSON),
+    sa.Column("diagnostics_run_id", sa.String(64)),
+    sa.Column("judged_by", sa.String(16)),   # "proposer" for an unattended judgement; null for a human's
+    sa.UniqueConstraint("strategy_hash", "timeframe"),
+)
+
+# One row per (strategy bytes, timeframe) whose code has been run on real bars, written before the
+# first run so a crash still counts toward N. `attempts` counts judge calls, not walk-forward runs.
+trials = sa.Table(
+    "trials", md,
+    sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
+    sa.Column("strategy", sa.String(128), nullable=False),
+    sa.Column("strategy_hash", sa.String(64), nullable=False),
+    sa.Column("timeframe", sa.String(8), nullable=False),
+    sa.Column("attempts", sa.Integer, nullable=False, default=0, server_default="0"),
+    sa.Column("registered_at", sa.DateTime(timezone=True)),
     sa.UniqueConstraint("strategy_hash", "timeframe"),
 )
 
@@ -147,8 +166,18 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _has_data_id(eng: sa.Engine) -> bool:
-    return "data_id" in {c["name"] for c in sa.inspect(eng).get_columns("runs")}
+# Columns added after a table first shipped: create_all never adds a column to an existing table.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    ("runs", "data_id", "VARCHAR(16)"),
+    ("judgements", "verdict_reasons", "JSON"),
+    ("judgements", "diagnostics", "JSON"),
+    ("judgements", "diagnostics_run_id", "VARCHAR(64)"),
+    ("judgements", "judged_by", "VARCHAR(16)"),
+]
+
+
+def _has_column(eng: sa.Engine, table: str, column: str) -> bool:
+    return column in {c["name"] for c in sa.inspect(eng).get_columns(table)}
 
 
 @lru_cache(maxsize=8)
@@ -157,13 +186,14 @@ def _engine(url: str) -> sa.Engine:
         Path(url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
     eng = sa.create_engine(url, future=True)
     md.create_all(eng)
-    if not _has_data_id(eng):
-        try:
-            with eng.begin() as c:      # create_all never adds a column to an existing table
-                c.execute(sa.text("ALTER TABLE runs ADD COLUMN data_id VARCHAR(16)"))
-        except sa.exc.OperationalError:
-            if not _has_data_id(eng):   # another process opening the store added it meanwhile: fine
-                raise
+    for table, column, ddl in _ADDED_COLUMNS:
+        if not _has_column(eng, table, column):
+            try:
+                with eng.begin() as c:
+                    c.execute(sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+            except sa.exc.OperationalError:
+                if not _has_column(eng, table, column):   # another process added it meanwhile: fine
+                    raise
     return eng
 
 
@@ -387,6 +417,26 @@ def update_holdout(cfg, jid: int, status: str, reason: str, holdout_run_id: str 
         c.execute(judgements.update().where(judgements.c.id == jid).values(**vals))
 
 
+def set_diagnostics(cfg, jid: int, diag: dict, run_id: str) -> None:
+    """Store a judgement's diagnostics and the walk-forward run they came from. Its decision is untouched."""
+    with engine(cfg).begin() as c:
+        c.execute(judgements.update().where(judgements.c.id == jid).values(
+            diagnostics=diag, diagnostics_run_id=run_id, updated_at=_now()))
+
+
+def earlier_runs(cfg, jid: int) -> list[dict]:
+    """The run of every judgement before `jid` that has one, oldest first: its diagnostics run (the latest
+    walk-forward run of that plugin version) or else its judged run. A kill without a run has none, and
+    only walk-forward runs count: the overlap lists never read a holdout run."""
+    rid = sa.func.coalesce(judgements.c.diagnostics_run_id, judgements.c.child_run_id)
+    with engine(cfg).connect() as c:
+        rows = c.execute(sa.select(judgements.c.strategy, judgements.c.timeframe, runs.c.run_dir)
+                         .select_from(judgements.join(runs, runs.c.run_id == rid))
+                         .where(sa.and_(judgements.c.id < jid, runs.c.validation_mode == "walkforward"))
+                         .order_by(judgements.c.id)).all()
+    return [{"strategy": r.strategy, "timeframe": r.timeframe, "run_dir": r.run_dir} for r in rows if r.run_dir]
+
+
 def pending_judgements(cfg) -> list[dict]:
     with engine(cfg).connect() as c:
         rows = c.execute(sa.select(judgements).where(judgements.c.holdout_status == "pending")
@@ -428,19 +478,44 @@ def family_of(cfg, strategy: str) -> str | None:
     return j[0] if j else None
 
 
+def register_trial(cfg, strategy: str, strategy_hash: str, timeframe: str, *, attempt: bool = False) -> int:
+    """Register the (strategy_hash, timeframe) trial if it is missing; with `attempt`, also count one
+    judge attempt. Returns the attempts so far. Call before plugin code first sees real bars."""
+    where = sa.and_(trials.c.strategy_hash == strategy_hash, trials.c.timeframe == timeframe)
+    try:
+        with engine(cfg).begin() as c:
+            if c.execute(sa.select(trials.c.id).where(where)).first() is None:
+                c.execute(trials.insert().values(strategy=strategy, strategy_hash=strategy_hash,
+                                                 timeframe=timeframe, attempts=0, registered_at=_now()))
+    except sa.exc.IntegrityError:   # a racing process inserted it first: fall through to the update
+        pass
+    with engine(cfg).begin() as c:
+        if attempt:
+            c.execute(trials.update().where(where).values(attempts=trials.c.attempts + 1))
+        return int(c.execute(sa.select(trials.c.attempts).where(where)).scalar_one())
+
+
+def trial_attempts(cfg, strategy_hash: str, timeframe: str) -> int:
+    with engine(cfg).connect() as c:
+        r = c.execute(sa.select(trials.c.attempts).where(sa.and_(
+            trials.c.strategy_hash == strategy_hash, trials.c.timeframe == timeframe))).first()
+    return int(r[0]) if r else 0
+
+
 def trial_stats(cfg) -> tuple[int, float]:
-    """N = distinct (strategy_hash, timeframe) among walk-forward runs, store-wide; V = sample
-    variance of the daily Sharpes of the latest run of each (0.0 when N < 2). The judge uses N
+    """N = distinct (strategy_hash, timeframe) among walk-forward runs and registered trials,
+    store-wide; V = sample variance of the daily Sharpes of the latest run of each (0.0 when N < 2). The judge uses N
     only; V is informational (the Deflated Sharpe uses the no-edge spread, see gates)."""
     with engine(cfg).connect() as c:
         df = pd.read_sql(sa.select(runs.c.strategy_hash, runs.c.timeframe, runs.c.sharpe, runs.c.created_at)
                          .where(sa.and_(runs.c.validation_mode == "walkforward", runs.c.sharpe.isnot(None))), c)
+        reg = pd.read_sql(sa.select(trials.c.strategy_hash, trials.c.timeframe), c)
     df = df.dropna(subset=["strategy_hash", "timeframe"])
+    n = len(set(zip(df.strategy_hash, df.timeframe)) | set(zip(reg.strategy_hash, reg.timeframe)))
     if df.empty:
-        return 0, 0.0
+        return n, 0.0
     latest = df.sort_values("created_at").groupby(["strategy_hash", "timeframe"]).tail(1)
-    n = len(latest)
-    v = float((latest.sharpe / np.sqrt(365)).var(ddof=1)) if n >= 2 else 0.0
+    v = float((latest.sharpe / np.sqrt(365)).var(ddof=1)) if len(latest) >= 2 else 0.0
     return n, v
 
 

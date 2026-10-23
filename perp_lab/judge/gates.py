@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import math
-from statistics import NormalDist
 
 import numpy as np
 import pandas as pd
 
+from perp_lab.dsr import dsr_from_moments, expected_max_sharpe
 from perp_lab.engine.metrics import sharpe
-
-EULER_GAMMA = 0.5772156649
-_N = NormalDist()
 
 
 def seed_from(run_id: str) -> int:
@@ -28,25 +24,6 @@ def moments(r: pd.Series) -> tuple[float, int, float, float]:
     d = x - x.mean()
     m2, m3, m4 = (d ** 2).mean(), (d ** 3).mean(), (d ** 4).mean()
     return float(x.mean() / x.std(ddof=1)), t, float(m3 / m2 ** 1.5), float(m4 / m2 ** 2)
-
-
-def expected_max_sharpe(n_trials: int, var_trials: float) -> float:
-    """SR0: the daily Sharpe the best of n_trials unskilled attempts reaches by luck."""
-    if n_trials < 2 or var_trials <= 0:
-        return 0.0
-    return math.sqrt(var_trials) * ((1 - EULER_GAMMA) * _N.inv_cdf(1 - 1 / n_trials)
-                                    + EULER_GAMMA * _N.inv_cdf(1 - 1 / (n_trials * math.e)))
-
-
-def dsr_from_moments(sr: float, t: int, skew: float, kurt: float, n_trials: int, var_trials: float) -> float:
-    """Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014)."""
-    if t < 3:
-        return 0.0
-    den = 1 - skew * sr + (kurt - 1) / 4 * sr ** 2
-    if den <= 0:
-        return 0.0
-    sr0 = expected_max_sharpe(n_trials, var_trials)
-    return float(_N.cdf((sr - sr0) * math.sqrt(t - 1) / math.sqrt(den)))
 
 
 def deflated_sharpe(r: pd.Series, n_trials: int, var_trials: float | None = None) -> dict:

@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _handle(session, sess, header: dict, sections: dict) -> tuple[dict, dict]:
     from perp_lab.sandbox.errors import ProtocolError
-    from perp_lab.sandbox.protocol import table_frame
+    from perp_lab.sandbox.protocol import check_random, table_frame
 
     op = header.get("op")
     if op == "load":
@@ -226,7 +226,8 @@ def _handle(session, sess, header: dict, sections: dict) -> tuple[dict, dict]:
     if op == "bars":
         return {"ok": True, "n": sess.bars(header["symbol"], header["tf"], table_frame(sections["table"]))}, {}
     if op == "run":
-        result = sess.run(header["params"], header["ep"], header["k"], header["start_i"], header["random"],
+        result = sess.run(header["params"], header["ep"], header["k"], header["start_i"],
+                          check_random(header["random"]),
                           header["features"])
         return session.run_reply(result, header["features"])
     if op == "prepare":

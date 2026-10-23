@@ -155,11 +155,12 @@ class RandomEntry(Strategy):
 
     name = "random_entry"
 
-    def __init__(self, base: Strategy, entry_prob: float, seed: int):
+    def __init__(self, base: Strategy, entry_prob: float, seed: int, long_share: float = 0.5):
         self.base = base
         self.p = dict(base.p)
         self.entry_prob = entry_prob
         self.seed = seed
+        self.long_share = long_share      # side is long where the second draw falls under it
 
     def prepare(self, bars: pd.DataFrame) -> pd.DataFrame:
         f = self.base.prepare(bars).copy()
@@ -167,7 +168,7 @@ class RandomEntry(Strategy):
         n = len(bars)
         u = rng.random((n, 2))          # row-major: bar t's draws don't depend on series length
         fire = u[:, 0] < self.entry_prob
-        side = np.where(u[:, 1] < 0.5, 1, -1)
+        side = np.where(u[:, 1] < self.long_share, 1, -1)
         f["_rand"] = np.where(fire, side, 0)
         return f
 

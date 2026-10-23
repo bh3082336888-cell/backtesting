@@ -26,17 +26,22 @@ def buy_and_hold(cfg, symbols, tf, a, b) -> dict:
             "daily": port}
 
 
-def random_entry(cfg, wf: WFResult, seeds: int | None = None, workers=None) -> dict:
+def random_entry(cfg, wf: WFResult, seeds: int | None = None, workers=None, *,
+                 overrides: dict | None = None, strat_sharpe: float | None = None) -> dict:
+    """Random entries with the plugin's exits, frequency and overall OOS long share: a long-biased
+    plugin must beat random longs, not 50/50, or it passes on market drift alone."""
     seeds = seeds or cfg["validation"]["random_seeds"]
     params = modal_params(wf)
     probs = {}
     for s in wf.symbols:
         n = int((wf.oos_trades.symbol == s).sum()) if len(wf.oos_trades) else 0
         probs[s] = n / max(wf.oos_flat_bars[s], 1.0)
-    jobs = [(params, s, wf.tf, None, seed, probs[s])
+    long_share = float((wf.oos_trades.side > 0).mean()) if len(wf.oos_trades) else 0.5
+    jobs = [(params, s, wf.tf, overrides, seed, (probs[s], long_share))
             for seed in range(seeds) for s in wf.symbols if probs[s] > 0]
     if not jobs:
-        return {"note": "strategy took no OOS trades; benchmark undefined", "beats_random": False}
+        return {"note": "strategy took no OOS trades; benchmark undefined", "beats_random": False,
+                "long_share": long_share}
     res = run_many(cfg, wf.src, jobs, workers, wf.stderr_dir)
     oa, ob = wf.raw["oos_span"]
     # A coin the strategy never traded gets no job, but it stays in every random portfolio as
@@ -53,10 +58,10 @@ def random_entry(cfg, wf: WFResult, seeds: int | None = None, workers=None) -> d
             trades_by_seed[r["seed"]] = trades_by_seed.get(r["seed"], 0) + int(((st >= oa) & (st < ob)).sum())
     sh = np.array([sharpe(portfolio_returns(v)) for v in by_seed.values()])
     pct = cfg["validation"]["random_percentile"]
-    strat_sh = wf.oos_summary["sharpe"]
+    strat_sh = wf.oos_summary["sharpe"] if strat_sharpe is None else strat_sharpe
     thr = float(np.percentile(sh, pct))
     return {
-        "seeds": int(len(sh)), "percentile": pct, "params": params, "entry_prob": probs,
+        "seeds": int(len(sh)), "percentile": pct, "params": params, "entry_prob": probs, "long_share": long_share,
         "random_sharpe_mean": float(sh.mean()), "random_sharpe_p50": float(np.median(sh)),
         f"random_sharpe_p{pct}": thr, "strategy_oos_sharpe": strat_sh,
         "strategy_pctile_vs_random": float((sh < strat_sh).mean()),

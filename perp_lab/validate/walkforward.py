@@ -116,9 +116,9 @@ def run_chunk(args) -> list[dict]:
     cfg = _cfg()
     out = []
     with client.Batch(cfg, src, symbol, tf, _bars(symbol, tf), stderr_dir=stderr_dir) as b:
-        for params, _, _, overrides, seed, entry_prob in jobs:
+        for params, _, _, overrides, seed, rand in jobs:
             ep = EngineParams.from_config(cfg, symbol, **(overrides or {}))
-            res = b.backtest(params, ep, random=None if seed is None else (seed, entry_prob))
+            res = b.backtest(params, ep, random=None if seed is None else (seed, *rand))
             out.append(_compact(res, symbol, params, seed, keep_levels))
     return out
 
@@ -141,8 +141,8 @@ def chunks(jobs: list[tuple], workers: int) -> list[tuple[str, str, list]]:
 
 def run_many(cfg: Config, src: PluginSource, jobs: list[tuple], workers: int | None = None,
              stderr_dir: Path | None = None, keep_levels: bool = False) -> list[dict]:
-    """Every job, a `(params, symbol, tf, overrides, seed, entry_prob)`, through the sandbox; the
-    results in job order. The pool runs trusted code only: each task is one chunk in one Batch.
+    """Every job, a `(params, symbol, tf, overrides, seed, rand)` (rand None, or
+    (entry_prob, long_share)), through the sandbox; the results in job order. The pool runs trusted code only: each task is one chunk in one Batch.
     The trades keep their stop/target path only with `keep_levels` (the walk-forward grid's, which
     become the charted OOS trades): sensitivity reads daily returns only and the random-entry
     benchmark signal_time only, and the lists would cross the pool for nothing."""
@@ -210,6 +210,14 @@ def listed_coins(daily: dict[str, pd.Series], a, b) -> int:
     return sum(len(_window(d, a, b)) > 0 for d in daily.values())
 
 
+def stitch_oos(R: dict, selected: list[dict], symbols: list[str]) -> dict[str, pd.Series]:
+    """Per-symbol OOS daily returns: each fold's selected combo on its test window, joined. `R` is
+    keyed `(combo, symbol)`; the before-costs pass stitches its own re-run the same way."""
+    parts = {s: [_window(R[(x["combo"], s)]["daily"], x["test_start"], x["test_end"]) for x in selected]
+             for s in symbols}
+    return {s: pd.concat(p).sort_index() for s, p in parts.items()}
+
+
 def walkforward(cfg: Config, src: PluginSource, tf: str, symbols: list[str] | None = None,
                 workers: int | None = None, stderr_dir: Path | None = None) -> WFResult:
     symbols = research_symbols(cfg, symbols or cfg.symbols, tf)
@@ -227,7 +235,6 @@ def walkforward(cfg: Config, src: PluginSource, tf: str, symbols: list[str] | No
     folds = make_folds(cfg.history_start, cfg.holdout_start, wf["train_months"], wf["test_months"])
     if not folds:
         raise ValueError("not enough history for one walk-forward fold")
-    oos_parts = {s: [] for s in symbols}
     expo_parts = {s: [] for s in symbols}
     flat_parts = {s: 0.0 for s in symbols}
     trade_parts, is_parts, selected = [], [], []
@@ -251,14 +258,13 @@ def walkforward(cfg: Config, src: PluginSource, tf: str, symbols: list[str] | No
         is_parts.append(portfolio_returns({s: _window(R[(best_k, s)]["daily"], a, b) for s in symbols}))
         for s in symbols:
             r = R[(best_k, s)]
-            oos_parts[s].append(_window(r["daily"], ta, tb))
             expo_parts[s].append(_window(r["exposure"], ta, tb))
             flat_parts[s] += float(_window(r["flat_bars"], ta, tb).sum())
             t = _trades_in(r["trades"], ta, tb)
             if len(t):
                 trade_parts.append(t.assign(fold=f["fold"], combo=best_k))
 
-    oos_daily = {s: pd.concat(p).sort_index() for s, p in oos_parts.items()}
+    oos_daily = stitch_oos(R, selected, symbols)
     oos_port = portfolio_returns(oos_daily)
     oos_trades = pd.concat(trade_parts, ignore_index=True) if trade_parts else pd.DataFrame()
     oos_expo = {s: float(pd.concat(p).mean()) for s, p in expo_parts.items()}
