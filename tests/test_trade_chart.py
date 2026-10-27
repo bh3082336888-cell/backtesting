@@ -162,7 +162,28 @@ def _traces(fig, name):
     return [t for t in fig.data if t.name == name]
 
 
-def test_figure_draws_entries_signal_bar_exits_stops_targets_and_folds():
+def _rects(fig, name):
+    """Every box in the named bar trace as (x0, x1, y0, y1): y0 the entry side (the bar's base)."""
+    out = []
+    for tr in fig.data:
+        if tr.type == "bar" and tr.name == name:
+            for x, w, b, y in zip(tr.x, tr.width, tr.base, tr.y):
+                x0 = pd.Timestamp(x)
+                out.append((x0, x0 + pd.Timedelta(milliseconds=int(w)), b, pytest.approx(b + y)))
+    return out
+
+
+def _notes(fig, name):
+    """Annotations of one kind ("price tag", "time tag", "trade label", "be note")."""
+    return [a for a in fig.layout.annotations if a.name == name]
+
+
+def _xs(fig):
+    """Every x a trade trace puts on the chart (not the candles)."""
+    return [pd.Timestamp(x) for tr in fig.data if tr.type != "candlestick" for x in tr.x if x is not None]
+
+
+def test_figure_draws_boxes_entries_signal_bar_exits_stops_targets_and_folds():
     c = candles(n=200)
     t = pd.DataFrame([
         trade(sig=10, reason="stop", stop=95.0),
@@ -176,38 +197,50 @@ def test_figure_draws_entries_signal_bar_exits_stops_targets_and_folds():
     fig = tc.trade_figure(c, t, "4h", folds=folds)
 
     assert sum(x.type == "candlestick" for x in fig.data) == 1
-    long_, short = _traces(fig, "long entry")[0], _traces(fig, "short entry")[0]
-    assert long_.marker.symbol == "triangle-up" and short.marker.symbol == "triangle-down"
-    assert len(long_.x) == 4 and len(short.x) == 1
-    assert pd.Timestamp(short.x[0]) == pd.to_datetime(t.entry_time[1], unit="ms")    # UTC, zone dropped
+    (ent,) = _traces(fig, "entry")                                  # one dot per trade, long or short
+    assert ent.marker.color == tc.PALETTE["s1"] and len(ent.x) == 5
+    assert pd.Timestamp(ent.x[1]) == pd.to_datetime(t.entry_time[1], unit="ms")      # UTC, zone dropped
+    assert list(ent.y) == t.entry_price[:5].tolist()
     colors = tc.exit_colors()
     for reason in tc.EXIT_REASONS:
         (ex,) = _traces(fig, f"exit: {reason}")
-        assert ex.marker.color == colors[reason] and len(ex.x) == 1
+        assert ex.marker.color == colors[reason] and ex.marker.symbol == "circle" and len(ex.x) == 1
     assert len(set(colors.values())) == len(colors)
+    # the short's target is below its entry and its stop above; every trade has a risk box
+    assert _rects(fig, tc.BOX_REWARD) == [(_at(31), _at(36), 130.5, 120.0)]
+    assert len(_rects(fig, tc.BOX_RISK)) == 5 and _rects(fig, tc.BOX_RISK)[1] == (_at(31), _at(36), 130.5, 140.0)
+    assert len(_rects(fig, tc.BOX_RESULT)) == 4                    # the four without a target
     (sig,) = _traces(fig, "signal bar (close)")
     assert list(sig.y) == [c.close.iloc[i] for i in (10, 30, 50, 70, 90)]     # the signal bar's own close
     (stop,) = _traces(fig, "initial stop")
     assert [y for y in stop.y if y is not None] == [95.0, 95.0, 140.0, 140.0] + [95.0] * 6
     (tgt,) = _traces(fig, "initial target")
     assert [y for y in tgt.y if y is not None] == [120.0, 120.0]               # NaN targets draw nothing
-    hov = long_.hovertext[0]
+    hov = ent.hovertext[0]
     for s in ("P&L -12.50 USDT", "R -0.75", "regime at signal: trending", "fees 1.25", "funding paid 0.40",
-              "fold 1 · n=20", "initial stop 95", "initial target —"):
+              "fold 1 · n=20", "initial stop 95", "initial target —", "no fixed target"):
         assert s in hov, s
-    labels = [a.text for a in fig.layout.annotations]
-    assert labels == ["train only", "fold 0", "fold 1"]
-    assert "trained on 2023-09-01 → 2024-01-20" in fig.layout.annotations[2].hovertext
-    assert len(fig.layout.shapes) == 2                       # train-only region + fold 0 (folds alternate)
+    (box,) = [tr for tr in fig.data if tr.name == tc.BOX_RISK]
+    assert box.hovertext[0] == hov                                    # hovering a box gives the same tooltip
+    shading = [a for a in fig.layout.annotations if not a.name]          # not the trades' tags
+    assert [a.text for a in shading] == ["train only", "fold 0", "fold 1"]
+    assert "trained on 2023-09-01 → 2024-01-20" in shading[2].hovertext
+    assert len([s for s in fig.layout.shapes if s.type == "rect"]) == 2   # train-only region + fold 0 (folds alternate)
 
 
-def test_coarse_candles_keep_markers_at_the_exact_fill():
+def test_coarse_candles_keep_box_coordinates_exact():
     c = candles(n=7000)
-    t = pd.DataFrame([trade(sig=6500, bars=3)])
+    t = pd.DataFrame([trade(sig=6500, bars=3, stop=6590.0, target=6650.0)])          # entry 6600.5
     fig = tc.trade_figure(c, t, "4h")
     (cs,) = [x for x in fig.data if x.type == "candlestick"]
     assert len(cs.x) <= tc.MAX_CANDLES and cs.name == "1d candles"
-    assert pd.Timestamp(_traces(fig, "long entry")[0].x[0]) == pd.to_datetime(t.entry_time[0], unit="ms")
+    assert _rects(fig, tc.BOX_RISK) == [(_at(6501), _at(6504), 6600.5, 6590.0)]
+    assert _rects(fig, tc.BOX_REWARD) == [(_at(6501), _at(6504), 6600.5, 6650.0)]
+    (ent,) = _traces(fig, "entry")
+    assert pd.Timestamp(ent.x[0]) == _at(6501) and list(ent.y) == [6600.5]
+    (ex,) = _traces(fig, "exit: stop")
+    assert pd.Timestamp(ex.x[0]) == _at(6504) and list(ex.y) == [6603.0]
+    assert [pd.Timestamp(a.x) for a in _notes(fig, "time tag")] == [_at(6501), _at(6504)]
     assert list(_traces(fig, "signal bar (close)")[0].y) == [c.close.iloc[6500]]
 
 
@@ -258,7 +291,7 @@ def test_a_target_that_goes_nan_breaks_the_line_and_resumes():
     base = trade(sig=10, bars=6, stop=95.0)
     t = pd.DataFrame([{**base, **_lv(base["entry_time"], [0, 2, 4], [95.0] * 3, [120.0, np.nan, 130.0])}])
     (tgt,) = _traces(tc.trade_figure(c, t, "4h"), "target")
-    assert tgt.x[-1] is None and tgt.line.color == tc.PALETTE["s1"]
+    assert tgt.x[-1] is None and tgt.line.color == tc.PALETTE["pos"]          # the target's green, as its box
     assert [(pd.Timestamp(x), y) if x is not None else None for x, y in zip(tgt.x, tgt.y)] == [
         (_at(11), 120.0), (_at(13), 120.0), None, (_at(15), 130.0), (_at(17), 130.0), None]
 
@@ -296,10 +329,12 @@ def test_an_all_nan_target_reads_back_from_parquet_and_draws_no_target_line(tmp_
     assert "target at exit —" in tc.hover_text(back)[0]
 
 
-def test_old_trades_keep_the_initial_lines():
-    t = pd.DataFrame([trade(sig=10, stop=95.0, target=120.0)])
+def test_old_trades_without_levels_use_the_initial_stop_and_target():
+    t = pd.DataFrame([trade(sig=10, stop=95.0, target=120.0)])          # entry bar 11 at 110.5, exit bar 16
     assert not tc.has_levels(t)
     fig = tc.trade_figure(candles(n=200), t, "4h")
+    assert _rects(fig, tc.BOX_RISK) == [(_at(11), _at(16), 110.5, 95.0)]
+    assert _rects(fig, tc.BOX_REWARD) == [(_at(11), _at(16), 110.5, 120.0)]
     (stop,) = _traces(fig, "initial stop")
     (tgt,) = _traces(fig, "initial target")
     assert [y for y in stop.y if y is not None] == [95.0, 95.0] and [y for y in tgt.y if y is not None] == [120.0] * 2
@@ -331,6 +366,179 @@ def test_a_level_stamped_before_the_entry_never_steps_backwards():
     xs = [pd.Timestamp(x) for x in stop.x if x is not None]
     assert xs == sorted(xs) and xs[0] == _at(11)
     assert [y for y in stop.y if y is not None] == [95.0, 95.0, 97.0, 97.0, 99.0, 99.0]
+
+
+# ---------------------------------------------------------------- position boxes, tags and labels
+
+M5 = 300_000
+T0 = _ms("2024-03-04 13:40")          # a Monday
+
+
+def _pos(side=1, **kw):
+    """A 5m trade like the LCE note's: long 99.06, stop 98.82, target 99.30, out at the target 30 minutes
+    later, +0.73R net. The short mirrors it about the entry."""
+    stop, target = (98.82, 99.30) if side > 0 else (99.30, 98.82)
+    row = {"symbol": "BTCUSDT", "tf": "5m", "side": side, "signal_time": T0 - M5, "entry_time": T0,
+           "entry_price": 99.06, "exit_time": T0 + 6 * M5, "exit_price": target, "exit_reason": "target",
+           "stop_init": stop, "target": target, "qty": 10.0, "pnl_gross": 2.4, "slippage": 0.072, "fees": 0.6,
+           "funding": 0.0, "pnl": 1.752, "pnl_pct": 0.000175, "r_multiple": 0.73, "regime": "trending"}
+    return {**row, **kw}
+
+
+def _day(price=99.0):
+    """A day of 5m candles, the day of `_pos`."""
+    return candles("2024-03-04", n=288, tf_ms=M5, price=price)
+
+
+def test_rr_and_result_text_long_and_short():
+    # R:R = |99.30 - 99.06| / |99.06 - 98.82| = 1.00; gross = (2.4 + 0.072) / (10 * 0.24) = 1.03R
+    for side in (1, -1):
+        assert tc.rr_text(_pos(side)) == "R:R 1 : 1.00"
+        assert tc.result_text(_pos(side)) == "+1.03R gross · +0.73R net"
+    assert tc.rr_text(_pos(target=99.42)) == "R:R 1 : 1.50"
+    assert tc.result_text(_pos(pnl_gross=-2.472, r_multiple=-1.31)) == "-1.00R gross · -1.31R net"
+
+
+def test_result_text_without_slippage_column_says_after_slippage():
+    r = _pos()
+    del r["slippage"]                                       # a run from before the engine kept it
+    assert tc.result_text(r) == "+1.00R gross after slippage · +0.73R net"
+    assert tc.result_text(_pos(slippage=np.nan)) == "+1.00R gross after slippage · +0.73R net"   # mixed frame
+    assert tc.result_text(_pos(slippage=0.0)) == "+1.00R gross · +0.73R net"                     # paper: kept, 0
+
+
+def test_no_target_trade_has_no_reward_box_and_says_so():
+    win = trade(sig=10, bars=6, stop=95.0, exit_price=115.0, reason="signal")          # long 110.5 → 115
+    loss = trade(sig=40, side=-1, bars=6, stop=160.0, exit_price=145.0, reason="signal")   # short 140.5 → 145
+    b = tc.trade_boxes(win)
+    assert b["no_target"] and b["reward"] == [] and b["risk"] == [(_ms("2024-01-01") + 11 * H4,
+                                                                    _ms("2024-01-01") + 17 * H4, 110.5, 95.0)]
+    assert tc.rr_text(win) == "no fixed target"
+    fig = tc.trade_figure(candles(n=200), pd.DataFrame([win, loss]), "4h")
+    assert not _rects(fig, tc.BOX_REWARD)
+    assert _rects(fig, tc.BOX_RESULT) == [(_at(11), _at(17), 110.5, 115.0), (_at(41), _at(47), 140.5, 145.0)]
+    (res,) = [tr for tr in fig.data if tr.name == tc.BOX_RESULT]
+    assert list(res.marker.color) == [tc.tint(tc.PALETTE["pos"]), tc.tint(tc.PALETTE["neg"])]   # gain, loss
+    assert len(_rects(fig, tc.BOX_RISK)) == 2                            # the stop is still the risk
+    labels = _notes(fig, "trade label")
+    assert len(labels) == 2 and all(a.text.startswith("<b>no fixed target</b>") for a in labels)
+    assert [(a.y, a.yanchor) for a in labels] == [(115.0, "bottom"), (140.5, "top")]   # the reward side
+    assert not [a for a in _notes(fig, "price tag") if a.text.startswith("TP")]
+
+
+def test_breakeven_collapses_the_risk_box_at_its_time():
+    r = _pos(level_time=[T0, T0 + 3 * M5], level_stop=[98.82, 99.06], level_target=[99.30, 99.30])
+    b = tc.trade_boxes(r)
+    assert b["be_time"] == T0 + 3 * M5
+    assert b["risk"] == [(T0, T0 + 3 * M5, 99.06, 98.82)]               # nothing after the move
+    assert b["reward"] == [(T0, T0 + 6 * M5, 99.06, 99.30)]             # the target never moved: one box
+    assert b["entry"] == (T0, 99.06) and b["exit"] == (T0 + 6 * M5, 99.30, "target") and not b["no_target"]
+    fig = tc.trade_figure(_day(), pd.DataFrame([r]), "5m")
+    t = lambda ms: pd.Timestamp(ms, unit="ms")                           # noqa: E731
+    assert _rects(fig, tc.BOX_RISK) == [(t(T0), t(T0 + 3 * M5), 99.06, 98.82)]
+    (be,) = _notes(fig, "be note")
+    assert be.text == "SL → BE 13:55" and pd.Timestamp(be.x) == t(T0 + 3 * M5) and be.y == 99.06
+    assert sorted(a.text for a in _notes(fig, "time tag")) == ["13:40 entry", "14:10 exit"]   # one day: no date
+    (lab,) = _notes(fig, "trade label")
+    assert "R:R 1 : 1.00" in lab.text and "+1.03R gross · +0.73R net" in lab.text
+    assert tc.trade_boxes(_pos())["be_time"] is None
+
+
+def test_trailing_stop_past_entry_collapses_risk_and_keeps_the_step_line():
+    c = candles(n=200)
+    base = trade(sig=10, bars=6, stop=105.0, exit_price=113.0)          # long 110.5, entry bar 11, exit bar 17
+    r = {**base, **_lv(base["entry_time"], [0, 2, 4], [105.0, 108.0, 112.0], [np.nan] * 3)}
+    b = tc.trade_boxes(r)
+    ms = lambda i: _ms("2024-01-01") + i * H4                             # noqa: E731
+    assert b["risk"] == [(ms(11), ms(13), 110.5, 105.0), (ms(13), ms(15), 110.5, 108.0)]   # steps, then gone
+    assert b["be_time"] == ms(15)                                        # trailed past the entry
+    fig = tc.trade_figure(c, pd.DataFrame([r]), "4h")
+    assert _rects(fig, tc.BOX_RISK) == [(_at(11), _at(13), 110.5, 105.0), (_at(13), _at(15), 110.5, 108.0)]
+    (stop,) = _traces(fig, "stop")
+    assert [y for y in stop.y if y is not None] == [105.0, 105.0, 108.0, 108.0, 112.0, 112.0]   # carries on
+
+
+def test_short_trade_boxes_are_mirrored():
+    long_, short = tc.trade_boxes(_pos()), tc.trade_boxes(_pos(-1))
+    end = T0 + 6 * M5
+    assert long_["reward"] == [(T0, end, 99.06, 99.30)] and long_["risk"] == [(T0, end, 99.06, 98.82)]
+    assert short["reward"] == [(T0, end, 99.06, 98.82)] and short["risk"] == [(T0, end, 99.06, 99.30)]
+    figs = {s: tc.trade_figure(_day(), pd.DataFrame([_pos(s)]), "5m") for s in (1, -1)}
+    t = lambda ms: pd.Timestamp(ms, unit="ms")                           # noqa: E731
+    assert _rects(figs[-1], tc.BOX_REWARD) == [(t(T0), t(end), 99.06, 98.82)]   # reward below the entry
+    assert _rects(figs[-1], tc.BOX_RISK) == [(t(T0), t(end), 99.06, 99.30)]     # risk above
+    tags = {a.text: a.y for a in _notes(figs[-1], "price tag")}
+    assert tags == {"Entry 99.06": 99.06, "TP 98.82": 98.82, "SL 99.3": 99.30}
+    assert {a.text: a.y for a in _notes(figs[1], "price tag")} == {"Entry 99.06": 99.06, "TP 99.3": 99.30,
+                                                                    "SL 98.82": 98.82}
+    (ls,) = _notes(figs[-1], "trade label")
+    (ll,) = _notes(figs[1], "trade label")
+    assert (ll.y, ll.yanchor) == (99.30, "top") and (ls.y, ls.yanchor) == (98.82, "bottom")   # inside the reward
+    assert ls.text == ll.text
+
+
+def test_trade_starting_before_the_window_draws_from_the_window_start():
+    c = candles(n=200)
+    early = trade(sig=-6, bars=10, stop=90.0, target=130.0)               # entry bar -5, exit bar 5
+    late = trade(sig=195, bars=10, stop=280.0, target=320.0)              # entry bar 196, exit bar 206
+    fig = tc.trade_figure(c, pd.DataFrame([early, late]), "4h")
+    assert _rects(fig, tc.BOX_RISK) == [(_at(0), _at(5), 94.5, 90.0), (_at(196), _at(200), 295.5, 280.0)]
+    assert _rects(fig, tc.BOX_REWARD) == [(_at(0), _at(5), 94.5, 130.0), (_at(196), _at(200), 295.5, 320.0)]
+    assert [pd.Timestamp(x) for x in _traces(fig, "entry")[0].x] == [_at(196)]    # no dot off the window
+    assert [pd.Timestamp(x) for x in _traces(fig, "exit: stop")[0].x] == [_at(5)]
+    times = sorted((pd.Timestamp(a.x), a.text.split()[-1]) for a in _notes(fig, "time tag"))
+    assert times == [(_at(5), "exit"), (_at(196), "entry")]               # no tag for an off-screen time
+    assert len([s for s in fig.layout.shapes if s.name == "time tag"]) == 2
+    xs = _xs(fig)
+    assert min(xs) >= _at(0) and max(xs) <= _at(200)                      # nothing widens the window
+
+
+def _row(k, **kw):
+    return trade(sig=10 + 20 * k, bars=5, stop=95.0 + 20 * k, target=126.0 + 20 * k, **kw)   # R:R 1 : 1
+
+
+def test_tags_only_for_the_focused_trade_when_more_than_five():
+    t = pd.DataFrame([_row(k) for k in range(6)])
+    t.index = t.index + 100                                               # focus is a row label, not a position
+    fig = tc.trade_figure(candles(n=200), t, "4h")
+    assert not _notes(fig, "price tag") and not _notes(fig, "time tag") and not _notes(fig, "trade label")
+    assert len(_rects(fig, tc.BOX_RISK)) == 6 and len(_rects(fig, tc.BOX_REWARD)) == 6    # boxes for all
+    for name in (tc.BOX_RISK, tc.BOX_REWARD):
+        (box,) = [tr for tr in fig.data if tr.name == name]
+        assert len(box.hovertext) == 6 and all("R:R 1 : 1.00" in h for h in box.hovertext)   # hover on every one
+    fig = tc.trade_figure(candles(n=200), t, "4h", focus=103)            # sig 70: entry bar 71, exit bar 76
+    assert sorted(a.text for a in _notes(fig, "price tag")) == ["Entry 170.5", "SL 155", "TP 186"]
+    assert [(pd.Timestamp(a.x), a.text) for a in _notes(fig, "time tag")] == [
+        (_at(71), "Fri 12 20:00 entry"), (_at(76), "Sat 13 16:00 exit")]          # a month in view: dated
+    assert len([s for s in fig.layout.shapes if s.name == "time tag"]) == 2
+    assert len(_notes(fig, "trade label")) == 1
+    assert not _notes(tc.trade_figure(candles(n=200), t, "4h", focus=999), "price tag")   # not in view
+
+
+def test_tags_for_all_when_five_or_fewer():
+    t = pd.DataFrame([_row(k) for k in range(5)] + [_row(20)])            # the sixth is out of the window
+    fig = tc.trade_figure(candles(n=200), t, "4h")
+    assert len(_notes(fig, "price tag")) == 15 and len(_notes(fig, "time tag")) == 10
+    assert len(_notes(fig, "trade label")) == 5
+    assert len([s for s in fig.layout.shapes if s.name == "time tag"]) == 10
+
+
+def test_paper_run_draws_boxes():
+    c = candles("2026-08-01", n=60).assign(live=[False] * 40 + [True] * 20)
+    base = trade(sig=45, bars=3, start="2026-08-01", stop=140.0, target=160.0, exit_price=148.0)   # 145.5
+    # the paper runner's record: slippage kept as 0, levels from the fill (one may be stamped before it)
+    r = {**base, "qty": 2.0, "pnl_gross": 5.0, "slippage": 0.0, "r_multiple": 0.4, "source": "paper",
+         "level_time": [base["entry_time"] - H4, base["entry_time"] + H4], "level_stop": [140.0, 142.0],
+         "level_target": [160.0, 160.0]}
+    fig = tc.trade_figure(c, pd.DataFrame([r]), "4h")
+    e = pd.Timestamp(base["entry_time"], unit="ms")
+    x = pd.Timestamp(base["exit_time"], unit="ms")
+    h = pd.Timedelta(hours=4)
+    assert _rects(fig, tc.BOX_RISK) == [(e, e + h, 145.5, 140.0), (e + h, x, 145.5, 142.0)]
+    assert _rects(fig, tc.BOX_REWARD) == [(e, x, 145.5, 160.0)]
+    (lab,) = _notes(fig, "trade label")
+    assert "+0.45R gross · +0.40R net" in lab.text                    # 5 / (2 × 5.5)
+    assert [a.text for a in fig.layout.annotations if not a.name] == ["warmup"]
 
 
 # ---------------------------------------------------------------- dashboard
@@ -371,7 +579,7 @@ def test_detail_page_charts_walkforward_trades(wf_run):
     assert spec is not None
     # default window = the last test fold (2024-03-31 → 2024-04-30): the trade at bar 640 is in it
     names = {d.get("name") for d in spec["data"]}
-    assert {"long entry", "exit: signal"} <= names and "exit: stop" not in names
+    assert {"entry", "exit: signal", tc.BOX_RISK} <= names and "exit: stop" not in names
     assert any("1 trade in range" in c.value for c in at.caption)
 
 
@@ -402,6 +610,26 @@ def test_jump_to_the_same_trade_again_after_picking_dates_by_hand(wf_run):
     assert not [w.value for w in at.warning]                       # resetting the widget's state warns of nothing
 
 
+def test_app_passes_the_jumped_to_trade_as_focus(wf_run):
+    # eight trades close together: more than five in view, so only the jumped-to one gets its tags
+    t = pd.DataFrame([trade(sig=300 + 7 * k, start="2024-01-01", target=500.0 + 7 * k) for k in range(8)])
+    t.to_parquet(wf_run.runs_dir / "wf1" / "oos_trades.parquet")
+    write_candles(wf_run.data_dir, "BTCUSDT", "4h", candles("2024-01-01", n=6 * 130))
+    at = _detail()
+    at.selectbox(key="tc_jump_wf1_BTCUSDT").set_value(3).run()
+    assert not at.exception, [e.message for e in at.exception]
+    notes = _trade_chart(at)["layout"]["annotations"]
+    assert any("8 trades in range" in c.value for c in at.caption)
+    assert [pd.Timestamp(a["x"]) for a in notes if a.get("name") == "time tag"] == [
+        pd.Timestamp(t.entry_time[3], unit="ms"), pd.Timestamp(t.exit_time[3], unit="ms")]
+    assert sorted(a["text"] for a in notes if a.get("name") == "price tag") == ["Entry 421.5", "SL 95", "TP 521"]
+    # dates picked by hand: no trade is jumped to, so none is tagged
+    dates = f"tc_dates_wf1_{at.session_state['tc_ver_wf1']}"
+    at.date_input(key=dates).set_value((pd.Timestamp("2024-02-15").date(), pd.Timestamp("2024-03-05").date())).run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert not [a for a in _trade_chart(at)["layout"].get("annotations", []) if a.get("name") == "time tag"]
+
+
 def test_missing_candles_say_how_to_get_them(wf_run):
     at = _detail()
     assert not at.exception, [e.message for e in at.exception]
@@ -425,7 +653,7 @@ def test_paper_runs_chart_their_own_bars(wf_run):
     charts = [json.loads(el.proto.spec) for el in at.get("plotly_chart")]
     paper = [s for s in charts if any(a.get("text") == "warmup" for a in s["layout"].get("annotations", []))]
     assert len(paper) == 1
-    assert "long entry" in {d.get("name") for d in paper[0]["data"]}
+    assert {"entry", tc.BOX_RISK} <= {d.get("name") for d in paper[0]["data"]}
 
 
 def test_in_sample_runs_say_they_are_not_charted(wf_run):
@@ -443,6 +671,6 @@ def test_detail_page_says_the_levels_moved_when_trades_have_them(wf_run):
     write_candles(wf_run.data_dir, "BTCUSDT", "4h", candles("2024-01-01", n=6 * 130))
     at = _detail()
     assert not at.exception, [e.message for e in at.exception]
-    assert any("stop (red) and target (blue), as they moved" in c.value for c in at.caption)
+    assert any("stop (red) and target (green), as they moved" in c.value for c in at.caption)
     spec = _trade_chart(at)
     assert {"stop"} <= {d.get("name") for d in spec["data"]}

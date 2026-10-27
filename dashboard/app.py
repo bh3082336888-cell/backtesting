@@ -45,6 +45,7 @@ C = {
     "s1": "#3987e5" if DARK else "#2a78d6",          # series 1 / positive pole
     "s2": "#d95926" if DARK else "#eb6834",          # series 2
     "neg": "#e66767" if DARK else "#e34948",         # negative pole
+    "pos": "#0ca30c",                                # status good: trade charts' reward box and TP
     "mid": "#383835" if DARK else "#f0efec",         # diverging midpoint
     "muted": "#898781",                              # IS / reference ink
     "grid": "#2c2c2a" if DARK else "#e1e0d9",
@@ -55,6 +56,7 @@ C = {
     "candle": "#6b6a66" if DARK else "#a9a7a0",
     "liq": "#a35cff" if DARK else "#8e2dff",
     "eow": "#2bb39a" if DARK else "#1f9e89",
+    "bg": "#0e1117" if DARK else "#ffffff",         # the page behind the chart: dot rings, label plates
 }
 DIVERGING = [[0.0, C["neg"]], [0.5, C["mid"]], [1.0, C["s1"]]]
 
@@ -240,7 +242,8 @@ def trades_chart_section(r, rid, folds=None):
     if candles.empty:
         st.caption("No candles in this range.")
         return
-    fig = tc.trade_figure(candles, mine, r.timeframe, palette=C, folds=folds if mode == "walkforward" else None)
+    fig = tc.trade_figure(candles, mine, r.timeframe, palette=C, folds=folds if mode == "walkforward" else None,
+                          focus=st.session_state.get(jk))       # the jumped-to trade: a row label of `mine`
     last = end - pd.Timedelta(1, "ns")
     show(style(fig, h=560, title=f"{sym} {r.timeframe} · {start:%Y-%m-%d} → {last:%Y-%m-%d} UTC"))
     shown = tc.display_tf(r.timeframe, len(candles))
@@ -252,11 +255,15 @@ def trades_chart_section(r, rid, folds=None):
     shade = (" Shaded: every other test fold (hover a fold label for its train window and params); "
              "every trade here is out-of-sample." if mode == "walkforward"
              else " Shaded: warmup bars from before the run started.")
-    lines = ("stop (red) and target (blue), as they moved" if tc.has_levels(here)
-             else "initial stop (red) and initial target (blue)")
+    lines = ("stop (red) and target (green), as they moved" if tc.has_levels(here)
+             else "initial stop (red) and initial target (green)")
     st.caption(f"{len(here)} trade{'' if len(here) == 1 else 's'} in range · candles from {src}.{coarse} "
-               "▲ long / ▼ short entry at the fill · ○ close of the signal bar · ✕ exit, coloured by reason · "
-               f"dotted: {lines}.{shade}")
+               "Each trade: a green box from the entry to the target and a red one to the stop, which closes "
+               "once the stop reaches the entry (no fixed target: the move to the exit, green for a gain, red "
+               "for a loss) · bold blue line and dot: the entry at the fill · dot on the exit candle, coloured "
+               f"by reason · ○ close of the signal bar · dotted: {lines}. Price and time tags (UTC) and the R:R "
+               f"label show for the trade picked in Jump to trade, or for every trade when {tc.TAG_ALL} or "
+               f"fewer are in range; hover a box for the whole trade.{shade}")
     if len(here):
         with st.expander(f"Trades in range ({len(here)})"):
             cols = [x for x in ["side", "signal_time", "entry_time", "entry_price", "exit_time", "exit_price",
