@@ -61,7 +61,7 @@ function build() {
   chart.subscribeClick(onClick);
   chart.subscribeDblClick(fit);
   el.fit.addEventListener("click", fit);
-  el.goto.addEventListener("click", () => goTo(payload, false));
+  el.goto.addEventListener("click", () => goTo(payload, true));
   el.signal.addEventListener("change", () => payload && drawTrades(payload));
 }
 
