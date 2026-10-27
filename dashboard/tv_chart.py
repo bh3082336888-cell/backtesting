@@ -98,7 +98,7 @@ def _plain(b: dict) -> dict:
             for k, v in b.items()}
 
 
-def _trade(label, r: dict, b: dict, tip: str, p: dict, lo: int, hi: int, fmt: str, tagged: bool,
+def _trade(label, r: dict, b: dict, tip: str, p: dict, lo: int, hi: int, fmt: str, tagged: bool, focused: bool,
            close_at: pd.Series) -> dict:
     (e_t, e_px), (x_t, x_px, reason) = b["entry"], b["exit"]
     net = _number(r.get("r_multiple"))
@@ -119,7 +119,7 @@ def _trade(label, r: dict, b: dict, tip: str, p: dict, lo: int, hi: int, fmt: st
         "stops": [list(s) for s in tc.level_steps(r, 1)],
         "targets": [list(s) for s in tc.level_steps(r, 2)],
         "tagged": tagged,
-        "price_lines": [{"price": y, "title": word, "color": c} for word, y, c in tags["price"]],
+        "price_lines": [{"price": y, "title": word, "color": c} for word, y, c in tags["price"]] if focused else [],
         "time_tags": [{"time": ms, "text": text, "color": c, "side": side} for ms, text, c, side in tags["time"]],
         "be": None if tags["be"] is None else dict(zip(("time", "price", "text"), tags["be"])),
     }
@@ -136,9 +136,9 @@ def chart_payload(candles: pd.DataFrame, trades: pd.DataFrame, tf: str, *, focus
         MAX_TV_BARS bars; `window`: the window in epoch ms; `price_format` for the price axis;
       * `trades`: every trade open in the window, with its `trade_boxes` geometry (unclipped: the chart clips to
         the window), R:R and result text, tooltip lines, entry, exit, the signal bar's close (from the run's own
-        bars), its stop and target steps, and its tags: `price_lines` (Entry, TP, SL), `time_tags` and the
-        breakeven note, only for the trade in `focus` (a row label of `trades`), or for every trade when at most
-        TAG_ALL are in view;
+        bars) and its stop and target steps. `price_lines` (Entry, TP, SL: full-width lines labelled on the price
+        axis) only for the trade in `focus` (a row label of `trades`); `time_tags`, the breakeven note and the
+        in-box label (`tagged`) for that trade, or for every trade when at most TAG_ALL are in view;
       * `markers`: the entry and exit dots, each on the (possibly coarser) candle holding its time, at its price;
       * `folds`: the shaded spans and their labels (test folds, or a paper run's warmup); `exits`: the exit
         reasons in view and their colours; `focus`: the focused trade's id, None when it isn't in view;
@@ -165,7 +165,8 @@ def chart_payload(candles: pd.DataFrame, trades: pd.DataFrame, tf: str, *, focus
         return out
     tagged = (set(t.index) if len(t) <= tc.TAG_ALL
               else {focus} if focus is not None and focus in t.index else set())
-    out["focus"] = _id(focus) if focus is not None and focus in t.index else None
+    focused = focus if focus is not None and focus in t.index else None
+    out["focus"] = None if focused is None else _id(focused)
     fmt = "%a %d %H:%M" if hi - lo > tc.DAY else "%H:%M"             # UTC, as the axis; dated past one day
     close_at = pd.Series(candles.close.to_numpy(dtype=float), index=_index_ms(candles.index))
     bar_ms = _index_ms(bars.index)
@@ -178,7 +179,8 @@ def chart_payload(candles: pd.DataFrame, trades: pd.DataFrame, tf: str, *, focus
     recs = t.to_dict("records")
     for label, r, tip in zip(t.index, recs, tc.hover_text(t)):
         b = tc.trade_boxes(r, TF_MS[tf])          # a trade in and out on one bar is drawn one bar wide
-        tr = _trade(label, r, b, tip, p, lo_ms, hi_ms, fmt, label in tagged, close_at)
+        tr = _trade(label, r, b, tip, p, lo_ms, hi_ms, fmt, label in tagged, focused is not None and label == focused,
+                    close_at)
         out["trades"].append(tr)
         for kind, at, color in (("entry", tr["entry"], p["s1"]), ("exit", tr["exit"], tr["exit"]["color"])):
             if lo_ms <= at["time"] < hi_ms:       # no dot for a time off the window

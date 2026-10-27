@@ -287,10 +287,10 @@ def trades_chart_section(r, rid, folds=None):
                "once the stop reaches the entry (no fixed target: the move to the exit, green for a gain, red "
                "for a loss) · bold blue line and dot: the entry at the fill · dot on the exit candle, coloured "
                f"by reason (key above the chart) · ○ close of the signal bar (a toggle above the chart hides it) · "
-               f"dotted: {lines}. Price tags on the "
-               f"axis, time tags (UTC) and the R:R label show for the focused trade, or for every trade when "
-               f"{tc.TAG_ALL} or fewer are in range: pick one in Jump to trade, or click a box to focus it. Hover "
-               f"a box for the whole trade.{shade}")
+               f"dotted: {lines}. The focused trade gets its "
+               "Entry, TP and SL price lines on the axis; time tags (UTC) and the R:R label show for it, or for "
+               f"every trade when {tc.TAG_ALL} or fewer are in range. Pick one in Jump to trade, or click a box to "
+               f"focus it. Hover a box for the whole trade.{shade}")
     if len(here):
         with st.expander(f"Trades in range ({len(here)})"):
             cols = [x for x in ["side", "signal_time", "entry_time", "entry_price", "exit_time", "exit_price",

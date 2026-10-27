@@ -36,7 +36,13 @@ def by_id(p: dict) -> dict:
 
 
 def tagged(p: dict) -> set:
-    return {tr["id"] for tr in p["trades"] if tr["tagged"] or tr["price_lines"] or tr["time_tags"]}
+    """Trades with their time tags and in-box label."""
+    return {tr["id"] for tr in p["trades"] if tr["tagged"] or tr["time_tags"]}
+
+
+def lined(p: dict) -> set:
+    """Trades with Entry/TP/SL price lines on the axis."""
+    return {tr["id"] for tr in p["trades"] if tr["price_lines"]}
 
 
 # ---------------------------------------------------------------- the window
@@ -129,16 +135,16 @@ def _row(k, **kw):
     return trade(sig=10 + 20 * k, bars=5, stop=95.0 + 20 * k, target=126.0 + 20 * k, **kw)   # R:R 1 : 1
 
 
-def test_price_lines_only_for_focus_or_five_or_fewer():
+def test_price_lines_only_for_the_focused_trade_tags_for_focus_or_five_or_fewer():
     t = pd.DataFrame([_row(k) for k in range(6)])
     t.index = t.index + 100                                               # focus is a row label, not a position
     p = payload(candles(n=200), t)
-    assert len(p["trades"]) == 6 and not tagged(p) and p["focus"] is None
+    assert len(p["trades"]) == 6 and not tagged(p) and not lined(p) and p["focus"] is None
     assert all(tr["be"] is None for tr in p["trades"])
     assert all(any("R:R 1 : 1.00" in line for line in tr["tooltip"]) for tr in p["trades"])   # hover on every one
 
     p = payload(candles(n=200), t, focus=103)                            # sig 70: entry bar 71, exit bar 76
-    assert p["focus"] == 103 and tagged(p) == {103}
+    assert p["focus"] == 103 and tagged(p) == lined(p) == {103}
     tr = by_id(p)[103]
     assert tr["tagged"]
     assert tr["price_lines"] == [{"price": 170.5, "title": "Entry", "color": P["s1"]},
@@ -149,19 +155,22 @@ def test_price_lines_only_for_focus_or_five_or_fewer():
         {"time": ms(76), "text": "Sat 13 16:00 exit", "color": tc.exit_colors(P)["stop"], "side": "exit"}]
 
     p = payload(candles(n=200), t, focus=999)                            # not in view: nothing tagged
-    assert p["focus"] is None and not tagged(p)
+    assert p["focus"] is None and not tagged(p) and not lined(p)
 
-    p = payload(candles(n=200), pd.DataFrame([_row(k) for k in range(5)] + [_row(20)]))   # the sixth is outside
-    assert len(p["trades"]) == 5 and tagged(p) == {0, 1, 2, 3, 4}
-    assert sum(len(tr["price_lines"]) for tr in p["trades"]) == 15
+    # five or fewer in view (a sixth outside): time tags and labels for every one, price lines only on focus
+    five = pd.DataFrame([_row(k) for k in range(5)] + [_row(20)])
+    p = payload(candles(n=200), five)
+    assert len(p["trades"]) == 5 and tagged(p) == {0, 1, 2, 3, 4} and not lined(p)
     assert sum(len(tr["time_tags"]) for tr in p["trades"]) == 10
+    p = payload(candles(n=200), five, focus=2)
+    assert tagged(p) == {0, 1, 2, 3, 4} and lined(p) == {2} and len(by_id(p)[2]["price_lines"]) == 3
 
 
 def test_tags_mirror_for_a_short_and_have_no_tp_without_a_target():
-    (s,) = payload(_day(), [_pos(-1)], "5m")["trades"]
+    (s,) = payload(_day(), [_pos(-1)], "5m", focus=0)["trades"]
     assert [(x["title"], x["price"]) for x in s["price_lines"]] == [("Entry", 99.06), ("TP", 98.82), ("SL", 99.30)]
     free = trade(sig=10, bars=6, stop=95.0, exit_price=115.0, reason="signal")
-    (f,) = payload(candles(n=200), [free])["trades"]
+    (f,) = payload(candles(n=200), [free], focus=0)["trades"]
     assert [x["title"] for x in f["price_lines"]] == ["Entry", "SL"]
 
 
