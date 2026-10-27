@@ -4,27 +4,40 @@ import pytest
 
 from perp_lab.config import TF_MS
 from perp_lab.validate.causality import synthetic_bars, with_moving_columns
-from perp_lab.validate.synthetic_market import DAYS, MARKET_VERSION, SYMBOLS, market
+from perp_lab.validate.synthetic_market import DAYS, MARKET_VERSION, SYMBOLS, VOL_SCALE, market
 
 
 def test_the_market_is_one_path_at_every_timeframe():
-    m15, m4h = market("15m")["SYN1"], market("4h")["SYN1"]
-    assert m4h.close.iloc[0] == m15.close.iloc[15] and len(m4h) * 16 == len(m15)
+    m5, m4h = market("5m")["SYN1"], market("4h")["SYN1"]
+    assert m4h.close.iloc[0] == m5.close.iloc[47] and len(m4h) * 48 == len(m5)
+
+
+def test_market_5m_exists():
+    m = market("5m")
+    assert tuple(m) == SYMBOLS
+    assert all(len(df) == 180 * 288 for df in m.values())
+
+
+def test_15m_is_resampled_from_5m():
+    m5, m15 = market("5m")["SYN1"], market("15m")["SYN1"]
+    assert len(m15) * 3 == len(m5)
+    assert m15.close.iloc[0] == m5.close.iloc[2] and m15.open.iloc[1] == m5.open.iloc[3]
+    assert m15.high.iloc[1] == m5.high.iloc[3:6].max() and m15.volume.iloc[1] == pytest.approx(m5.volume.iloc[3:6].sum())
 
 
 def test_the_market_is_fixed():
-    assert (MARKET_VERSION, SYMBOLS, DAYS) == (1, ("SYN1", "SYN2", "SYN3", "SYN4"), 180)
-    m = market("15m")
-    assert tuple(m) == SYMBOLS and market("15m") is m                 # built once per timeframe
-    base = with_moving_columns(synthetic_bars(n=DAYS * 96, seed=102, start="2023-01-01", funding_every=32,
-                                              tf_ms=900_000), seed=202)
+    assert (MARKET_VERSION, SYMBOLS, DAYS) == (2, ("SYN1", "SYN2", "SYN3", "SYN4"), 180)
+    m = market("5m")
+    assert tuple(m) == SYMBOLS and market("5m") is m                 # built once per timeframe
+    base = with_moving_columns(synthetic_bars(n=DAYS * 288, seed=102, start="2023-01-01", funding_every=96,
+                                              tf_ms=300_000, vol_scale=VOL_SCALE), seed=202)
     pd.testing.assert_frame_equal(m["SYN3"], base)
     assert m["SYN1"].index[0] == pd.Timestamp("2023-01-01", tz="UTC")
     assert not m["SYN1"].close.equals(m["SYN2"].close)                # one path per symbol
 
 
 def test_resampling_aggregates_each_column_by_its_meaning():
-    b, h = market("15m")["SYN2"].iloc[16:32], market("4h")["SYN2"].iloc[1]
+    b, h = market("5m")["SYN2"].iloc[48:96], market("4h")["SYN2"].iloc[1]
     assert (h.open, h.high, h.low, h.close) == (b.open.iloc[0], b.high.max(), b.low.min(), b.close.iloc[-1])
     for c in ("volume", "quote_volume", "trades", "taker_buy_volume", "taker_buy_quote_volume", "funding_charge"):
         assert h[c] == pytest.approx(b[c].sum(), rel=1e-12), c
@@ -35,8 +48,8 @@ def test_resampling_aggregates_each_column_by_its_meaning():
 
 
 def test_every_timeframe_has_every_column_with_no_gaps():
-    cols = list(market("15m")["SYN1"].columns)
-    for tf in ("1h", "4h", "1d"):
+    cols = list(market("5m")["SYN1"].columns)
+    for tf in ("15m", "1h", "4h", "1d"):
         for s, df in market(tf).items():
             assert list(df.columns) == cols and len(df) == DAYS * 86_400_000 // TF_MS[tf]
             assert df.drop(columns="regime").notna().all().all()
@@ -45,12 +58,24 @@ def test_every_timeframe_has_every_column_with_no_gaps():
 
 def test_funding_is_charged_once_whatever_the_timeframe():
     for s in SYMBOLS:
-        total = market("15m")[s].funding_charge.sum()
+        total = market("5m")[s].funding_charge.sum()
         assert market("1h")[s].funding_charge.sum() == pytest.approx(total)
         assert market("4h")[s].funding_charge.sum() == pytest.approx(total)
 
 
-@pytest.mark.parametrize("tf", ["5m", "7m", "2w"])
-def test_a_timeframe_finer_than_15m_or_unknown_has_no_market(tf):
+@pytest.mark.parametrize("tf", ["1m", "7m", "2w"])
+def test_no_market_below_5m(tf):      # finer than 5m, or unknown
     with pytest.raises(ValueError, match="no synthetic market"):
         market(tf)
+
+
+def test_synthetic_bars_vol_scale_defaults_to_one_and_scales_the_noise():
+    a = synthetic_bars(n=4000, seed=3)
+    pd.testing.assert_frame_equal(a, synthetic_bars(n=4000, seed=3, vol_scale=1.0))
+    half = synthetic_bars(n=4000, seed=3, vol_scale=0.5)               # the same draws, halved
+    sd = lambda b: np.log(b.close).diff().std()
+    assert sd(half) == pytest.approx(0.5 * sd(a), rel=1e-6)
+
+
+def test_the_5m_market_is_scaled_to_the_old_15m_volatility():
+    assert VOL_SCALE == pytest.approx(3 ** -0.5)

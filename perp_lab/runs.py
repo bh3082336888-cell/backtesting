@@ -77,7 +77,7 @@ def _clean(o):
     return o
 
 
-def verdict(oos: dict, rnd: dict, sens: dict, n_coins: int) -> tuple[str, list[str]]:
+def verdict(oos: dict, rnd: dict, sens: dict, n_coins: int, outside_session: int = 0) -> tuple[str, list[str]]:
     """noise | candidate. Every failed check is listed — no single headline number decides."""
     fails = []
     if oos.get("sharpe", 0) <= 0:
@@ -89,6 +89,8 @@ def verdict(oos: dict, rnd: dict, sens: dict, n_coins: int) -> tuple[str, list[s
     t, m = oos.get("trades", 0), per_coin_min(MIN_OOS_TRADES_PER_COIN, n_coins)
     if t < m:
         fails.append(f"only {t} OOS trades (< {m}: {MIN_OOS_TRADES_PER_COIN:g} per coin × {n_coins} coins)")
+    if outside_session > 0:
+        fails.append(f"{outside_session} OOS entries outside its declared session")
     return ("noise" if fails else "candidate"), fails
 
 

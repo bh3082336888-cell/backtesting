@@ -78,7 +78,7 @@ BUSY_SHARE = 0.9                        # CPU used / CPU limit at the wall-clock
 # to decide; a worker claiming one is a protocol violation, so it can't earn itself a retry.
 WORKER_KINDS = ("exception", "features")
 _DECISION_KEYS = ("i", "action", "stop", "target", "has_stop", "has_target")
-_META = ("params", "grid", "timeframes")
+_META = ("params", "grid", "timeframes", "session")
 _CLK_TCK = os.sysconf("SC_CLK_TCK")
 
 log = logging.getLogger(__name__)
@@ -555,7 +555,7 @@ def _canon(value) -> str | None:
 
 
 def check_meta(src: PluginSource, reply: dict) -> None:
-    """The plugin's params, grid and timeframes at runtime must equal what its source says."""
+    """The plugin's params, grid, timeframes and session at runtime must equal what its source says."""
     for key in _META:
         want = _canon(getattr(src.meta, key))
         if want is None or _canon(reply.get(key)) != want:

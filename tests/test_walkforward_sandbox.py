@@ -243,14 +243,15 @@ def test_the_verdict_counts_the_coins_listed_in_the_oos_span(tmp_path, plugins, 
         listed.append((sorted(daily), a, b, n))
         return n
 
-    def verdict_spy(oos, rnd, sens, n_coins):
+    def verdict_spy(oos, rnd, sens, n_coins, *rest):
         judged.append(n_coins)
-        return real(oos, rnd, sens, n_coins)
+        return real(oos, rnd, sens, n_coins, *rest)
     monkeypatch.setattr(pipeline, "listed_coins", listed_spy)
     monkeypatch.setattr(pipeline, "verdict", verdict_spy)
     rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1)
     [(coins, a, b, n)] = listed
     assert judged == [n] == [2] and coins == sorted(cfg.symbols)
+    assert rec["outside_session"] == 0              # donchian_atr declares no session
     assert (str(a.date()), str(b.date())) == (rec["oos_start"], rec["date_end"])
 
 
@@ -278,3 +279,90 @@ def test_a_run_records_before_costs_and_its_trade_minimum(tmp_path, plugins):
     assert s["before_costs"]["sharpe"] != s["metrics"]["sharpe"]      # the run had trades; costs moved it
     assert s["min_oos_trades"] > 0
     assert "Before costs (zero fees and slippage, funding kept)" in report
+
+
+# ---- session-calibrated flat bars
+
+LCE_SESSION = {"tz": "America/New_York", "days": [0, 1, 2, 3, 4], "start": "09:40", "end": "15:45"}
+
+
+def _flat_run(n=600, start="2025-01-06 00:00", in_pos_every=7):
+    from types import SimpleNamespace
+    import numpy as np
+    t = pd.date_range(start, periods=n, freq="5min", tz="UTC").as_unit("ms").asi8.astype("int64")
+    pos = np.zeros(n, dtype=bool)
+    pos[::in_pos_every] = True
+    return SimpleNamespace(equity=np.ones(n), time=t, in_pos=pos, trades=[], rejected={})
+
+
+def test_flat_bars_count_session_only():
+    import numpy as np
+    from perp_lab.config import TF_MS
+    from perp_lab.session_window import in_session
+    res = _flat_run(n=2 * 288)                       # Mon-Tue 2025-01-06/07, UTC-5: window 14:40-20:45 UTC
+    got = wfm._compact(res, "X", {}, None, tf="5m", session=LCE_SESSION)["flat_bars"]
+    want_mask = ~res.in_pos & in_session(res.time + TF_MS["5m"], LCE_SESSION)
+    assert 0 < got.sum() < (~res.in_pos).sum() and got.sum() == want_mask.sum()
+    assert got.sum() == sum(1 for c, f in zip(res.time + 300_000, ~res.in_pos) if f and 14 * 60 + 40 <= (c // 60000) % 1440 <= 20 * 60 + 45)
+    assert wfm._compact(res, "X", {}, None, tf="5m", session={})["flat_bars"].sum() == (~res.in_pos).sum()
+
+
+def test_plugin_without_session_unchanged():
+    res = _flat_run()
+    old = pd.Series((~res.in_pos).astype(float),
+                    index=pd.to_datetime(res.time, unit="ms", utc=True)).resample("1D").sum()
+    for session in (None, {}):
+        pd.testing.assert_series_equal(wfm._compact(res, "X", {}, None, tf="5m", session=session)["flat_bars"], old)
+
+
+def _with_session(session: dict) -> PluginSource:
+    return PluginSource.from_text("donchian_atr", DONCHIAN.replace(
+        '    timeframes = ["1h", "4h"]\n', f'    timeframes = ["1h", "4h"]\n    session = {session!r}\n'))
+
+
+def test_run_chunk_passes_the_plugin_session(tmp_path, monkeypatch):
+    seen = []
+    real = wfm._compact
+    monkeypatch.setattr(wfm, "_compact", lambda *a, **k: seen.append((a, k)) or real(*a, **k))
+    cfg = market_config(tmp_path)
+    src = _with_session(LCE_SESSION)
+    assert src.meta.session == LCE_SESSION
+    wfm._init_worker(str(cfg.path))
+    wfm.run_chunk((src, "BTCUSDT", "4h", [({}, "BTCUSDT", "4h", None, None, None)], None, False))
+    assert seen[0][0][-1] == LCE_SESSION and seen[0][0][4] == "4h"
+
+
+@pytest.mark.parametrize("window, outside", [("09:40", True), ("00:00", False)])
+def test_the_verdict_counts_oos_entries_outside_the_session(tmp_path, plugins, window, outside):
+    # 4h closes land on 4-hour UTC marks: never inside a 09:40-09:41 New York window, always inside all day.
+    session = {"tz": "America/New_York", "days": [0, 1, 2, 3, 4, 5, 6], "start": window,
+               "end": "09:41" if outside else "23:59"}
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1, src=_with_session(session))
+    n = rec["metrics"]["trades"]
+    assert n > 0
+    if outside:
+        assert rec["outside_session"] == n
+        assert f"{n} OOS entries outside its declared session" in rec["fail_reasons"]
+    else:
+        assert rec["outside_session"] == 0
+        assert not any("outside its declared session" in f for f in rec["fail_reasons"])
+
+
+@pytest.mark.parametrize("close_hour", [4, 0])
+def test_the_outside_session_count_uses_the_bar_close_not_the_signal_time(tmp_path, plugins, monkeypatch, close_hour):
+    # A 4h bar signalled at open hour h closes at h+4. UTC window [close_hour:00, close_hour:01]
+    # holds exactly the trades signalled at (close_hour - 4) mod 24: dropping or mis-adding the shift moves the count.
+    real, got = pipeline.walkforward, []
+    monkeypatch.setattr(pipeline, "walkforward", lambda *a, **k: got.append(real(*a, **k)) or got[-1])
+    session = {"tz": "UTC", "days": [0, 1, 2, 3, 4, 5, 6], "start": f"{close_hour:02d}:00",
+               "end": f"{close_hour:02d}:01"}
+    cfg = market_config(tmp_path, validation={"random_seeds": 2, "mc_iterations": 50})
+    rec, _ = pipeline.validate_strategy(cfg, "donchian_atr", "4h", workers=1, src=_with_session(session))
+    hours = (got[0].oos_trades.signal_time // 3_600_000) % 24
+    inside = int((hours == (close_hour - 4) % 24).sum())
+    unshifted = int((hours == close_hour).sum())
+    assert inside != unshifted and len(hours) > inside
+    assert rec["outside_session"] == len(hours) - inside
+    reasons = [f for f in rec["fail_reasons"] if "outside its declared session" in f]
+    assert reasons == ([f"{len(hours) - inside} OOS entries outside its declared session"] if len(hours) > inside else [])

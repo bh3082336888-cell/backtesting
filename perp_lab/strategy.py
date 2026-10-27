@@ -18,7 +18,7 @@ Contract:
 Plugin code is never loaded here. It runs only in the sandbox session
 (perp_lab/sandbox/session.py), inside the confined worker. The contract that
 holds there:
-    - PARENT, params, grid and timeframes are literals the parent reads from the
+    - PARENT, params, grid, timeframes and session are literals the parent reads from the
       source without executing it.
     - Features are numeric or bool columns.
     - A plugin gets only the bars it is sent; it can't see later ones.
@@ -91,6 +91,7 @@ class Strategy:
     params: dict = {}
     grid: dict = {}               # walk-forward selection grid: {param: [values]}
     timeframes: list[str] = ["1h"]
+    session: dict = {}            # {} = none declared; else {"tz", "days", "start", "end"} (see session_window)
 
     def __init__(self, **kw):
         unknown = set(kw) - set(self.params)

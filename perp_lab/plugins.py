@@ -10,8 +10,9 @@ import hashlib
 from dataclasses import dataclass
 
 from perp_lab import strategy
+from perp_lab.session_window import check_session
 
-_CLASS_DEFAULTS = {"params": {}, "grid": {}, "timeframes": ["1h"]}
+_CLASS_DEFAULTS = {"params": {}, "grid": {}, "timeframes": ["1h"], "session": {}}
 
 
 def blob_hash(data: bytes) -> str:
@@ -43,6 +44,7 @@ class PluginMeta:
     params: dict
     grid: dict
     timeframes: list[str]
+    session: dict
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +135,11 @@ def parse_meta(text: bytes, name: str) -> PluginMeta:
                 key == "timeframes" and not all(isinstance(t, str) for t in meta[key])):
             refuse(f"{key} must be a literal {'list of strings' if key == 'timeframes' else 'dict'}")
 
+    try:
+        check_session(meta["session"])
+    except ValueError as e:
+        refuse(str(e))
+
     doc = ast.get_docstring(tree, clean=False) or ""
     hypothesis = doc.strip().splitlines()[0].strip() if doc.strip() else ""
-    return PluginMeta(parent, hypothesis, meta["params"], meta["grid"], meta["timeframes"])
+    return PluginMeta(parent, hypothesis, meta["params"], meta["grid"], meta["timeframes"], meta["session"])

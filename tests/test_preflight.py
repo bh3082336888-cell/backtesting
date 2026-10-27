@@ -392,11 +392,11 @@ def test_a_source_refusal_still_runs_the_lookahead_check_and_the_overlap(cfg, pl
 
 def test_a_timeframe_without_a_market_skips_the_overlap_and_says_so(cfg, plugins, tmp_path, monkeypatch):
     monkeypatch.setattr(pf, "lookahead_failures", lambda c, s: [])
-    fivem = SOUND.replace('timeframes = ["1h", "4h"]', 'timeframes = ["5m"]')
-    report = pf.preflight(cfg, stage(tmp_path, "fivem", fivem), "5m")
+    onem = SOUND.replace('timeframes = ["1h", "4h"]', 'timeframes = ["1m"]')
+    report = pf.preflight(cfg, stage(tmp_path, "onem", onem), "1m")
     assert report["ok"] is False and report["meta"] == report["lookahead"] == report["overlap"] == []
-    assert report["skipped"] == {"overlap": "no synthetic market at 5m: its bars are 15m, resampled to multiples "
-                                            "of 15m"}
+    assert report["skipped"] == {"overlap": "no synthetic market at 1m: its bars are 5m, resampled to multiples "
+                                            "of 5m"}
 
 
 def test_precheck_is_the_judges_source_only_refusals(plugins):

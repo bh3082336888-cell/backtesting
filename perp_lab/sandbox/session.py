@@ -26,7 +26,7 @@ from perp_lab.sandbox.errors import PluginError, ProtocolError, ascii_text
 from perp_lab.sandbox.protocol import decisions_sections, position_view, signal_json
 from perp_lab.strategy import RandomEntry, Strategy
 
-_META = ("params", "grid", "timeframes")
+_META = ("params", "grid", "timeframes", "session")
 
 
 def load_plugin(name: str, text: bytes) -> type[Strategy]:
@@ -47,7 +47,7 @@ def load_plugin(name: str, text: bytes) -> type[Strategy]:
 
 def _json(value):
     """The value as JSON gives it back, which is what the parent sees. None if it isn't JSON: the
-    source's params, grid and timeframes are never null, so the parent's metadata check fails."""
+    source's params, grid, timeframes and session are never null, so the parent's metadata check fails."""
     try:
         return json.loads(json.dumps(value, allow_nan=True))
     except (TypeError, ValueError, RecursionError):

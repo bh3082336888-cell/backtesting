@@ -1,9 +1,11 @@
 """One fixed synthetic market that plugins at every timeframe trade, for `lab preflight`'s overlap.
 
-Each symbol is a single 15m path from `synthetic_bars` (fixed seeds and start date, never the
+Each symbol is a single 5m path from `synthetic_bars` (fixed seeds and start date, never the
 day-pinned holdout span, so the market is the same every day), resampled to each coarser timeframe.
 A 1h plugin and its 4h twin then see the same prices, and their positions on the hourly grid can be
-compared. Positions measured here are cached by MARKET_VERSION: bump it whenever the bars change.
+compared. The path's per-bar volatility is scaled by sqrt(5m/15m) so 15m and coarser bars keep the
+volatility they had at a 15m base. Positions measured here are cached by MARKET_VERSION: bump it whenever
+the bars change.
 """
 
 from __future__ import annotations
@@ -15,20 +17,23 @@ import pandas as pd
 from perp_lab.config import TF_MS
 from perp_lab.validate.causality import synthetic_bars, with_moving_columns
 
-MARKET_VERSION = 1
+MARKET_VERSION = 2
 SYMBOLS = ("SYN1", "SYN2", "SYN3", "SYN4")
 DAYS = 180
-BASE_MS = TF_MS["15m"]
+BASE_MS = TF_MS["5m"]
+# synthetic_bars' noise is per bar whatever the timeframe; scaling it by sqrt(5m / 15m) keeps the 15m and
+# coarser bars about as volatile as they were when the path was 15m.
+VOL_SCALE = (BASE_MS / TF_MS["15m"]) ** 0.5
 _SUMMED = ("volume", "quote_volume", "trades", "taker_buy_volume", "taker_buy_quote_volume", "funding_charge")
 
 
 class NoMarket(ValueError):
-    """A timeframe the 15m path can't be resampled to."""
+    """A timeframe the 5m path can't be resampled to."""
 
 
 def _path(i: int) -> pd.DataFrame:
-    bars = synthetic_bars(n=DAYS * 86_400_000 // BASE_MS, seed=100 + i, start="2023-01-01", funding_every=32,
-                          tf_ms=BASE_MS)                              # funding every 8 hours
+    bars = synthetic_bars(n=DAYS * 86_400_000 // BASE_MS, seed=100 + i, start="2023-01-01", funding_every=96,
+                          tf_ms=BASE_MS, vol_scale=VOL_SCALE)          # funding every 8 hours
     return with_moving_columns(bars, seed=200 + i)
 
 
@@ -48,7 +53,7 @@ def market(tf: str) -> dict[str, pd.DataFrame]:
     """{symbol: bars at tf}. Built once per timeframe and shared: callers must not change the frames."""
     ms = TF_MS.get(tf)
     if ms is None or ms < BASE_MS or ms % BASE_MS:
-        raise NoMarket(f"no synthetic market at {tf}: its bars are 15m, resampled to multiples of 15m")
+        raise NoMarket(f"no synthetic market at {tf}: its bars are 5m, resampled to multiples of 5m")
     out = {}
     for i, s in enumerate(SYMBOLS):
         bars = _path(i)

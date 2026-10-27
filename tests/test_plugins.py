@@ -67,3 +67,26 @@ def test_a_judge_of_a_plugin_with_computed_metadata_is_refused(cfg, plugins):
     add_plugin(plugins, "computed", text.replace(old, '    grid = {"n": list(range(3))}'))
     with pytest.raises(JudgeRefused, match="computed"):
         judge(cfg, "computed", "4h", validate=StubValidate({}))
+
+
+_LCE_SESSION = {"tz": "America/New_York", "days": [0, 1, 2, 3, 4], "start": "09:40", "end": "15:45"}
+
+
+def test_session_literal_parsed():
+    m = PluginSource.from_text("x", f'"""h"""\nclass A(Strategy):\n    session = {_LCE_SESSION!r}\n').meta
+    assert m.session == _LCE_SESSION
+
+
+def test_session_default_empty():
+    assert PluginSource.from_text("x", "class A(Strategy):\n    pass\n").meta.session == {}
+
+
+def test_session_must_be_literal():
+    with pytest.raises(PluginMetaError):
+        PluginSource.from_text("x", '"""h"""\nclass A(Strategy):\n    session = dict(tz="UTC")\n')
+
+
+@pytest.mark.parametrize("value", ['{"tz": "UTC"}', '{"tz": "UTC", "days": [7], "start": "09:00", "end": "10:00"}', '[]'])
+def test_session_bad_shape_refused(value):
+    with pytest.raises(PluginMetaError):
+        PluginSource.from_text("x", f'"""h"""\nclass A(Strategy):\n    session = {value}\n')
