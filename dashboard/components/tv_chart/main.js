@@ -197,7 +197,7 @@ function exitKey(exits) {
   el.key.title = "exit dots, coloured by exit reason";
 }
 
-/** The bar under the crosshair (else the last one): its UTC time and OHLC. */
+/** The bar under the crosshair (else the last one): its OHLC. Its time is on the time axis's crosshair label. */
 function readout(param) {
   let bar = param && param.seriesData ? param.seriesData.get(series) : null;
   if (!bar && payload && payload.candles.length) bar = payload.candles[payload.candles.length - 1];
@@ -206,14 +206,14 @@ function readout(param) {
     return;
   }
   const f = (v) => series.priceFormatter().format(v);
-  const when = new Date(bar.time * 1000).toISOString().slice(0, 16).replace("T", " ");
-  const parts = [document.createTextNode(`${when} UTC`)];
+  const parts = [];
   for (const [k, v] of [["O", bar.open], ["H", bar.high], ["L", bar.low], ["C", bar.close]]) {
     const b = document.createElement("b");
     b.textContent = f(v);
-    parts.push(document.createTextNode(`  ${k} `), b);
+    parts.push(document.createTextNode(`${parts.length ? "  " : ""}${k} `), b);
   }
   el.ohlc.replaceChildren(...parts);
+  el.ohlc.title = `${new Date(bar.time * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
 // ---------------------------------------------------------------- hover and click
