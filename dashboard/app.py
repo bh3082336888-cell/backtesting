@@ -11,6 +11,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dashboard import trade_chart as tc  # noqa: E402
+from dashboard import tv_chart as tv  # noqa: E402
 from perp_lab.config import load_config  # noqa: E402
 from perp_lab.store import db  # noqa: E402
 
@@ -211,6 +213,12 @@ def _jump(jk, wk, vk, trades, tf, span):
         st.session_state[vk] += 1      # a new date picker, showing the trade's dates
 
 
+def _focus(jk, trade_id):
+    """A click inside a trade's box on the chart focuses it, as Jump to trade does. The dates stay: the trade is in
+    view, and the chart scrolls to it only if it isn't on screen."""
+    st.session_state[jk] = trade_id
+
+
 def trades_chart_section(r, rid, folds=None):
     """One symbol's candles over a date range with this run's trades on them. Walk-forward and paper only."""
     mode = r.validation_mode
@@ -256,28 +264,33 @@ def trades_chart_section(r, rid, folds=None):
     if candles.empty:
         st.caption("No candles in this range.")
         return
-    fig = tc.trade_figure(candles, mine, r.timeframe, palette=C, folds=folds if mode == "walkforward" else None,
-                          focus=st.session_state.get(jk))       # the jumped-to trade: a row label of `mine`
     last = end - pd.Timedelta(1, "ns")
-    show(style(fig, h=560, title=f"{sym} {r.timeframe} · {start:%Y-%m-%d} → {last:%Y-%m-%d} UTC"))
-    shown = tc.display_tf(r.timeframe, len(candles))
+    payload = tv.chart_payload(candles, mine, r.timeframe, palette=C, folds=folds if mode == "walkforward" else None,
+                               focus=st.session_state.get(jk),   # jumped to or clicked: a row label of `mine`
+                               title=f"{sym} {r.timeframe} · {start:%Y-%m-%d} → {last:%Y-%m-%d} UTC")
+    tv.tv_chart(payload, key=f"tc_chart_{rid}_{sym}", height=560, on_click=partial(_focus, jk))
+    shown = payload["shown"]
     here = tc.trades_in(mine, start, end)
     src = ("the research store, the bars this walk-forward read" if mode == "walkforward"
            else "the bars this paper run saved")
-    coarse = (f" Drawn as {shown} candles to stay readable; narrow the dates to see {r.timeframe}."
-              if shown != r.timeframe else "")
+    coarse = (f" Drawn as {shown} candles, as the range holds over {tv.MAX_TV_BARS:,} {r.timeframe} bars; narrow "
+              f"the dates to see {r.timeframe}." if shown != r.timeframe else "")
     shade = (" Shaded: every other test fold (hover a fold label for its train window and params); "
              "every trade here is out-of-sample." if mode == "walkforward"
              else " Shaded: warmup bars from before the run started.")
     lines = ("stop (red) and target (green), as they moved" if tc.has_levels(here)
              else "initial stop (red) and initial target (green)")
     st.caption(f"{len(here)} trade{'' if len(here) == 1 else 's'} in range · candles from {src}.{coarse} "
+               "Navigate as on TradingView: drag to pan, wheel or pinch to zoom, drag an axis to stretch it, "
+               "double-click or fit to see the whole range; the price axis fits the candles in view. "
                "Each trade: a green box from the entry to the target and a red one to the stop, which closes "
                "once the stop reaches the entry (no fixed target: the move to the exit, green for a gain, red "
                "for a loss) · bold blue line and dot: the entry at the fill · dot on the exit candle, coloured "
-               f"by reason · ○ close of the signal bar · dotted: {lines}. Price and time tags (UTC) and the R:R "
-               f"label show for the trade picked in Jump to trade, or for every trade when {tc.TAG_ALL} or "
-               f"fewer are in range; hover a box for the whole trade.{shade}")
+               f"by reason (key above the chart) · ○ close of the signal bar (a toggle above the chart hides it) · "
+               f"dotted: {lines}. Price tags on the "
+               f"axis, time tags (UTC) and the R:R label show for the focused trade, or for every trade when "
+               f"{tc.TAG_ALL} or fewer are in range: pick one in Jump to trade, or click a box to focus it. Hover "
+               f"a box for the whole trade.{shade}")
     if len(here):
         with st.expander(f"Trades in range ({len(here)})"):
             cols = [x for x in ["side", "signal_time", "entry_time", "entry_price", "exit_time", "exit_price",
