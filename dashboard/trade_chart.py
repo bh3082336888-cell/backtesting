@@ -120,10 +120,10 @@ def run_candles(cfg, mode: str, run_dir, symbol: str, tf: str, start, end) -> pd
 
 
 def trades_in(trades: pd.DataFrame, start, end) -> pd.DataFrame:
-    """Trades open at some point in [start, end)."""
+    """Trades open at some point in [start, end): one that closes at the window start is out."""
     if trades.empty:
         return trades
-    return trades[(trades.entry_time < _ms(end)) & (trades.exit_time >= _ms(start))]
+    return trades[(trades.entry_time < _ms(end)) & (trades.exit_time > _ms(start))]
 
 
 # ---------------------------------------------------------------- windows (dates for the picker, end inclusive)

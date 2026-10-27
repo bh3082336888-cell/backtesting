@@ -546,3 +546,11 @@ def test_detail_page_says_the_levels_moved_when_trades_have_them(wf_run):
     assert any("stop (red) and target (green), as they moved" in c.value for c in at.caption)
     (tr,) = _trade_chart(at)["trades"]
     assert [v for _, _, v in tr["stops"]] == [95.0, 97.0]
+
+
+def test_trades_in_is_half_open_a_trade_closing_at_the_window_start_is_out():
+    t = pd.DataFrame([trade(sig=10, bars=5), trade(sig=30, bars=5), trade(sig=50, bars=5)])
+    start, end = pd.Timestamp(int(t.exit_time[0]), unit="ms", tz="UTC"), pd.Timestamp(int(t.entry_time[2]), unit="ms", tz="UTC")
+    got = tc.trades_in(t, start, end)
+    assert list(got.index) == [1]                       # 0 closes at the start; 2 opens at the end
+    assert list(tc.trades_in(t, start - pd.Timedelta(1, "ms"), end).index) == [0, 1]
