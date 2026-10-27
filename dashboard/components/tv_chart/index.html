@@ -25,7 +25,9 @@
     #chart { position: relative; flex: 1; min-height: 0; }
     #tip { position: fixed; z-index: 10; max-width: 380px; padding: 6px 8px; pointer-events: none;
            background: var(--bg); color: var(--ink); border: 1px solid var(--muted); border-radius: 4px;
-           box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18); line-height: 1.4; white-space: nowrap; }
+           box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18); line-height: 1.4; white-space: normal;
+           overflow-wrap: anywhere; }
+    #tip div + div { margin-top: 1px; }
     #tip div:first-child { font-weight: 600; }
     #tip[hidden] { display: none; }
   </style>

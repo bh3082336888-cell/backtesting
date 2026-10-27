@@ -232,6 +232,8 @@ function tip(textLines, x, y) {
     return d;
   }));
   el.tip.hidden = false;
+  el.tip.style.left = "0px";                // measure at full width (up to its max-width), then place it
+  el.tip.style.top = "0px";
   const box = el.chart.getBoundingClientRect();
   const w = el.tip.offsetWidth;
   const h = el.tip.offsetHeight;
