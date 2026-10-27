@@ -113,6 +113,12 @@ def test_dashboard_listens_on_localhost_by_default(monkeypatch):
     assert args[i + 1] == "localhost"
 
 
+def test_dashboard_turns_streamlit_usage_telemetry_off(monkeypatch):
+    for args in (_launch_args(monkeypatch), _launch_args(monkeypatch, "--config", "x.yaml")):
+        i = args.index("--browser.gatherUsageStats")
+        assert args[i + 1] == "false" and i < (args.index("--") if "--" in args else len(args))
+
+
 def test_dashboard_address_can_be_opened_up_explicitly(monkeypatch):
     args = _launch_args(monkeypatch, "--address", "0.0.0.0")
     assert args[args.index("--server.address") + 1] == "0.0.0.0"

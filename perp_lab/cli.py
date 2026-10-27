@@ -392,7 +392,8 @@ def dashboard(port: int = 8501,
     import subprocess
     import sys
     args = [sys.executable, "-m", "streamlit", "run", "dashboard/app.py", "--server.port", str(port),
-            "--server.address", address]
+            "--server.address", address,
+            "--browser.gatherUsageStats", "false"]
     if config:
         args += ["--", "--config", config]
     raise typer.Exit(subprocess.call(args))

@@ -11,6 +11,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dashboard import trade_chart as tc  # noqa: E402
+from dashboard import tv_chart as tv  # noqa: E402
 from perp_lab.config import load_config  # noqa: E402
 from perp_lab.store import db  # noqa: E402
 
@@ -45,6 +47,7 @@ C = {
     "s1": "#3987e5" if DARK else "#2a78d6",          # series 1 / positive pole
     "s2": "#d95926" if DARK else "#eb6834",          # series 2
     "neg": "#e66767" if DARK else "#e34948",         # negative pole
+    "pos": "#0ca30c",                                # status good: trade charts' reward box and TP
     "mid": "#383835" if DARK else "#f0efec",         # diverging midpoint
     "muted": "#898781",                              # IS / reference ink
     "grid": "#2c2c2a" if DARK else "#e1e0d9",
@@ -55,15 +58,30 @@ C = {
     "candle": "#6b6a66" if DARK else "#a9a7a0",
     "liq": "#a35cff" if DARK else "#8e2dff",
     "eow": "#2bb39a" if DARK else "#1f9e89",
+    "bg": "#0e1117" if DARK else "#ffffff",         # the page behind the chart: dot rings, label plates
 }
 DIVERGING = [[0.0, C["neg"]], [0.5, C["mid"]], [1.0, C["s1"]]]
 
 
+TITLE_FONT = 16       # px
+TITLE_PAD = 8         # px above the title
+TITLE_PX = 34         # the title's band at the top of a chart: the legend starts below it
+
+
 def style(fig: go.Figure, h=320, **kw) -> go.Figure:
+    """The dashboard's chart look. With a title, the title sits in a fixed band at the top left and the legend
+    hangs below it, placed in the figure's own coordinates: plotly then reserves the top margin down to the
+    legend's last row, so the plot moves down however many rows the legend wraps to and nothing overlaps
+    the title. Without a title, the legend stands on the plot (and pushes the margin itself)."""
     title = kw.pop("title", None)
+    legend = dict(orientation="h", x=0, xanchor="left")
+    legend.update(dict(yref="container", y=1 - TITLE_PX / h, yanchor="top") if title
+                  else dict(y=1.0, yanchor="bottom"))
     fig.update_layout(height=h, margin=dict(l=8, r=8, t=64, b=8), hovermode=kw.pop("hovermode", "closest"),
-                      title=dict(text=title, y=0.98, yanchor="top") if title else None,
-                      legend=dict(orientation="h", y=1.0, yanchor="bottom", x=0), **kw)
+                      title=dict(text=title, x=0, xref="paper", xanchor="left", y=1, yref="container",
+                                 yanchor="top", pad=dict(t=TITLE_PAD), font=dict(size=TITLE_FONT))
+                      if title else None,
+                      legend=legend, **kw)
     fig.update_xaxes(showgrid=False, linecolor=C["grid"])
     fig.update_yaxes(gridcolor=C["grid"], gridwidth=1, zerolinecolor=C["muted"], zerolinewidth=1)
     return fig
@@ -117,6 +135,25 @@ def chart_span(mode: str, run_dir: str, symbol: str, tf: str, date_start, date_e
 @st.cache_data(ttl=60)
 def chart_candles(mode: str, run_dir: str, symbol: str, tf: str, start, end) -> pd.DataFrame:
     return tc.run_candles(CFG, mode, run_dir, symbol, tf, start, end)
+
+
+def symbol_trades(trades: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """One symbol's trades in entry order, labelled 0, 1, … (the values of Jump to trade and the chart's ids)."""
+    return (trades[trades.symbol == symbol].sort_values("entry_time").reset_index(drop=True)
+            if len(trades) else trades)
+
+
+@st.cache_data(ttl=60, max_entries=16)
+def chart_payload(mode: str, run_dir: str, symbol: str, tf: str, start, end, focus, palette: dict,
+                  _folds: pd.DataFrame | None) -> dict:
+    """The trade chart's payload, built once per (run, symbol, window, focus, palette): a rerun for any other widget
+    reuses it rather than rebuilding up to 50,000 candles. `_folds` is left out of the key: they are the run's, and
+    `run_dir` is in it."""
+    candles = chart_candles(mode, run_dir, symbol, tf, start, end)
+    mine = symbol_trades(chart_trades(mode, run_dir), symbol)
+    last = end - pd.Timedelta(1, "ns")
+    return tv.chart_payload(candles, mine, tf, palette=palette, folds=_folds, focus=focus,
+                            title=f"{symbol} {tf} · {start:%Y-%m-%d} → {last:%Y-%m-%d} UTC")
 
 
 def status_of(r) -> str:
@@ -195,6 +232,12 @@ def _jump(jk, wk, vk, trades, tf, span):
         st.session_state[vk] += 1      # a new date picker, showing the trade's dates
 
 
+def _focus(jk, trade_id):
+    """A click inside a trade's box on the chart focuses it, as Jump to trade does. The dates stay: the trade is in
+    view, and the chart scrolls to it only if it isn't on screen."""
+    st.session_state[jk] = trade_id
+
+
 def trades_chart_section(r, rid, folds=None):
     """One symbol's candles over a date range with this run's trades on them. Walk-forward and paper only."""
     mode = r.validation_mode
@@ -226,8 +269,7 @@ def trades_chart_section(r, rid, folds=None):
     dk, jk = f"tc_dates_{rid}_{st.session_state[vk]}", f"tc_jump_{rid}_{sym}"
     c[1].date_input("Dates (UTC)", value=st.session_state[wk], min_value=lo, max_value=hi, key=dk,
                     on_change=_picked, args=(dk, wk, jk))
-    mine = (trades[trades.symbol == sym].sort_values("entry_time").reset_index(drop=True)
-            if len(trades) else trades)
+    mine = symbol_trades(trades, sym)
     c[2].selectbox("Jump to trade", [None, *range(len(mine))], key=jk,
                    format_func=lambda i: "—" if i is None else _trade_label(mine.iloc[i]),
                    on_change=_jump, args=(jk, wk, vk, mine, r.timeframe, span))
@@ -240,23 +282,33 @@ def trades_chart_section(r, rid, folds=None):
     if candles.empty:
         st.caption("No candles in this range.")
         return
-    fig = tc.trade_figure(candles, mine, r.timeframe, palette=C, folds=folds if mode == "walkforward" else None)
-    last = end - pd.Timedelta(1, "ns")
-    show(style(fig, h=560, title=f"{sym} {r.timeframe} · {start:%Y-%m-%d} → {last:%Y-%m-%d} UTC"))
-    shown = tc.display_tf(r.timeframe, len(candles))
+    payload = chart_payload(mode, r.run_dir, sym, r.timeframe, start, end,
+                            st.session_state.get(jk),            # jumped to or clicked: a row label of `mine`
+                            C, folds if mode == "walkforward" else None)
+    tv.tv_chart(payload, key=f"tc_chart_{rid}_{sym}", height=560, on_click=partial(_focus, jk))
+    shown = payload["shown"]
     here = tc.trades_in(mine, start, end)
     src = ("the research store, the bars this walk-forward read" if mode == "walkforward"
            else "the bars this paper run saved")
-    coarse = (f" Drawn as {shown} candles to stay readable; narrow the dates to see {r.timeframe}."
-              if shown != r.timeframe else "")
+    coarse = (f" Drawn as {shown} candles, as the range holds over {tv.MAX_TV_BARS:,} {r.timeframe} bars; narrow "
+              f"the dates to see {r.timeframe}." if shown != r.timeframe else "")
     shade = (" Shaded: every other test fold (hover a fold label for its train window and params); "
              "every trade here is out-of-sample." if mode == "walkforward"
              else " Shaded: warmup bars from before the run started.")
-    lines = ("stop (red) and target (blue), as they moved" if tc.has_levels(here)
-             else "initial stop (red) and initial target (blue)")
+    lines = ("stop (red) and target (green), as they moved" if tc.has_levels(here)
+             else "initial stop (red) and initial target (green)")
     st.caption(f"{len(here)} trade{'' if len(here) == 1 else 's'} in range · candles from {src}.{coarse} "
-               "▲ long / ▼ short entry at the fill · ○ close of the signal bar · ✕ exit, coloured by reason · "
-               f"dotted: {lines}.{shade}")
+               "Navigate as on TradingView: drag to pan, wheel or pinch to zoom, drag an axis to stretch it, "
+               "double-click or fit to see the whole range; the price axis fits the candles in view. "
+               "Each trade: a green box from the entry to the target and a red one to the stop, which closes "
+               "once the stop reaches the entry (no fixed target: the move to the exit, green for a gain, red "
+               "for a loss) · bold blue line and dot: the entry at the fill · dot on the exit candle, coloured "
+               f"by reason (key above the chart) · ○ close of the signal bar (a toggle above the chart hides it) · "
+               f"dotted: {lines}. The focused trade gets its "
+               "Entry, TP and SL price lines on the axis; time tags (UTC) and the R:R label show for it, or for "
+               f"every trade when {tc.TAG_ALL} or fewer are in range. Pick one in Jump to trade, or click a box to "
+               "focus it; \"focused trade\" above the chart scrolls back to it. Hover a box for the whole "
+               f"trade.{shade}")
     if len(here):
         with st.expander(f"Trades in range ({len(here)})"):
             cols = [x for x in ["side", "signal_time", "entry_time", "entry_price", "exit_time", "exit_price",

@@ -54,11 +54,12 @@ tests/                   lookahead (auto on every plugin), fees/funding, liquida
   which would make the gate meaningless), counted per pair, min across pairs.
 - Backtest-vs-paper divergence replays the engine on exactly the bars the paper runner saw.
 - Trade charts (run detail page, `dashboard/trade_chart.py`): one symbol's candles over a date range with
-  every trade on them: the entry at the fill (▲ long, ▼ short), the signal bar's close, the exit coloured by
-  `exit_reason`, the stop and target as dotted step lines, and a hover with P&L, R, regime at signal,
-  fees, funding, fold and params. Walk-forward runs shade every other test fold and label each (hover: its train
-  window and params); paper runs shade the warmup. "Jump to trade" zooms to one trade; a window over 6000 bars
-  is drawn at the next coarser timeframe. Walk-forward and paper runs only.
+  every trade drawn as TradingView-style position boxes (reward and risk, the entry line, Entry/TP/SL tags,
+  an R:R and a gross/net R label), on TradingView Lightweight Charts 5.2.1 (vendored, Apache-2.0). The exit dot
+  is coloured by `exit_reason`; a hover gives P&L, R, regime at signal, fees, funding, fold and params. Drag
+  to pan, wheel or pinch to zoom, "fit" to see the whole range. Click a box or use "Jump to trade" to focus
+  a trade. Candles go coarser only past 50,000 bars. Walk-forward runs shade every other test fold and label
+  each (hover: its train window and params); paper runs shade the warmup. Walk-forward and paper runs only.
 - Chart candles come from where the run got them, so nothing new is stored: a walk-forward reads the research
   parquet store through `load_candles` (no token, window cut at `holdout_start`), so any machine that can re-run
   it can chart it; a paper run reads its own `bars_<symbol>.parquet`. Holdout exams and IS runs aren't charted.

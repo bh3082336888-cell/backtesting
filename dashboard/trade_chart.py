@@ -6,7 +6,9 @@ Walk-forward and paper runs only. Candles come from where the run itself got the
   * paper: the `bars_<symbol>.parquet` the paper runner saved, exactly the bars it saw.
 Any other run (holdout exams, in-sample backtests) is refused with `NotChartable`.
 
-No Streamlit in here: the dashboard caches and lays out; this loads the data and builds the figure.
+No Streamlit and no drawing in here: this loads the data and works out each trade's geometry (boxes, level steps,
+tags, label text) from its record alone. `tv_chart` turns that into what the chart draws; the dashboard caches and
+lays out.
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 
 from perp_lab.config import TF_MS
 from perp_lab.data.store import load_candles
@@ -24,17 +25,19 @@ from perp_lab.data.store import load_candles
 CHARTABLE = ("walkforward", "paper")
 TRADE_FILES = {"walkforward": "oos_trades.parquet", "paper": "trades.parquet"}
 TRADE_COLS = ["symbol", "side", "signal_time", "entry_time", "entry_price", "exit_time", "exit_price",
-              "exit_reason", "stop_init", "target", "pnl", "pnl_pct", "r_multiple", "regime", "fees", "funding"]
-MAX_CANDLES = 6000            # more than this in the window → the next coarser timeframe is drawn
+              "exit_reason", "stop_init", "target", "qty", "pnl_gross", "slippage", "pnl", "pnl_pct", "r_multiple",
+              "regime", "fees", "funding"]
 DISPLAY_TFS = ("5m", "15m", "1h", "4h", "1d")
 EXIT_REASONS = ("stop", "target", "signal", "liq", "eow")
 CONTEXT_BARS = 40             # bars either side of a trade when jumping to it
 DAY = pd.Timedelta(days=1)
+TAG_ALL = 5                   # at most this many trades in view → every one gets its tags and label
 
-# Light-theme defaults; the dashboard passes its own palette (dark or light) over these.
+# Light-theme defaults; the dashboard passes its own palette (dark or light) over these. "pos" is the
+# reference palette's status green (mode-invariant); "bg" is the chart's background, for label plates.
 PALETTE = {
-    "s1": "#2a78d6", "s2": "#eb6834", "neg": "#e34948", "muted": "#898781",
-    "band": "rgba(11,11,11,0.035)", "train": "rgba(11,11,11,0.07)",
+    "s1": "#2a78d6", "s2": "#eb6834", "neg": "#e34948", "pos": "#0ca30c", "muted": "#898781",
+    "band": "rgba(11,11,11,0.035)", "train": "rgba(11,11,11,0.07)", "bg": "#ffffff", "grid": "#e1e0d9",
     "ink": "#1f1f1d", "candle": "#a9a7a0", "liq": "#8e2dff", "eow": "#1f9e89",
 }
 
@@ -63,11 +66,6 @@ def _utc(ms):
 
 def _tf(tf: str) -> pd.Timedelta:
     return pd.Timedelta(milliseconds=TF_MS[tf])
-
-
-def _x(t):
-    """UTC wall time without a zone, the one form Plotly keeps as is: every x on the chart goes through here."""
-    return t.tz_convert("UTC").tz_localize(None)
 
 
 # ---------------------------------------------------------------- data
@@ -122,10 +120,10 @@ def run_candles(cfg, mode: str, run_dir, symbol: str, tf: str, start, end) -> pd
 
 
 def trades_in(trades: pd.DataFrame, start, end) -> pd.DataFrame:
-    """Trades open at some point in [start, end)."""
+    """Trades open at some point in [start, end): one that closes at the window start is out."""
     if trades.empty:
         return trades
-    return trades[(trades.entry_time < _ms(end)) & (trades.exit_time >= _ms(start))]
+    return trades[(trades.entry_time < _ms(end)) & (trades.exit_time > _ms(start))]
 
 
 # ---------------------------------------------------------------- windows (dates for the picker, end inclusive)
@@ -163,10 +161,12 @@ def picked_window(picked, span) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 # ---------------------------------------------------------------- candles at a readable density
 
-def display_tf(tf: str, n_bars: int) -> str:
-    """The run's timeframe, or the first coarser one that fits the window in MAX_CANDLES."""
+def display_tf(tf: str, n_bars: int, cap: int) -> str:
+    """The run's timeframe while the window has at most `cap` bars, else the first coarser one that fits it."""
+    if n_bars <= cap:
+        return tf
     for t in DISPLAY_TFS:
-        if TF_MS[t] >= TF_MS[tf] and n_bars * TF_MS[tf] / TF_MS[t] <= MAX_CANDLES:
+        if TF_MS[t] >= TF_MS[tf] and n_bars * TF_MS[tf] / TF_MS[t] <= cap:
             return t
     return DISPLAY_TFS[-1]
 
@@ -177,10 +177,16 @@ def resample(candles: pd.DataFrame, tf: str) -> pd.DataFrame:
     return r.agg({"open": "first", "high": "max", "low": "min", "close": "last"}).dropna(subset=["open"])
 
 
-# ---------------------------------------------------------------- figure
+# ---------------------------------------------------------------- one trade, from its record
 
 def _px(x) -> str:
     return "—" if x is None or pd.isna(x) else f"{x:,.6g}"
+
+
+def _num(r, key) -> float:
+    """A record's number, NaN when the column is missing or null (older runs, frames mixing old and new)."""
+    v = r.get(key)
+    return np.nan if v is None or pd.isna(v) else float(v)
 
 
 def _levels(r):
@@ -196,6 +202,31 @@ def _levels(r):
 def has_levels(t: pd.DataFrame) -> bool:
     """Whether any trade in the frame recorded the stop and target as they moved."""
     return any(_levels(r) is not None for r in t.to_dict("records"))
+
+
+def rr_text(r: dict) -> str:
+    """The planned risk:reward as TradingView writes it: |target − entry| / |entry − stop_init|."""
+    entry, stop, target = _num(r, "entry_price"), _num(r, "stop_init"), _num(r, "target")
+    if pd.isna(target):
+        return "no fixed target"
+    risk = abs(entry - stop)
+    return f"R:R 1 : {abs(target - entry) / risk:.2f}" if risk > 0 else "R:R —"
+
+
+def _r(x: float) -> str:
+    return "—R" if pd.isna(x) else f"{x:+.2f}R"
+
+
+def result_text(r: dict) -> str:
+    """Gross and net R. Gross = (pnl_gross + slippage) / (qty·|entry − stop_init|), before fees, slippage and
+    funding (the engine's pnl_gross is after slippage); net = the engine's r_multiple. A run that kept no
+    slippage counts it as 0, and so does a paper run (filled at the ask/bid, slippage written as 0.0): their gross
+    is after slippage, and the text says so."""
+    slip = _num(r, "slippage")
+    kept = not pd.isna(slip) and r.get("source") != "paper"   # paper fills at the ask/bid; its slippage is 0.0
+    risk = _num(r, "qty") * abs(_num(r, "entry_price") - _num(r, "stop_init"))
+    gross = (_num(r, "pnl_gross") + (slip if kept else 0.0)) / risk if risk > 0 else np.nan
+    return f"{_r(gross)} gross{'' if kept else ' after slippage'} · {_r(_num(r, 'r_multiple'))} net"
 
 
 def hover_text(t: pd.DataFrame) -> list[str]:
@@ -214,6 +245,7 @@ def hover_text(t: pd.DataFrame) -> list[str]:
             f"@ {_px(r['entry_price'])}",
             f"exit {_utc(r['exit_time']):%Y-%m-%d %H:%M} @ {_px(r['exit_price'])}",
             f"initial stop {_px(r['stop_init'])} · initial target {_px(r['target'])}",
+            f"{rr_text(r)} · {result_text(r)}",
         ]
         lv = _levels(r)
         if lv:
@@ -224,145 +256,81 @@ def hover_text(t: pd.DataFrame) -> list[str]:
     return out
 
 
-def _steps(rows, which: int) -> tuple[list, list]:
-    """Stop (which=1) or target (2) as step lines in one trace, None between trades and across a NaN.
-    `rows` holds (entry_ms, exit_ms, levels-or-None, initial value). A level runs from its time to the
-    next one's, the last to the exit. Times never go backwards: a paper level can be stamped before the
-    entry fill, so each is clamped to the previous vertex."""
-    ms, ys = [], []        # x in epoch ms, converted to times in one call below; None marks a break
-
-    def cut():
-        if ms and ms[-1] is not None:
-            ms.append(None)
-            ys.append(None)
-
-    for entry, exit_, lv, init in rows:
-        if lv is None:
-            times, vals = [entry], [init]
-        else:
-            times, vals = lv[0], lv[which]
-        at = np.maximum.accumulate(np.array([entry, *times], dtype="int64"))[1:]
-        at = np.append(at, max(at[-1], exit_)).tolist()
-        for k, v in enumerate(vals):
-            if pd.isna(v):
-                cut()
-                continue
-            ms += [at[k], at[k + 1]]
-            ys += [v, v]
-        cut()
-    keep = np.array([m is not None for m in ms], dtype=bool)
-    xs = np.empty(len(ms), dtype=object)
-    xs[~keep] = None
-    xs[keep] = list(_x(_utc(np.array([m for m in ms if m is not None], dtype="int64"))))
-    return xs.tolist(), ys
+def level_steps(r: dict, which: int) -> list[tuple[int, int, float]]:
+    """The stop (which=1) or the target (2) as it stood over the trade: (t0, t1, price) steps in epoch ms, from the
+    level path, or the initial level over the whole trade for a run without paths. A level runs from its time to
+    the next one's, the last to the exit. A NaN level (none set) is left out, so the line breaks there. Times never
+    go backwards: a paper level can be stamped before the entry fill, so each is clamped to the previous vertex."""
+    e_t, x_t = int(r["entry_time"]), int(r["exit_time"])
+    lv = _levels(r)
+    times, vals = (lv[0], lv[which]) if lv else ([e_t], [_num(r, "stop_init" if which == 1 else "target")])
+    at = np.maximum.accumulate(np.array([e_t, *times], dtype="int64"))[1:]
+    at = np.append(at, max(at[-1], x_t)).tolist()
+    return [(at[k], at[k + 1], float(v)) for k, v in enumerate(vals) if not pd.isna(v)]
 
 
-def _draw_trades(fig: go.Figure, t: pd.DataFrame, candles: pd.DataFrame, p: dict) -> None:
-    sig_x, ent_x, ext_x = (_x(pd.DatetimeIndex(_utc(t[c].astype("int64"))))
-                           for c in ("signal_time", "entry_time", "exit_time"))
-    hov = np.array(hover_text(t), dtype=object)
-    skip = dict(hoverinfo="skip")
+# ---------------------------------------------------------------- position boxes (TradingView's long/short tool)
 
-    recs = t.to_dict("records")
-    lvs = [_levels(r) for r in recs]
-    moved = any(lv is not None for lv in lvs)
-    for which, col, name, color in ((1, "stop_init", "stop", p["neg"]), (2, "target", "target", p["s1"])):
-        rows = [(int(r["entry_time"]), int(r["exit_time"]), lv, r[col]) for r, lv in zip(recs, lvs)]
-        xs, ys = _steps(rows, which)
-        if xs:
-            fig.add_scatter(x=xs, y=ys, mode="lines", name=name if moved else f"initial {name}",
-                            line=dict(color=color, width=1, dash="dot"), **skip)
+def _extend(boxes: list, box: tuple) -> None:
+    """Append a box, or widen the last one when the level held (same price, touching in time)."""
+    if boxes and boxes[-1][1] == box[0] and boxes[-1][3] == box[3]:
+        boxes[-1] = (boxes[-1][0], box[1], box[2], box[3])
+    else:
+        boxes.append(box)
 
-    # The signal bar's close, taken from the run's own bars, so it stays exact when coarser candles are drawn.
-    close_at = pd.Series(candles.close.to_numpy(), index=candles.open_time.astype("int64").to_numpy())
-    sig_y = t.signal_time.astype("int64").map(close_at).to_numpy()
-    ok = ~pd.isna(sig_y)
-    if ok.any():
-        cx, cy = [], []
-        for a, ya, b, yb in zip(sig_x[ok], sig_y[ok], ent_x[ok], t.entry_price.to_numpy()[ok]):
-            cx += [a, b, None]
-            cy += [ya, yb, None]
-        fig.add_scatter(x=cx, y=cy, mode="lines", legendgroup="signal", showlegend=False,
-                        line=dict(color=p["ink"], width=1, dash="dot"), **skip)
-        fig.add_scatter(x=sig_x[ok], y=sig_y[ok], mode="markers", name="signal bar (close)", legendgroup="signal",
-                        marker=dict(symbol="circle-open", size=8, color=p["ink"], line=dict(width=1.5)),
-                        hovertext=hov[ok], hovertemplate="%{hovertext}<extra></extra>")
 
-    for side, name, sym in ((1, "long entry", "triangle-up"), (-1, "short entry", "triangle-down")):
-        m = (t.side > 0).to_numpy() if side > 0 else (t.side < 0).to_numpy()
-        if m.any():
-            fig.add_scatter(x=ent_x[m], y=t.entry_price.to_numpy()[m], mode="markers", name=name,
-                            marker=dict(symbol=sym, size=12, color=p["ink"], line=dict(width=1, color=p["ink"])),
-                            hovertext=hov[m], hovertemplate="%{hovertext}<extra></extra>")
+def trade_boxes(r: dict, min_ms: int = 0) -> dict:
+    """One trade's position-tool geometry, in epoch ms and prices, from its record alone.
 
-    colors = exit_colors(p)
-    reasons = list(EXIT_REASONS) + sorted(set(t.exit_reason) - set(EXIT_REASONS))
-    for reason in reasons:
-        m = (t.exit_reason == reason).to_numpy()
-        if m.any():
-            fig.add_scatter(x=ext_x[m], y=t.exit_price.to_numpy()[m], mode="markers", name=f"exit: {reason}",
-                            marker=dict(symbol="x", size=10, color=colors.get(reason, p["muted"]),
-                                        line=dict(width=1, color=colors.get(reason, p["muted"]))),
-                            hovertext=hov[m], hovertemplate="%{hovertext}<extra></extra>")
+    `reward` and `risk` are boxes (t0, t1, entry, level) along the target's and the stop's level paths
+    (the initial ones for a run without paths), one box while a level holds. The risk box is there only
+    while the stop is on the losing side of the entry: once the stop reaches or passes it (breakeven, or a
+    trail into profit) the box collapses, and `be_time` is when. `entry` is (time, price), `exit` (time,
+    price, reason). `no_target`: no target at any point, so no reward box. `span` is the time the trade
+    covers, widened to `min_ms` for a trade that entered and exited on one bar (else it draws nothing)."""
+    side = 1 if r["side"] > 0 else -1
+    e_t, x_t, e_px = int(r["entry_time"]), int(r["exit_time"]), float(r["entry_price"])
+    lv = _levels(r)
+    times, stops, targets = lv if lv else ([e_t], [_num(r, "stop_init")], [_num(r, "target")])
+    at = np.maximum.accumulate(np.array([e_t, *times], dtype="int64"))[1:].tolist()   # as `level_steps` does
+    end = max(at[-1], x_t, e_t + min_ms)
+    edges = [*at, end]
+    reward, risk, be = [], [], None
+    for k, (stop, target) in enumerate(zip(stops, targets)):
+        a, b = edges[k], edges[k + 1]
+        safe = not pd.isna(stop) and side * (stop - e_px) >= 0     # the stop at or past the entry
+        if safe and be is None:
+            be = a
+        if b <= a:
+            continue
+        if not pd.isna(target):
+            _extend(reward, (a, b, e_px, float(target)))
+        if not pd.isna(stop) and not safe:
+            _extend(risk, (a, b, e_px, float(stop)))
+    return {"reward": reward, "risk": risk, "entry": (e_t, e_px),
+            "exit": (x_t, float(r["exit_price"]), str(r["exit_reason"])), "be_time": be,
+            "no_target": all(pd.isna(g) for g in targets), "span": (e_t, end)}
+
+
+def trade_tags(r: dict, b: dict, palette: dict | None, lo: int, hi: int, fmt: str) -> dict:
+    """One trade's axis tags and breakeven note, from its record and its `trade_boxes` geometry `b`:
+      * `price`: (word, price, colour) for Entry (blue), TP (green, none without a target) and SL (red), at the
+        initial prices;
+      * `time`: (ms, "HH:MM entry" / "HH:MM exit", colour, side) for the entry and exit times inside the window
+        [lo, hi) (epoch ms), in UTC as `fmt` writes them; the exit takes its reason's colour;
+      * `be`: (ms, price, "SL → BE HH:MM") where the stop reached the entry, if inside the window, else None."""
+    p = {**PALETTE, **(palette or {})}
+    (e_t, e_px), (x_t, _, reason) = b["entry"], b["exit"]
+    price = [(word, float(y), color) for word, y, color in (
+        ("Entry", e_px, p["s1"]), ("TP", _num(r, "target"), p["pos"]), ("SL", _num(r, "stop_init"), p["neg"]))
+        if not pd.isna(y)]
+    time = [(ms, f"{_utc(ms):{fmt}} {word}", color, word) for ms, word, color in (
+        (e_t, "entry", p["s1"]), (x_t, "exit", exit_colors(p).get(reason, p["muted"]))) if lo <= ms < hi]
+    be = b["be_time"]
+    note = (be, e_px, f"SL → BE {_utc(be):{fmt}}") if be is not None and lo <= be < hi else None
+    return {"price": price, "time": time, "be": note}
 
 
 def exit_colors(palette: dict | None = None) -> dict:
     p = {**PALETTE, **(palette or {})}
-    return {"stop": p["neg"], "target": p["s1"], "signal": p["s2"], "liq": p["liq"], "eow": p["eow"]}
-
-
-def _band(fig, x0, x1, color):
-    fig.add_vrect(x0=_x(x0), x1=_x(x1), fillcolor=color, line_width=0, layer="below")
-
-
-def _label(fig, x, text, hover, p):
-    fig.add_annotation(x=_x(x), y=1, xref="x", yref="paper", xanchor="left", yanchor="top", text=text,
-                       showarrow=False, font=dict(size=10, color=p["muted"]), hovertext=hover)
-
-
-def _shade(fig: go.Figure, lo, hi, p: dict, folds: pd.DataFrame | None, warmup_end) -> None:
-    if folds is not None and len(folds):
-        f = folds.sort_values("fold").reset_index(drop=True)
-        first = _ts(f.test_start.iloc[0])
-        if lo < first:
-            _band(fig, lo, min(first, hi), p["train"])
-            _label(fig, lo, "train only", f"before the first test window ({first:%Y-%m-%d}): no OOS trades", p)
-        for i, r in f.iterrows():
-            a, b = _ts(r.test_start), _ts(r.test_end)
-            if b <= lo or a >= hi:
-                continue
-            if i % 2 == 0:
-                _band(fig, max(a, lo), min(b, hi), p["band"])
-            _label(fig, max(a, lo), f"fold {r.fold}",
-                   f"fold {r.fold} test {a:%Y-%m-%d} → {b:%Y-%m-%d}<br>trained on {str(r.train_start)[:10]} → "
-                   f"{str(r.train_end)[:10]}<br>params {r.get('combo') or '—'}", p)
-    if warmup_end is not None and lo < warmup_end:
-        _band(fig, lo, min(warmup_end, hi), p["train"])
-        _label(fig, lo, "warmup", "bars fetched from the exchange before the paper run started", p)
-
-
-def trade_figure(candles: pd.DataFrame, trades: pd.DataFrame, tf: str, *, palette: dict | None = None,
-                 folds: pd.DataFrame | None = None) -> go.Figure:
-    """Candles (coarser if the window is long) with each trade in [first bar, last bar + tf):
-    entry at the fill, the signal bar, exit coloured by reason, the stop and target (as they moved, or the initial ones for older runs).
-    Walk-forward: test folds shaded in turn and labelled. Paper: the warmup shaded."""
-    p = {**PALETTE, **(palette or {})}
-    shown = display_tf(tf, len(candles))
-    bars = candles if shown == tf else resample(candles, shown)
-    fig = go.Figure(go.Candlestick(
-        x=_x(bars.index), open=bars.open, high=bars.high, low=bars.low, close=bars.close, name=f"{shown} candles",
-        increasing=dict(line=dict(color=p["candle"], width=1), fillcolor="rgba(0,0,0,0)"),
-        decreasing=dict(line=dict(color=p["candle"], width=1), fillcolor=p["candle"]), showlegend=False))
-    if len(candles):
-        lo, hi = candles.index[0], candles.index[-1] + _tf(tf)
-        t = trades_in(trades, lo, hi)
-        if len(t):
-            _draw_trades(fig, t, candles, p)
-        warmup_end = None
-        if "live" in candles.columns and not candles.live.all():
-            live = candles.index[candles.live.astype(bool).to_numpy()]
-            warmup_end = live[0] if len(live) else hi
-        _shade(fig, lo, hi, p, folds, warmup_end)
-    fig.update_layout(xaxis_rangeslider_visible=False)
-    fig.update_yaxes(title_text="price")
-    return fig
+    return {"stop": p["neg"], "target": p["pos"], "signal": p["s2"], "liq": p["liq"], "eow": p["eow"]}
