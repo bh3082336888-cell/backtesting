@@ -240,7 +240,7 @@ def test_paper_warmup_is_shaded_and_paper_trades_are_boxed():
     e, x = base["entry_time"], base["exit_time"]
     assert tr["boxes"]["risk"] == [[e, e + H4, 145.5, 140.0], [e + H4, x, 145.5, 142.0]]
     assert tr["boxes"]["reward"] == [[e, x, 145.5, 160.0]]
-    assert tr["result"] == "+0.45R gross · +0.40R net"                    # 5 / (2 × 5.5)
+    assert tr["result"] == "+0.45R gross after slippage · +0.40R net"    # 5 / (2 × 5.5); paper fills at ask/bid
     assert payload(candles(n=30), [])["folds"] == []                      # walk-forward bars carry no warmup
 
 

@@ -220,9 +220,10 @@ def _r(x: float) -> str:
 def result_text(r: dict) -> str:
     """Gross and net R. Gross = (pnl_gross + slippage) / (qty·|entry − stop_init|), before fees, slippage and
     funding (the engine's pnl_gross is after slippage); net = the engine's r_multiple. A run that kept no
-    slippage counts it as 0, so its gross is after slippage, and the text says so."""
+    slippage counts it as 0, and so does a paper run (filled at the ask/bid, slippage written as 0.0): their gross
+    is after slippage, and the text says so."""
     slip = _num(r, "slippage")
-    kept = not pd.isna(slip)
+    kept = not pd.isna(slip) and r.get("source") != "paper"   # paper fills at the ask/bid; its slippage is 0.0
     risk = _num(r, "qty") * abs(_num(r, "entry_price") - _num(r, "stop_init"))
     gross = (_num(r, "pnl_gross") + (slip if kept else 0.0)) / risk if risk > 0 else np.nan
     return f"{_r(gross)} gross{'' if kept else ' after slippage'} · {_r(_num(r, 'r_multiple'))} net"

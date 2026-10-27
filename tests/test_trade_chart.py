@@ -269,7 +269,9 @@ def test_result_text_without_slippage_column_says_after_slippage():
     del r["slippage"]                                       # a run from before the engine kept it
     assert tc.result_text(r) == "+1.00R gross after slippage · +0.73R net"
     assert tc.result_text(_pos(slippage=np.nan)) == "+1.00R gross after slippage · +0.73R net"   # mixed frame
-    assert tc.result_text(_pos(slippage=0.0)) == "+1.00R gross · +0.73R net"                     # paper: kept, 0
+    assert tc.result_text(_pos(slippage=0.0)) == "+1.00R gross · +0.73R net"                     # walk-forward, 0 kept
+    # the paper runner fills at the ask/bid and writes slippage 0.0, so its gross is after slippage too
+    assert tc.result_text(_pos(slippage=0.0, source="paper")) == "+1.00R gross after slippage · +0.73R net"
 
 
 def test_no_target_trade_has_no_reward_box_and_says_so():
