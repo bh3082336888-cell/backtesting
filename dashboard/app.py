@@ -137,6 +137,25 @@ def chart_candles(mode: str, run_dir: str, symbol: str, tf: str, start, end) -> 
     return tc.run_candles(CFG, mode, run_dir, symbol, tf, start, end)
 
 
+def symbol_trades(trades: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """One symbol's trades in entry order, labelled 0, 1, … (the values of Jump to trade and the chart's ids)."""
+    return (trades[trades.symbol == symbol].sort_values("entry_time").reset_index(drop=True)
+            if len(trades) else trades)
+
+
+@st.cache_data(ttl=60, max_entries=16)
+def chart_payload(mode: str, run_dir: str, symbol: str, tf: str, start, end, focus, palette: dict,
+                  _folds: pd.DataFrame | None) -> dict:
+    """The trade chart's payload, built once per (run, symbol, window, focus, palette): a rerun for any other widget
+    reuses it rather than rebuilding up to 50,000 candles. `_folds` is left out of the key: they are the run's, and
+    `run_dir` is in it."""
+    candles = chart_candles(mode, run_dir, symbol, tf, start, end)
+    mine = symbol_trades(chart_trades(mode, run_dir), symbol)
+    last = end - pd.Timedelta(1, "ns")
+    return tv.chart_payload(candles, mine, tf, palette=palette, folds=_folds, focus=focus,
+                            title=f"{symbol} {tf} · {start:%Y-%m-%d} → {last:%Y-%m-%d} UTC")
+
+
 def status_of(r) -> str:
     return db.current_status(CFG, r["strategy"], r["timeframe"], r["verdict"])
 
@@ -250,8 +269,7 @@ def trades_chart_section(r, rid, folds=None):
     dk, jk = f"tc_dates_{rid}_{st.session_state[vk]}", f"tc_jump_{rid}_{sym}"
     c[1].date_input("Dates (UTC)", value=st.session_state[wk], min_value=lo, max_value=hi, key=dk,
                     on_change=_picked, args=(dk, wk, jk))
-    mine = (trades[trades.symbol == sym].sort_values("entry_time").reset_index(drop=True)
-            if len(trades) else trades)
+    mine = symbol_trades(trades, sym)
     c[2].selectbox("Jump to trade", [None, *range(len(mine))], key=jk,
                    format_func=lambda i: "—" if i is None else _trade_label(mine.iloc[i]),
                    on_change=_jump, args=(jk, wk, vk, mine, r.timeframe, span))
@@ -264,10 +282,9 @@ def trades_chart_section(r, rid, folds=None):
     if candles.empty:
         st.caption("No candles in this range.")
         return
-    last = end - pd.Timedelta(1, "ns")
-    payload = tv.chart_payload(candles, mine, r.timeframe, palette=C, folds=folds if mode == "walkforward" else None,
-                               focus=st.session_state.get(jk),   # jumped to or clicked: a row label of `mine`
-                               title=f"{sym} {r.timeframe} · {start:%Y-%m-%d} → {last:%Y-%m-%d} UTC")
+    payload = chart_payload(mode, r.run_dir, sym, r.timeframe, start, end,
+                            st.session_state.get(jk),            # jumped to or clicked: a row label of `mine`
+                            C, folds if mode == "walkforward" else None)
     tv.tv_chart(payload, key=f"tc_chart_{rid}_{sym}", height=560, on_click=partial(_focus, jk))
     shown = payload["shown"]
     here = tc.trades_in(mine, start, end)

@@ -460,6 +460,22 @@ def test_a_click_on_a_box_focuses_the_trade_as_jump_to_trade_does(wf_run):
     assert not at.exception and at.selectbox(key=jump).value == 5
 
 
+def test_the_chart_payload_is_built_once_per_window_and_focus(wf_run, monkeypatch):
+    from dashboard import tv_chart as tv
+    built = []
+    real = tv.chart_payload
+    monkeypatch.setattr(tv, "chart_payload", lambda *a, **k: built.append(k.get("focus")) or real(*a, **k))
+    write_candles(wf_run.data_dir, "BTCUSDT", "4h", candles("2024-01-01", n=6 * 130))
+    at = _detail()
+    assert built == [None] and _trade_chart(at)["trades"]
+    at.run()                                                        # a rerun for anything else: not rebuilt
+    assert built == [None] and _trade_chart(at)["trades"]
+    at.selectbox(key="tc_jump_wf1_BTCUSDT").set_value(0).run()      # a new window and focus: built again
+    at.run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert built == [None, 0] and _trade_chart(at)["focus"] == 0
+
+
 def test_every_dashboard_chart_hangs_its_legend_below_the_title(wf_run):
     write_candles(wf_run.data_dir, "BTCUSDT", "4h", candles("2024-01-01", n=6 * 130))
     at = _detail()
