@@ -12,6 +12,11 @@ strategy is run and no bar is loaded.
     "other: <reasons>"       beats_random is True: both beat random, and the failing reasons name the gate.
   A missing or non-finite before-costs input, or a missing random_entry block, a missing beats_random or a
   value that isn't a bool, prints "n/a (...)": never a kill kind.
+  The random benchmark's mean trades per seed (`random_entry.random_trades_mean`) next to the strategy's
+    OOS trades (`metrics.trades`), and their ratio. Display only. The session-calibrated benchmark fires
+    at the strategy's rate over every flat in-session bar, but enters only where the bracket is valid, so
+    it can take fewer trades than the strategy (looks_bracket.out measures the valid share before the
+    trials).
   Per trade, in bp of notional, means over the OOS trades: gross = (pnl_gross + slippage) / notional
     (before fees, slippage and funding: `pnl_gross` is after slippage), fees, slippage, funding, and
     net = pnl; gross - fees - slippage - funding = net, trade by trade.
@@ -114,6 +119,9 @@ print(f"\nrun {d.name}, plugin {s['strategy_hash'][:10]}, OOS {s['oos_start']} .
       f"{len(s['folds'])} folds, {len(s['universe'])} coins, walk-forward status {s['status']}")
 print(f"  net: OOS Sharpe {fmt(m.get('sharpe'), '.2f')}, random p{pct} "
       f"{fmt(rnd.get(f'random_sharpe_p{pct}'), '.2f')}, beats random {rnd.get('beats_random')}")
+rt, st = num(rnd.get("random_trades_mean")), num(m.get("trades"))
+print(f"  random entry: {fmt(rt, '.1f')} trades a seed (mean) against the strategy's {fmt(st, '.0f')} OOS trades, "
+      f"ratio {fmt(rt / st if rt is not None and st else None, '.3f')}")
 print(f"  before costs (fees and slippage removed, funding kept): Sharpe {fmt(bc.get('sharpe'), '.2f')}, "
       f"random p95 {fmt(bc.get('random_p95'), '.2f')}")
 print(f"kill kind: {kill_kind(v, s)}")
