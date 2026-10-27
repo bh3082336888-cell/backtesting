@@ -1,0 +1,19 @@
+verdict lce_pct @ 5m @ 5458edefef: KILL
+  - OOS Sharpe -17.39 <= 0
+  - Deflated Sharpe 0.00 < 0.95 (N=8)
+  Deflated Sharpe 0.00e+00, N = 8, sr0 = 0.0312 (daily); holdout n/a (n/a)
+
+run 20261027-071510-8626d9, plugin 5458edefef, OOS 2020-07-01 .. 2026-07-01, 36 folds, 17 coins, walk-forward status noise
+  net: OOS Sharpe -17.39, random p95 -20.13, beats random True
+  random entry: 23950.2 trades a seed (mean) against the strategy's 25652 OOS trades, ratio 0.934
+  before costs (fees and slippage removed, funding kept): Sharpe -4.43, random p95 -5.68
+kill kind: other: OOS Sharpe -17.39 <= 0; Deflated Sharpe 0.00 < 0.95 (N=8)
+
+25652 OOS trades, signal 2020-07-01 .. exit 2026-06-30 19:25:00+00:00
+per trade, bp of notional (mean): gross -2.47, fees 8.21, slippage 4.74, funding 0.01, net -15.43
+  gross - fees - slippage - funding - net, largest per trade: 2.8e-14 bp
+
+trades per coin per session day: 0.976 over the 26,283 Mon-Fri coin-days listed in the OOS span; 1.325 on the 19,355 coin-days with a trade (most 2)
+win rate (pnl > 0) 36.5%; target exits 59.7%; mean R -0.435
+exits: target 15312, stop 10190, signal 150
+OOS entries outside the declared session: 0
