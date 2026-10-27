@@ -71,7 +71,7 @@ def test_payload_is_json_and_holds_the_window():
     short = p["trades"][1]
     assert short["side"] == -1
     assert short["entry"] == {"time": ms(31), "price": 130.5}
-    assert short["exit"] == {"time": ms(36), "price": 135.0, "reason": "target", "color": P["s1"]}
+    assert short["exit"] == {"time": ms(36), "price": 135.0, "reason": "target", "color": P["pos"]}
     colors = tc.exit_colors(P)
     assert [tr["exit"]["color"] for tr in p["trades"]] == [colors[r] for r in tc.EXIT_REASONS]
     assert p["exits"] == colors                                            # the key above the chart

@@ -333,4 +333,4 @@ def trade_tags(r: dict, b: dict, palette: dict | None, lo: int, hi: int, fmt: st
 
 def exit_colors(palette: dict | None = None) -> dict:
     p = {**PALETTE, **(palette or {})}
-    return {"stop": p["neg"], "target": p["s1"], "signal": p["s2"], "liq": p["liq"], "eow": p["eow"]}
+    return {"stop": p["neg"], "target": p["pos"], "signal": p["s2"], "liq": p["liq"], "eow": p["eow"]}

@@ -309,6 +309,11 @@ def test_short_trade_boxes_are_mirrored():
     assert tc.rr_text(_pos(-1)) == tc.rr_text(_pos()) and tc.result_text(_pos(-1)) == tc.result_text(_pos())
 
 
+def test_target_exit_is_the_reward_green_not_the_entry_blue():
+    assert tc.exit_colors()["target"] == tc.PALETTE["pos"] != tc.PALETTE["s1"]
+    assert tc.exit_colors({"pos": "#00ff00"})["target"] == "#00ff00"
+
+
 def test_trade_tags_for_one_trade():
     r = _pos(level_time=[T0, T0 + 3 * M5], level_stop=[98.82, 99.06], level_target=[99.30, 99.30])
     b = tc.trade_boxes(r)
