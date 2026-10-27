@@ -538,7 +538,7 @@ def test_levels_match_an_independent_reference(mod, coin, kw, vp):
                                        rtol=0, atol=1e-7 * h, err_msg=f"{coin} vp{vp} day {D} bar {t}")
             assert f[t, 9] == pytest.approx(want[9], rel=1e-9)
         checked += 1
-    assert checked == 16 - vp - 1 + 1                                   # days vp+1 .. 15 after the partial day 0
+    assert checked == 16 - vp            # days vp+1 .. 16: day 0 is partial, never complete; partial day 16 has levels
 
 
 def test_close_on_a_level_and_outside_the_grid(mod):
