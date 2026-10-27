@@ -88,7 +88,7 @@ the visible-range profile, the 1h cloud and the branch label as toggles), fed by
 3. **More than 5 trades in view:** boxes for all of them; tags and labels only for the focused
    trade; hover on every one. Tested in Task 1.
 4. **A coin with no overlay file** (no trades, or built with `--symbols`): no toggles, chart
-   unchanged. Tested in Task 3.
+   unchanged. Tested in Task 4.
 5. **A run that `lab overlay` must refuse:** not walk-forward, a changed plugin file, or a
    self-check mismatch. A clear error, nothing written. Tested in Task 2.
 
@@ -142,7 +142,82 @@ the visible-range profile, the 1h cloud and the branch label as toggles), fed by
 - [ ] **Step 4:** Run `.venv/bin/python -m pytest -q tests/test_trade_chart.py tests/test_dashboard.py`. Expected: PASS, no warnings.
 - [ ] **Step 5:** Commit: "feat(dashboard): trades drawn as TradingView-style position boxes on every trade chart".
 
-### Task 2: `lab overlay`
+### Task 2: The trade chart on TradingView Lightweight Charts
+
+Spec: the section "Amendment (2026-10-27): the chart engine is TradingView Lightweight Charts".
+
+**Files:**
+- Create: `dashboard/components/tv_chart/index.html`
+- Create: `dashboard/components/tv_chart/main.js` (Streamlit component glue plus chart setup)
+- Create: `dashboard/components/tv_chart/primitives.js` (series primitives: position boxes and
+  labels, time tags; Task 4 adds its own)
+- Create: `dashboard/components/tv_chart/geometry.mjs` (pure helpers, testable with `node --test`)
+- Create: `dashboard/components/tv_chart/vendor/lightweight-charts.standalone.production.js`, with
+  `LICENSE` and `NOTICE` from the npm tarball of `lightweight-charts@5.2.1`
+- Create: `dashboard/tv_chart.py` (`chart_payload`, `tv_chart`)
+- Modify: `dashboard/app.py` (the trade section renders `tv_chart`; "Jump to trade" and a click on
+  a box both set the focus)
+- Modify: `dashboard/trade_chart.py` (remove the Plotly trade drawing the dashboard no longer uses;
+  keep `trade_boxes`, `rr_text`, `result_text`, the windows, `run_candles` and `trades_in`)
+- Test: `tests/test_tv_chart.py` (pytest) and `dashboard/components/tv_chart/geometry.test.mjs`
+  (`node --test`)
+- Modify: `tests/test_trade_chart.py` (drop tests of the removed Plotly drawing; keep the geometry,
+  window and data tests)
+
+**Interfaces:**
+- Consumes: `trade_boxes(r)`, `rr_text(r)`, `result_text(r)` (Task 1); `run_candles`,
+  `trades_in`, the window helpers.
+- Produces:
+  - `chart_payload(candles, trades, tf, *, focus=None, palette, overlay=None, layers=frozenset(), folds=None) -> dict`
+    (JSON-able). Keys:
+    - `candles`: list of {time (UTC s), open, high, low, close}, coarsened only past `MAX_TV_BARS = 50_000`
+    - `trades`: one per trade, with `id`, `boxes` (from `trade_boxes`), `rr`, `result`, `tooltip`,
+      `entry`, `exit` and `price_lines`. `price_lines` is non-empty only for the focused trade, or
+      for every trade when ≤ 5 are in view.
+    - `folds`: shading spans and labels
+    - `palette`
+    - `layers`: `{}` until Task 4
+  - `tv_chart(payload: dict, key: str, height: int = 560) -> dict | None`: returns
+    `{"clicked": trade_id}` when a box was clicked.
+
+- [ ] **Step 1: Write the failing tests**
+  - pytest:
+    - `test_payload_is_json_and_holds_the_window`
+    - `test_payload_boxes_come_from_trade_boxes`
+    - `test_price_lines_only_for_focus_or_five_or_fewer`
+    - `test_payload_coarsens_only_past_50000_bars`
+    - `test_no_overlay_means_empty_layers`
+    - `test_component_files_and_license_are_vendored` (the 5.2.1 build, LICENSE and NOTICE exist;
+      `index.html` loads only the vendored file and no remote URL)
+  - node:
+    - `box rectangles map time/price to pixels with a given scale`
+    - `risk box ends at the breakeven time`
+    - `time tags skip times outside the visible range`
+- [ ] **Step 2:** Run `.venv/bin/python -m pytest -q tests/test_tv_chart.py` and
+  `node --test dashboard/components/tv_chart/`. Expected: FAIL.
+- [ ] **Step 3:** Implement. Vendor the library: `npm pack lightweight-charts@5.2.1` into a temp
+  directory, then copy `dist/lightweight-charts.standalone.production.js`, `LICENSE` and `NOTICE`.
+  - **Chart:** `createChart` with the dashboard palette (dark and light), the time scale in UTC,
+    `autoSize: true`. Use the default interaction (drag pan, wheel and pinch zoom, axis
+    stretching, price auto-scale) and add a small "fit" button that calls `fitContent()`.
+  - **Boxes, labels and tags:** a series primitive on the candle series draws the boxes, label and
+    time tags. Price lines come from `createPriceLine(..., axisLabelVisible: true)`; dots are
+    series markers.
+  - **Click and hover:** a click inside a box calls `Streamlit.setComponentValue({clicked: id})`.
+    The crosshair-move handler shows the trade tooltip in a floating div when inside a box.
+  - **Python side:** register the component with
+    `components.declare_component("tv_chart", path=...)`.
+- [ ] **Step 4:** Run `.venv/bin/python -m pytest -q tests/test_tv_chart.py tests/test_trade_chart.py tests/test_dashboard.py` and `node --test dashboard/components/tv_chart/`. Expected: PASS.
+- [ ] **Step 5:** Smoke-check it in a browser. Start the dashboard from this worktree on port 8502:
+  `STREAMLIT_SERVER_HEADLESS=true .venv/bin/lab dashboard --port 8502` (a separate port, so it
+  doesn't clash with the one on 8501). Open a run with trades in Playwright if available, otherwise
+  load the component's `index.html` with a saved payload. Confirm the candles render, then save a
+  screenshot to the scratchpad for the controller.
+- [ ] **Step 6:** Commit:
+  - "feat(dashboard): the trade chart runs on TradingView Lightweight Charts"
+  - plus a separate commit for the vendored library: "chore(dashboard): vendor lightweight-charts 5.2.1 (Apache-2.0)"
+
+### Task 3: `lab overlay`
 
 **Files:**
 - Create: `perp_lab/overlay.py`
@@ -193,17 +268,19 @@ the visible-range profile, the 1h cloud and the branch label as toggles), fed by
 - [ ] **Step 4:** Run `.venv/bin/python -m pytest -q tests/test_overlay_build.py tests/test_lce.py`. Expected: PASS.
 - [ ] **Step 5:** Commit: "feat: lab overlay rebuilds a walk-forward run's LCE context for the trade chart".
 
-### Task 3: The LCE layers and toggles in the dashboard
+### Task 4: The LCE layers and toggles in the TradingView chart
 
 **Files:**
-- Create: `dashboard/lce_overlay.py`
-- Modify: `dashboard/trade_chart.py` (`trade_figure` draws the layers when `overlay` is given)
+- Create: `dashboard/lce_overlay.py` (the layers' data: profiles, POCs, anchor, 1h cloud, zones per day)
+- Modify: `dashboard/tv_chart.py` (`chart_payload` fills `layers` from an `Overlay`)
+- Modify: `dashboard/components/tv_chart/primitives.js` and `geometry.mjs` (zones, cloud fill, the
+  volume-profile histogram with POC ticks and the anchor label, the branch name in the label)
 - Modify: `dashboard/app.py` (the toggle row and the overlay load, cached per (run, symbol))
-- Test: `tests/test_lce_overlay.py`
+- Test: `tests/test_lce_overlay.py`, and `geometry.test.mjs` for the histogram and zone geometry
 
 **Interfaces:**
 - Consumes:
-  - Task 1's `trade_figure(..., overlay=, layers=)`.
+  - Task 2's `chart_payload(..., overlay=, layers=)`.
   - Task 2's file layout. Read `meta.json` for each fold's `params` (`vp_days`, `ema_fast`,
     `ema_slow`, `zone`, `unit`).
 - Produces:
@@ -216,7 +293,7 @@ the visible-range profile, the 1h cloud and the branch label as toggles), fed by
   - `level_profile(candles_hist, day, vp_days) -> dict`, with keys `edges, p, hvn, pocs, anchor`.
   - `visible_profile(candles) -> dict`
   - `htf_cloud(close, ema_fast, ema_slow) -> pd.DataFrame`, with columns `fast, slow`.
-  - `draw_layers(fig, overlay, candles, layers, palette, focus_trade=None) -> None`
+  - `layers_payload(overlay, candles_hist, window, layers, focus_trade=None) -> dict` (what `chart_payload` puts under `layers`)
   - `branch_name(k: int) -> str`
   - `DEFAULT_LAYERS = frozenset({"zones", "cloud5", "profile"})`
 
@@ -236,16 +313,16 @@ the visible-range profile, the 1h cloud and the branch label as toggles), fed by
 - [ ] **Step 3:** Implement. The level-building profile is computed for the focused trade's
   session day, otherwise the window's last day, using that day's fold `vp_days` and loading the
   extra history from the research store (`load_candles`, no token). Draw it as a horizontal
-  histogram in a narrow right-hand area: an x-axis domain split, or shapes in paper coordinates.
+  histogram along the pane's right edge, drawn by a series primitive in pixel space.
   Session POCs are orange ticks with a faint horizontal line, HVNs are blue, and the anchor is
   labelled.
 - [ ] **Step 4:** Run `.venv/bin/python -m pytest -q tests/test_lce_overlay.py tests/test_trade_chart.py tests/test_dashboard.py`. Expected: PASS.
 - [ ] **Step 5:** Run the full suite: `.venv/bin/python -m pytest -q`. Expected: 0 failures.
 - [ ] **Step 6:** Commit: "feat(dashboard): the LCE overlay — zones, clouds, volume profiles and branches".
 
-### Task 4: Map the LCE trials onto the new view (controller)
+### Task 5: Map the LCE trials onto the new view (controller)
 
-- [ ] **Step 1:** When trial 8's verdict exists, and after Tasks 1–3 pass the final review, run
+- [ ] **Step 1:** When trial 8's verdict exists, and after Tasks 1–4 pass the final review, run
   `.venv/bin/lab overlay <trial-8 run_id>` from `.worktrees/overlay`. Expected: it prints the
   `overlay/` directory, and the self-check passes. A mismatch is a bug to investigate, not to work
   around.
