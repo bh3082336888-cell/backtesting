@@ -313,6 +313,16 @@ trades about a fifth of the week (6h05m of 24h, five days of seven), so two prob
 Plugins without `SESSION` behave exactly as before, so earlier verdicts stand. This goes in a
 separate commit with its own tests.
 
+**Known residual (user decision, 2026-10-27).** The calibration counts every in-session flat bar,
+but random entries can only fire where the bracket is valid. A pre-trial look measured the valid
+share of in-session OOS bars:
+- `lce_pct`: 0.938 pooled, lowest 0.917. Mostly closes beyond the grid.
+- `lce_atr`: 0.992 pooled, lowest 0.977.
+
+So the benchmark takes about 6% and 1% fewer trades than the two strategies. With costs this
+makes it slightly harder to beat, not easier. Accepted and recorded: `checks.py` prints the
+achieved random/strategy trade ratio, and the research note states it.
+
 ## Data
 
 **Backfill:** `lab backfill --tfs 5m` (klines only) for the 17 coins. That's about 690k bars per
