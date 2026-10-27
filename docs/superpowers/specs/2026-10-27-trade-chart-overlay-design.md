@@ -62,8 +62,9 @@ assumption: a target exit on a candle that never reached the target would be vis
     prices;
   - on the time axis: **"HH:MM entry"** and **"HH:MM exit"**, with dotted vertical lines.
 
-  To keep a busy window readable, tags are drawn for the **focused trade only** (the one picked in
-  "Jump to trade"), or for every trade when at most 5 are in view. **This spec's call.**
+  To keep a busy window readable, the price tags are drawn for the **focused trade only** (the one
+  picked in "Jump to trade"). The time tags, the breakeven note and the in-box labels show for every
+  trade when at most 5 are in view. **This spec's call.**
 - **Label inside the box:**
   - **"R:R 1 : x.xx"**, the planned |target − entry| / |entry − stop_init|; "no fixed target" when
     there is none;
@@ -202,8 +203,8 @@ the engine changes.
   `trade_boxes` / `rr_text` / `result_text`, unchanged from Task 1. Entry and exit dots are series
   markers.
 - **Price tags:** Entry, TP and SL are the library's own **price lines with axis labels**, on the
-  price axis exactly as TradingView draws them, for the focused trade (or every trade when ≤ 5 are
-  in view).
+  price axis exactly as TradingView draws them, for the focused trade only. The time tags
+  (and the breakeven note and in-box labels) show for every trade when ≤ 5 are in view.
 - **Time tags:** "HH:MM entry" and "HH:MM exit", drawn at the bottom of the pane by the primitive,
   with dotted verticals.
 - **Click to focus:** clicking a box focuses that trade, the same as "Jump to trade", and the
@@ -229,8 +230,8 @@ dashboard keeps Plotly, including Task 1's `style()` legend fix.
 
 **Tests for the engine.**
 - **Python (pytest):** `chart_payload` is JSON-serializable and holds exactly the window's candles
-  and trades, the boxes from `trade_boxes`, and price lines for the focused trade only, or for all
-  when ≤ 5 are in view. It coarsens past 50,000 bars. No overlay means no layer data.
+  and trades, the boxes from `trade_boxes`, and price lines for the focused trade only (time tags and
+  in-box labels for all when ≤ 5 are in view). It coarsens past 50,000 bars. No overlay means no layer data.
 - **JavaScript (Node 24 is available):** the primitives' pure geometry helpers are plain ES modules,
   tested with `node --test`. That covers time/price → pixel conversion of boxes, collapse at
   breakeven, histogram row placement, and the focus and tag rule.

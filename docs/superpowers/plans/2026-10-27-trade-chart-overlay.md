@@ -38,8 +38,9 @@ the visible-range profile, the 1h cloud and the branch label as toggles), fed by
 - Entry: a bold line at the entry price and a dot on the entry candle. Exit: a dot on the exit
   candle, coloured by reason (existing `exit_colors`).
 - Axis tags: price tags "Entry" (blue), "TP" (green), "SL" (red) at the initial prices; time tags
-  "HH:MM entry" and "HH:MM exit" with dotted verticals. Shown for the focused trade only, or for
-  every trade when ≤ 5 are in view.
+  "HH:MM entry" and "HH:MM exit" with dotted verticals. The price tags show for the focused trade
+  only; the time tags, the breakeven note and the in-box labels show for every trade when ≤ 5 are
+  in view.
 - Box label: "R:R 1 : x.xx" = |target − entry| / |entry − stop_init|, else "no fixed target".
   Then "±a.aaR gross · ±b.bbR net", with gross = (pnl_gross + slippage)/(qty·|entry − stop_init|),
   net = `r_multiple`. With no `slippage` column, slippage = 0 and the label reads "after slippage".
@@ -177,8 +178,7 @@ Spec: the section "Amendment (2026-10-27): the chart engine is TradingView Light
     (JSON-able). Keys:
     - `candles`: list of {time (UTC s), open, high, low, close}, coarsened only past `MAX_TV_BARS = 50_000`
     - `trades`: one per trade, with `id`, `boxes` (from `trade_boxes`), `rr`, `result`, `tooltip`,
-      `entry`, `exit` and `price_lines`. `price_lines` is non-empty only for the focused trade, or
-      for every trade when ≤ 5 are in view.
+      `entry`, `exit` and `price_lines`. `price_lines` is non-empty only for the focused trade.
     - `folds`: shading spans and labels
     - `palette`
     - `layers`: `{}` until Task 4
@@ -189,7 +189,7 @@ Spec: the section "Amendment (2026-10-27): the chart engine is TradingView Light
   - pytest:
     - `test_payload_is_json_and_holds_the_window`
     - `test_payload_boxes_come_from_trade_boxes`
-    - `test_price_lines_only_for_focus_or_five_or_fewer`
+    - `test_price_lines_only_for_the_focused_trade_tags_for_focus_or_five_or_fewer`
     - `test_payload_coarsens_only_past_50000_bars`
     - `test_no_overlay_means_empty_layers`
     - `test_component_files_and_license_are_vendored` (the 5.2.1 build, LICENSE and NOTICE exist;

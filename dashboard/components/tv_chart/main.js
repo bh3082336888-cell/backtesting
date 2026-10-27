@@ -136,7 +136,7 @@ function drawTrades(p) {
   trades.setData({ trades: p.trades, window: p.window, palette: p.palette, signal: el.signal.checked });
 }
 
-/** Entry, TP and SL of the tagged trades, as price lines labelled on the price axis. */
+/** Entry, TP and SL of the focused trade, as price lines labelled on the price axis. */
 function priceLines(p) {
   for (const line of lines) series.removePriceLine(line);
   lines = [];
