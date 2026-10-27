@@ -4,6 +4,11 @@ Status: approved by the user 2026-10-27 ("no need to wait for my approval; start
 `.worktrees/overlay`). Mockups: the brainstorm screens `overlay-options.html` and
 `overlay-entry-v5.html` (option B1).
 
+> **Scope cut (2026-10-27, the user's decision):** both LCE trials were killed, so the LCE overlay is dropped.
+> `lab overlay`, the LCE layers and their toggles, and mapping the trials (plan Tasks 3–5) are not built. What ships
+> is the TradingView-style trade view for every run, on TradingView Lightweight Charts (Tasks 1–2). The unfinished
+> Task 3 code is parked, unreviewed, on branch `wip/lce-overlay`.
+
 ## Why
 
 The user opens a walk-forward or paper run in the dashboard to see what trades a strategy took and

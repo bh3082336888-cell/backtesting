@@ -1,5 +1,10 @@
 # Trade-Chart Overlay Implementation Plan
 
+> **Scope cut (2026-10-27, the user's decision):** both LCE trials were killed, so the LCE overlay is dropped.
+> `lab overlay`, the LCE layers and their toggles, and mapping the trials (plan Tasks 3–5) are not built. What ships
+> is the TradingView-style trade view for every run, on TradingView Lightweight Charts (Tasks 1–2). The unfinished
+> Task 3 code is parked, unreviewed, on branch `wip/lce-overlay`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Draw every run's trades as TradingView-style position boxes with axis tags, R:R and
