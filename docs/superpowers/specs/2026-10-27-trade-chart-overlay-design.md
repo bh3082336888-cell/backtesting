@@ -157,6 +157,81 @@ in the legend:
   the higher-timeframe cloud and the branch label start off. The choices persist per run in the
   session.
 
+## Amendment (2026-10-27): the chart engine is TradingView Lightweight Charts
+
+**Why.** The user tried the trade chart and couldn't navigate it the way they do on TradingView:
+- dragging zooms instead of panning;
+- the mouse wheel does nothing;
+- the price axis doesn't refit to the candles in view.
+
+**Decision (user, 2026-10-27).** Rebuild the trade chart on TradingView's own open-source
+**Lightweight Charts**. Everything above about how a trade and the LCE layers look still holds; only
+the engine changes.
+
+**The library**
+- `lightweight-charts` **5.2.1** (npm, Apache-2.0, published 2026-08-12).
+- Its standalone production build is **vendored** under
+  `dashboard/components/tv_chart/vendor/` with the package's LICENSE and NOTICE, so the dashboard
+  works offline and never loads code from a CDN.
+- TradingView's attribution logo stays on (the library's default), as its licence notice asks.
+
+**The component**
+- A custom Streamlit component, `dashboard/components/tv_chart/`: a static `index.html` plus plain
+  JavaScript, no build step. It uses Streamlit's component protocol and Lightweight Charts' v5 API,
+  with series primitives for anything the library doesn't draw natively.
+- Python side: `dashboard/tv_chart.py`:
+  - `chart_payload(...)` builds a JSON-able dict (candles, trades, layers, focus, palette);
+  - `tv_chart(payload, key, height)` renders it and returns the trade the user clicked, if any.
+
+**Navigation, the point of the change.** Native Lightweight Charts behaviour:
+- drag to pan forward and back;
+- mouse wheel and pinch to zoom;
+- the price scale auto-fits the visible candles;
+- drag the price or time axis to stretch it;
+- double-click, or a "fit" button, resets;
+- a crosshair with an OHLC readout of the bar under it.
+
+**Trades in the new engine**, following Part 1:
+- **Boxes and dots:** the position boxes (reward, risk, collapse at breakeven, no-target shading),
+  the bold entry line and the R:R / gross-net label are drawn by a series primitive from
+  `trade_boxes` / `rr_text` / `result_text`, unchanged from Task 1. Entry and exit dots are series
+  markers.
+- **Price tags:** Entry, TP and SL are the library's own **price lines with axis labels**, on the
+  price axis exactly as TradingView draws them, for the focused trade (or every trade when ≤ 5 are
+  in view).
+- **Time tags:** "HH:MM entry" and "HH:MM exit", drawn at the bottom of the pane by the primitive,
+  with dotted verticals.
+- **Click to focus:** clicking a box focuses that trade, the same as "Jump to trade", and the
+  component returns the click to Python.
+- **Tooltip:** hovering inside a box shows today's trade tooltip in a small floating panel.
+
+**LCE layers in the new engine**, following Part 2:
+- zones as rectangles drawn by a primitive;
+- the 5m and 1h clouds as two line series each, with the fill between them drawn by a primitive;
+- the volume profile as a horizontal histogram drawn by a primitive against the right edge of the
+  pane, with the POC ticks and the anchor label;
+- the branch name in the trade label.
+
+The toggles stay in Streamlit, above the chart.
+
+**Data size.** Lightweight Charts handles tens of thousands of bars smoothly, so this chart coarsens
+only past **50,000 bars** in the window (about 170 days of 5m), not 6,000. Time is shown in UTC.
+
+**What happens to Task 1.** `trade_boxes`, `rr_text` and `result_text` stay and are the source of
+every number drawn. The Plotly trade drawing (`_draw_trades`, the trade part of `trade_figure`) is
+removed from the dashboard's trade section. Its tests move to the payload. The rest of the
+dashboard keeps Plotly, including Task 1's `style()` legend fix.
+
+**Tests for the engine.**
+- **Python (pytest):** `chart_payload` is JSON-serializable and holds exactly the window's candles
+  and trades, the boxes from `trade_boxes`, and price lines for the focused trade only, or for all
+  when ≤ 5 are in view. It coarsens past 50,000 bars. No overlay means no layer data.
+- **JavaScript (Node 24 is available):** the primitives' pure geometry helpers are plain ES modules,
+  tested with `node --test`. That covers time/price → pixel conversion of boxes, collapse at
+  breakeven, histogram row placement, and the focus and tag rule.
+- **In a browser:** the controller drives the running dashboard with Playwright to check drag-pan,
+  wheel zoom and auto-fit, and takes screenshots for the user.
+
 ## Fold boundaries
 
 A session day that straddles a fold boundary (the folds are UTC calendar months; session days
