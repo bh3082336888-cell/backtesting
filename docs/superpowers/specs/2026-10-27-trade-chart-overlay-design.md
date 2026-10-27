@@ -41,8 +41,10 @@ assumption: a target exit on a candle that never reached the target would be vis
 - **Reward box:** green, from the entry fill to the target, over [entry_time, exit_time]. If the
   target moved (the level path), the box follows it in steps.
 - **Risk box:** red, from the entry to the stop, following the stop's level path. A move to
-  breakeven makes it collapse at that time; a trailing stop makes it step. Stops never move
-  against the trade, because the engine only ratchets.
+  breakeven makes it collapse at that time; a trailing stop makes it step. Once a stop reaches or
+  passes the entry (breakeven, or a trail into profit), the red box collapses at the entry, and the
+  stop's dotted step line carries on as today. Stops never move against the trade, because the
+  engine only ratchets. **This spec's call.**
 - **Trades without a target** (plugins that exit on a signal or a trailing stop, e.g.
   `donchian_atr`): there is no reward box. The span from entry to the exit price is shaded green
   for a gain and red for a loss, and labelled "no fixed target".
@@ -60,8 +62,9 @@ assumption: a target exit on a candle that never reached the target would be vis
 - **Label inside the box:**
   - **"R:R 1 : x.xx"**, the planned |target − entry| / |entry − stop_init|; "no fixed target" when
     there is none;
-  - **"±a.aaR gross · ±b.bbR net"**, where gross = `pnl_gross` / (qty·|entry − stop_init|) (after
-    slippage, before fees and funding) and net = the engine's `r_multiple`.
+  - **"±a.aaR gross · ±b.bbR net"**, where gross = (`pnl_gross` + `slippage`) / (qty·|entry − stop_init|)
+    (before fees, slippage and funding, the LCE research note's definition; a run without a
+    `slippage` column uses 0 and the label says "after slippage") and net = the engine's `r_multiple`.
 
   The label is shown under the same rule as the tags.
 - **Breakeven marker:** where the stop reached the entry price, a small "SL → BE HH:MM" note.
@@ -89,8 +92,8 @@ walk-forward run of a plugin whose `prepare` output has LCE's feature columns:
   hashes to the run's `strategy_hash`), its folds and each fold's selected `combo` and params.
 - **Reruns the plugin in the sandbox:** for each coin and each combo used by some fold, it runs the
   plugin on the coin's research 5m bars with `features=True` (`client.spawn` → `w.bars` → `w.run`).
-  It reads only the features, never the run's decisions, trades or equity, and research bars only,
-  never the holdout. A whole-history feature run is about 150 MB per coin, over the 64 MB worker
+  From each rerun it keeps only the features, never the rerun's decisions, trades or equity, and it
+  reads research bars only, never the holdout. A whole-history feature run is about 150 MB per coin, over the 64 MB worker
   output limit, so the command raises `sandbox.max_output_mb` for its own workers in memory, as
   `docs/research/2026-10-23-lce/looks.py` does.
 - **Stitches by fold:** each fold's test window takes the features of that fold's selected combo,
@@ -99,10 +102,18 @@ walk-forward run of a plugin whose `prepare` output has LCE's feature columns:
   - `meta.json`: run id, plugin name and hash, per-fold combos, created_at
   - `<SYMBOL>_bars.parquet`: per bar over the OOS span: `open_time`, `fast5`, `slow5` (float32)
   - `<SYMBOL>_zones.parquet`: per session day (`sday`): every distinct zone centre the plugin's
-    `z_dn_c`, `z_dn2_c`, `z_up_c` and `z_up2_c` named that day, and the day's zone half-width.
+    `z_dn_c`, `z_dn2_c`, `z_up_c` and `z_up2_c` named that day, the `open_time` of the first bar
+    that named it, and the day's zone half-width.
     The half-width is the median of `z_up_c − z_up_lo` over the day's bars where both name the same
     zone.
   - `<SYMBOL>_signals.parquet`: per bar with `sig_branch > 0`: `open_time`, `sig_branch`, `sig_side`
+- **Self-check against the run:** before writing, it checks every OOS trade in the run's own
+  `oos_trades.parquet` against the stitched features at that trade's signal bar:
+  - `sig_side` equals the trade's side;
+  - `stop_init` and `target` equal the bracket rebuilt from the zone columns, within 1e-9 relative.
+
+  On any mismatch it writes nothing and prints the first mismatches. This is the end-to-end guard
+  for anti-goal 1. **This spec's call.**
 - **Overwriting:** it overwrites its own previous output for the run. A run with no overlay just
   charts without LCE layers.
 
@@ -110,24 +121,33 @@ walk-forward run of a plugin whose `prepare` output has LCE's feature columns:
 in the legend:
 - **Level-building volume profile:** the plugin's method re-implemented: an exact even spread of
   each bar's volume over 200 rows, across the `vp_days` session days before the shown day, with
-  the fold's `vp_days`. The point of control and the high-volume nodes (the plugin's rule: largest
-  within ±2 rows and ≥ the 70th percentile) are marked. The shown day is the focused trade's
+  the fold's `vp_days`. Marked on it:
+  - the high-volume nodes, by the plugin's rule: largest within ±2 rows and ≥ the 70th percentile;
+  - the `vp_days` **session POCs**: each day's highest row of a 100-row profile, the plugin's
+    `poc()`. These are the points of control the plugin's anchor rule counts.
+  - the **anchor**, the HVN that rule picks, labelled.
+
+  The window profile's own tallest row is not called a POC: the plugin never uses it. If the
+  anchor isn't one of the day's drawn zone centres, a small "anchor not matched" note appears, as
+  a diagnostic. **This spec's call.** The shown day is the focused trade's
   session day, otherwise the last day in the window.
 - **Visible-range profile** (toggle): the same spread over the window's own candles.
 - **Higher-timeframe cloud** (toggle): EMA(ema_fast×12) and EMA(ema_slow×12) of close, the 1h
-  cloud, computed with a lead-in of at least 3× the slow length before the window so it matches
-  the plugin's values to display precision.
+  cloud, computed with a lead-in of at least 20× the slow length (12,000 5m bars) before the window
+  so it matches the plugin's values within 1e-6 relative.
 
 ### How the layers look
 
-- **Liquidity zones:** for each session day in view, every zone is a horizontal band over that
-  day's 18:00→18:00 New York span. Zones below the day's first open are demand (green), above it
+- **Liquidity zones:** for each session day in view, every zone is a horizontal band from the
+  first bar that named it to the end of that day's 18:00→18:00 New York span. That keeps the
+  chart point-in-time: no zone shows before the plugin had pointed at it. **This spec's call.** Zones below the day's first open are demand (green), above it
   are supply (red). A zone a trade used (the entry zone the bracket started from, and the target
   zone) gets a stronger outline and a small label. **The colour rule is this spec's call.**
 - **5m EMA cloud:** the band between `fast5` and `slow5`, green where fast > slow and red
   otherwise, behind the candles.
-- **Volume profile:** a horizontal histogram along the right edge of the price area. The point of
-  control is orange with a faint line across the chart; high-volume nodes are blue.
+- **Volume profile:** a horizontal histogram along the right edge of the price area. High-volume
+  nodes are blue, the session POCs are orange ticks with a faint line across the chart, and the
+  anchor is labelled.
 - **Branch label** (toggle): "Branch k · <short name>" added to the trade label. The six short
   names come from the spec's branch table: dip into the cloud at demand, flip long in an
   uptrend, fade at range high, fade at range low, flip short in a downtrend, rip into the cloud
@@ -136,6 +156,12 @@ in the legend:
   symbol. Zones, the 5m cloud and the level-building profile start on; the visible-range profile,
   the higher-timeframe cloud and the branch label start off. The choices persist per run in the
   session.
+
+## Fold boundaries
+
+A session day that straddles a fold boundary (the folds are UTC calendar months; session days
+run 18:00→18:00 New York) belongs to the fold that contains its entry window (09:40–15:45), the
+way its trades do. **This spec's call.**
 
 ## Non-goals
 
@@ -186,8 +212,10 @@ in the legend:
    stands alone and changes every run's chart.
 2. `lab overlay` and its artifact, with tests.
 3. The LCE layers and toggles in the dashboard, with tests.
-4. Run `lab overlay` on the two LCE trial runs once both verdicts exist (the per-branch numbers in
-   the research note use the same rerun).
+4. Run `lab overlay` on the two LCE trial runs once both verdicts exist. The research note's
+   per-branch numbers stay as the LCE spec fixed them before the trials: a features-on rerun of
+   the **modal** params, its own script. The overlay's per-fold branches are for the chart only.
+   **This spec's call.**
 
 Each step is its own commit; one PR for steps 1–3, and step 4 runs from `main` after it merges.
 Work happens only in `.worktrees/overlay`. The LCE trials run from `.worktrees/lce`, whose sandbox
