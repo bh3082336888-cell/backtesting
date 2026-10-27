@@ -44,7 +44,19 @@ For each judged plugin (lce_pct, then lce_atr):
     zones and their half-width follow as level_features draws them) and the bar's low and high. "Near":
     the zone on the stop side, which the flowchart means ("buy dips into the cloud at demand": for a long,
     the zone at or below the close). "Far": the zone on the target side (for a long, supply above). Per
-    branch: near only, far only, both, with the per-group line.
+    branch: near only, far only, both, and near with or without far (near only + both: the bar touched
+    the zone the flowchart means), with the per-group line.
+  How concentrated the gross is, by date: each trade's date is the New York date of its signal (the
+    session is 09:40-15:55, so one date per session). For all trades and for exact branch 6 alone: the
+    dates and trades; gross per trade with its t clustered by date (sum over dates of (S_d - n_d m)^2,
+    S_d a date's summed gross bp, n_d its trades, m the mean; no small-sample correction); the mean of
+    the per-date mean gross, weighting each date equally, and its t across dates; gross per trade with
+    the top 10 and top 20 dates removed (dates ranked by S_d), with the removed trades and their short
+    share; and the top 10 dates, each with its trades, short share, S_d, its share of the total, and the
+    market's move that session: the equal-weight mean over the coins with both bars of close(15:55) /
+    close(09:40) - 1, New York bar closes, how many of them fell, and the date's rank among all Mon-Fri
+    dates in the OOS span (1 = the worst move). The before-costs Sharpe as a t: Sharpe x sqrt(OOS days /
+    365), from summary.json (the lab annualises daily Sharpe by sqrt(365)).
   From oos_trades alone, for the note's claims and fidelity sections: risk at entry as a share of equity
     (qty x |entry_price - stop_init| / equity_before; 1% unless the 3x-equity notional cap binds),
     mean R by exit reason, the share of trades that paid or received funding, the share of fills before
@@ -73,6 +85,7 @@ from looks import HOLDOUT, NY, OUTPUT_MB, PLUGINS, TF, THREADS
 from perp_lab.config import load_config
 from perp_lab.data.store import load_bars
 from perp_lab.engine.backtest import EngineParams
+from perp_lab.engine.metrics import ANN
 from perp_lab.plugins import PluginSource
 from perp_lab.sandbox import client
 from perp_lab.validate.walkforward import combo_key, modal_params
@@ -109,12 +122,12 @@ def features(cfg, src: PluginSource, sym: str, bars: pd.DataFrame, params: dict,
 def per_coin(cfg, plans: dict, sym: str) -> dict:
     """For each plugin: the branch and the nearest levels at each of the coin's trades' signal bars under
     every combo in its plan, the signal bars' close, low and high, and (modal combo) the session days'
-    level spacing."""
+    level spacing; and, under "move", the coin's session move per New York date."""
     bars = load_bars(cfg, sym, TF)
     t = bars.open_time.to_numpy(np.int64)
     assert len(t) and t.max() < HOLDOUT.value // 10**6, sym
     close, low, high = (bars[c].to_numpy(float) for c in ("close", "low", "high"))
-    out = {}
+    out = {"move": session_move(t, close)}
     for name, (src, combos, modal, trades) in plans.items():
         sig = trades.loc[trades.symbol == sym, "signal_time"].to_numpy(np.int64)
         i = np.searchsorted(t, sig)
@@ -134,8 +147,48 @@ def per_coin(cfg, plans: dict, sym: str) -> dict:
     return out
 
 
+def session_move(open_time: np.ndarray, close: np.ndarray) -> pd.Series:
+    """Per Mon-Fri New York date with both bars: close at the bar closing 15:55 / close at the bar closing
+    09:40, minus 1 (New York times of the bars' closes, open_time + 5 min)."""
+    ct = pd.to_datetime(open_time + 300_000, unit="ms", utc=True).tz_convert(NY)
+    hm = ct.hour * 60 + ct.minute
+    wk = ct.dayofweek < 5
+    a = pd.Series(close[wk & (hm == 9 * 60 + 40)], index=ct[wk & (hm == 9 * 60 + 40)].date)
+    b = pd.Series(close[wk & (hm == 15 * 60 + 55)], index=ct[wk & (hm == 15 * 60 + 55)].date)
+    return (b / a - 1).dropna()
+
+
 def bp(x: pd.Series, t: pd.DataFrame) -> pd.Series:
     return x / t.notional * 1e4
+
+
+def concentration(t: pd.DataFrame, move: pd.DataFrame, label: str) -> None:
+    """How the gross per trade depends on a few dates (see the docstring)."""
+    g = bp(t.pnl_gross + t.slippage, t)
+    day = pd.to_datetime(t.signal_time, unit="ms", utc=True).dt.tz_convert(NY).dt.date
+    S, n = g.groupby(day).sum(), g.groupby(day).size()
+    m = S.sum() / n.sum()
+    t_cl = m / np.sqrt(((S - n * m) ** 2).sum()) * n.sum()
+    pm = S / n
+    t_eq = pm.mean() / pm.std(ddof=1) * np.sqrt(len(pm))
+    print(f"  {label}: {n.sum():,} trades on {len(S):,} dates; gross per trade {m:.2f} bp, t clustered by date"
+          f" {t_cl:.2f}; each date weighted equally {pm.mean():.2f} bp, t {t_eq:.2f}")
+    top = S.sort_values(ascending=False)
+    for k in (10, 20):
+        out = day.isin(top.index[:k])
+        print(f"    without the top {k} dates: gross per trade {g[~out].mean():.2f} bp over {(~out).sum():,} trades"
+              f" (removed {out.sum():,} trades, short share {(t.side[out] == -1).mean():.1%})")
+    ew = move.mean(axis=1)
+    rank = ew.rank(method="min")
+    print(f"    top 10 dates by summed gross ({S.sum():,.0f} bp summed over all its trades):")
+    print(f"      {'date':<10} {'trades':>6} {'short':>6} {'gross bp':>9} {'share':>6} {'market':>7} {'down':>6}"
+          f" {'rank':>9}")
+    for dt in top.index[:10]:
+        x = t[day == dt]
+        mk = move.loc[dt] if dt in move.index else pd.Series(dtype=float)
+        print(f"      {dt!s:<10} {len(x):>6} {(x.side == -1).mean():>6.1%} {S[dt]:>9,.0f} {S[dt] / S.sum():>6.1%}"
+              f" {ew.get(dt, np.nan):>7.2%} {int((mk < 0).sum()):>2} of {int(mk.notna().sum()):>2}"
+              f" {int(rank.get(dt, 0)):>4} of {len(ew):,}")
 
 
 def stats(t: pd.DataFrame) -> dict:
@@ -174,6 +227,13 @@ def report(name: str, src: PluginSource, v: dict, s: dict, d: Path, t: pd.DataFr
     print(f"combos selected per fold: " + ", ".join(f"{k} x{n}" for k, n in folds.items()))
     print(f"modal params (walkforward.modal_params on the run's folds): {modal}, selected in {folds[modal]} of "
           f"{len(s['folds'])} folds; equal to the run's sensitivity base params (asserted)")
+    tied = folds[folds == folds.iloc[0]].index.tolist()
+    if len(tied) > 1:
+        first = {k: next(f["fold"] for f in s["folds"] if f["combo"] == k) for k in tied}
+        print(f"  a tie: {', '.join(f'{k} (first selected in fold {first[k]})' for k in tied)} are each selected in"
+              f" {folds.iloc[0]} folds; modal_params takes value_counts' first, and value_counts keeps tied combos"
+              f" in their order of first appearance, so the tie goes to {modal}")
+        assert modal == min(tied, key=first.get), name
 
     n = len(t)
     from_modal = t.combo == modal
@@ -235,13 +295,22 @@ def report(name: str, src: PluginSource, v: dict, s: dict, d: Path, t: pd.DataFr
           f" {'R:R p50':>7} {'gross':>7} {'net':>7}")
     for label, br in (("1", [1]), ("6", [6]), ("1 and 6", [1, 6])):
         g = t[t.br_own.isin(br)]
-        for kind, m in (("near only", g.near & ~g.far), ("far only", g.far & ~g.near), ("both", g.near & g.far)):
+        for kind, m in (("near only", g.near & ~g.far), ("far only", g.far & ~g.near), ("both", g.near & g.far),
+                        ("near, any", g.near)):
             st = stats(g[m])
             print(f"  {label:<7} {kind:<10} {st['trades']:>7,} {st['trades'] / len(g):>6.3f} {st['win']:>6.1%}"
                   f" {st['target']:>7.1%} {st['r']:>7.3f} {st['rr']:>7.2f} {st['gross']:>7.2f} {st['net']:>7.2f}")
     g = t[t.br_own.isin([1, 6])]
     print(f"  consistency: branch 1 and 6 trades touching neither zone {int((~g.near & ~g.far).sum())},"
-          f" with a NaN level {int(g.lv_nan.sum())} (0 and 0 expected)")
+          f" with a NaN level {int(g.lv_nan.sum())} (0 and 0 expected); \"near, any\" = near only + both")
+
+    bc, days = s["before_costs"]["sharpe"], s["metrics"]["days"]
+    print(f"\nhow concentrated the gross is, by New York date of the signal (Mon-Fri dates in the OOS span:"
+          f" {len(res['move']):,} with a market move)")
+    print(f"  before-costs Sharpe {bc:.2f} over {days:,} days: as a t, {bc:.2f} x sqrt({days} / {ANN:.0f})"
+          f" = {bc * np.sqrt(days / ANN):.2f} (one comparison; no deflation for N)")
+    concentration(t, res["move"], "all trades")
+    concentration(t[t.br_own == 6], res["move"], "branch 6 (exact)")
 
     risk = t.qty * (t.entry_price - t.stop_init).abs() / t.equity_before * 100
     print(f"\nrisk at entry, % of equity: {q(risk, (0.1, 0.25, 0.5, 0.75))}; under 0.99% (the 3x notional cap binds) "
@@ -287,6 +356,9 @@ def main():
     syms = cfg.symbols
     with ThreadPoolExecutor(THREADS) as pool:      # each thread spawns and closes its own workers
         res = dict(zip(syms, pool.map(lambda s: per_coin(cfg, plans, s), syms)))
+    move = pd.DataFrame({sym: res[sym]["move"] for sym in syms}).sort_index()
+    span = (move.index >= pd.Timestamp("2020-07-01").date()) & (move.index < HOLDOUT.date())
+    move = move[span]
 
     print(f"LCE per-branch attribution and planned R:R, trials 8 and 9 (after the verdicts; no trial spent)")
     print(f"research {TF} bars before {HOLDOUT:%Y-%m-%d}; features-on reruns in sealed sandbox workers; "
@@ -323,7 +395,7 @@ def main():
         long = t.side.to_numpy() == 1
         t["near"], t["far"] = np.where(long, below, above), np.where(long, above, below)
         t["lv_nan"] = np.isnan(dn + hb + u1)
-        report(name, src, v, s, d, t, modal, {"spacing": [res[sym][name]["spacing"] for sym in syms]})
+        report(name, src, v, s, d, t, modal, {"spacing": [res[sym][name]["spacing"] for sym in syms], "move": move})
 
 
 if __name__ == "__main__":

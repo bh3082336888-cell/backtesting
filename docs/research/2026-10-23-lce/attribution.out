@@ -78,13 +78,49 @@ above: supply), far = the zone on the target side (for a long: supply above)
   1       near only    3,643  0.370  39.9%   51.7%  -0.555    0.54   -2.34  -15.93
   1       far only     2,210  0.225  32.0%   67.3%  -0.296    0.30   -1.17  -13.66
   1       both         3,982  0.405  33.3%   59.8%  -0.470    0.34   -4.27  -17.09
+  1       near, any    7,625  0.775  36.4%   55.9%  -0.510    0.44   -3.35  -16.54
   6       near only    4,106  0.366  44.3%   55.0%  -0.471    0.57   -0.72  -14.03
   6       far only     2,781  0.248  32.8%   69.8%  -0.274    0.25   -0.84  -13.27
   6       both         4,321  0.386  36.1%   62.0%  -0.417    0.34   -3.38  -15.98
+  6       near, any    8,427  0.752  40.1%   58.6%  -0.443    0.46   -2.09  -15.03
   1 and 6 near only    7,749  0.368  42.2%   53.4%  -0.510    0.56   -1.48  -14.93
   1 and 6 far only     4,991  0.237  32.5%   68.7%  -0.284    0.27   -0.99  -13.44
   1 and 6 both         8,303  0.395  34.8%   60.9%  -0.442    0.34   -3.81  -16.51
-  consistency: branch 1 and 6 trades touching neither zone 0, with a NaN level 0 (0 and 0 expected)
+  1 and 6 near, any   16,052  0.763  38.4%   57.3%  -0.475    0.45   -2.69  -15.75
+  consistency: branch 1 and 6 trades touching neither zone 0, with a NaN level 0 (0 and 0 expected); "near, any" = near only + both
+
+how concentrated the gross is, by New York date of the signal (Mon-Fri dates in the OOS span: 1,565 with a market move)
+  before-costs Sharpe -4.43 over 2,191 days: as a t, -4.43 x sqrt(2191 / 365) = -10.85 (one comparison; no deflation for N)
+  all trades: 25,652 trades on 1,551 dates; gross per trade -2.47 bp, t clustered by date -11.04; each date weighted equally -2.18 bp, t -9.39
+    without the top 10 dates: gross per trade -2.60 bp over 25,485 trades (removed 167 trades, short share 76.0%)
+    without the top 20 dates: gross per trade -2.72 bp over 25,319 trades (removed 333 trades, short share 76.0%)
+    top 10 dates by summed gross (-63,465 bp summed over all its trades):
+      date       trades  short  gross bp  share  market   down      rank
+      2023-11-17     17  94.1%       328  -0.5%   0.38%  8 of 17  919 of 1,565
+      2024-12-24     19   0.0%       321  -0.5%   0.00% 12 of 17  783 of 1,565
+      2023-06-05     18  94.4%       317  -0.5%  -5.40% 17 of 17   44 of 1,565
+      2024-01-17     20  90.0%       292  -0.5%   0.35%  6 of 17  910 of 1,565
+      2021-10-20     16   0.0%       276  -0.4%   4.46%  0 of 17 1520 of 1,565
+      2026-06-01     17 100.0%       275  -0.4%   0.69%  4 of 17 1023 of 1,565
+      2022-12-16     15 100.0%       271  -0.4%  -0.68% 13 of 17  549 of 1,565
+      2022-07-11     16 100.0%       265  -0.4%  -0.34% 13 of 17  649 of 1,565
+      2022-01-17     16  93.8%       264  -0.4%  -1.36% 13 of 17  370 of 1,565
+      2024-04-12     13 100.0%       262  -0.4% -12.29% 17 of 17    3 of 1,565
+  branch 6 (exact): 11,208 trades on 1,196 dates; gross per trade -1.78 bp, t clustered by date -4.65; each date weighted equally -1.93 bp, t -4.53
+    without the top 10 dates: gross per trade -2.05 bp over 11,058 trades (removed 150 trades, short share 100.0%)
+    without the top 20 dates: gross per trade -2.29 bp over 10,893 trades (removed 315 trades, short share 100.0%)
+    top 10 dates by summed gross (-19,915 bp summed over all its trades):
+      date       trades  short  gross bp  share  market   down      rank
+      2023-11-17     16 100.0%       295  -1.5%   0.38%  8 of 17  919 of 1,565
+      2023-06-05     16 100.0%       287  -1.4%  -5.40% 17 of 17   44 of 1,565
+      2020-12-04     14 100.0%       286  -1.4%  -1.58% 15 of 17  324 of 1,565
+      2024-04-16     18 100.0%       280  -1.4%   0.48%  5 of 17  953 of 1,565
+      2026-06-01     17 100.0%       275  -1.4%   0.69%  4 of 17 1023 of 1,565
+      2022-12-16     15 100.0%       271  -1.4%  -0.68% 13 of 17  549 of 1,565
+      2024-04-12     13 100.0%       262  -1.3% -12.29% 17 of 17    3 of 1,565
+      2020-08-21     12 100.0%       253  -1.3%  -0.90% 11 of 12  481 of 1,565
+      2025-05-29     15 100.0%       252  -1.3%  -1.95% 17 of 17  275 of 1,565
+      2024-05-14     14 100.0%       238  -1.2%  -1.16% 16 of 17  412 of 1,565
 
 risk at entry, % of equity: p10 0.721, p25 0.882, p50 1.000, p75 1.000; under 0.99% (the 3x notional cap binds) 34.7%
 mean R by exit reason: signal -0.548 (150), stop -1.327 (10,190), target 0.160 (15,312)
@@ -98,6 +134,7 @@ levels at the modal params: the day's median level spacing, in u, over 38,495 co
 ==== lce_atr: verdict KILL, run 20261027-075940-4464e6, plugin 181835ba5477
 combos selected per fold: theta=0.02,vp_days=5 x17, theta=0.02,vp_days=10 x17, theta=0.01,vp_days=5 x2
 modal params (walkforward.modal_params on the run's folds): theta=0.02,vp_days=5, selected in 17 of 36 folds; equal to the run's sensitivity base params (asserted)
+  a tie: theta=0.02,vp_days=5 (first selected in fold 0), theta=0.02,vp_days=10 (first selected in fold 1) are each selected in 17 folds; modal_params takes value_counts' first, and value_counts keeps tied combos in their order of first appearance, so the tie goes to theta=0.02,vp_days=5
 
 11,337 OOS trades; from folds that selected the modal combo 5,139 (45.3%), from other folds 6,198 (54.7%)
 under the modal params, signal bars with no branch (sig_branch == 0): 1,651 of 11,337 (14.6%); of the modal folds' trades 0, of the other folds' 1,651 (26.6% of them)
@@ -172,13 +209,49 @@ above: supply), far = the zone on the target side (for a long: supply above)
   1       near only    2,650  0.524  43.2%   37.7%  -0.146    0.84   -2.55  -17.27
   1       far only     2,300  0.455  45.7%   52.3%  -0.053    0.51    0.88  -12.91
   1       both           108  0.021  53.7%   61.1%  -0.095    0.39   -6.18  -19.48
+  1       near, any    2,758  0.545  43.6%   38.7%  -0.144    0.82   -2.69  -17.36
   6       near only    2,441  0.494  44.9%   39.2%  -0.043    0.90    8.95   -5.30
   6       far only     2,428  0.491  46.7%   53.4%  -0.006    0.52   12.02   -1.38
   6       both            71  0.014  47.9%   56.3%  -0.108    0.50  -18.91  -31.39
+  6       near, any    2,512  0.509  45.0%   39.7%  -0.044    0.89    8.16   -6.03
   1 and 6 near only    5,091  0.509  44.0%   38.5%  -0.096    0.87    2.96  -11.53
   1 and 6 far only     4,728  0.473  46.2%   52.9%  -0.028    0.52    6.60   -6.99
   1 and 6 both           179  0.018  51.4%   59.2%  -0.100    0.42  -11.23  -24.20
-  consistency: branch 1 and 6 trades touching neither zone 0, with a NaN level 0 (0 and 0 expected)
+  1 and 6 near, any    5,270  0.527  44.3%   39.2%  -0.096    0.86    2.48  -11.96
+  consistency: branch 1 and 6 trades touching neither zone 0, with a NaN level 0 (0 and 0 expected); "near, any" = near only + both
+
+how concentrated the gross is, by New York date of the signal (Mon-Fri dates in the OOS span: 1,565 with a market move)
+  before-costs Sharpe 0.67 over 2,191 days: as a t, 0.67 x sqrt(2191 / 365) = 1.64 (one comparison; no deflation for N)
+  all trades: 11,337 trades on 1,438 dates; gross per trade 2.42 bp, t clustered by date 1.19; each date weighted equally -3.95 bp, t -1.92
+    without the top 10 dates: gross per trade 0.06 bp over 11,163 trades (removed 174 trades, short share 98.9%)
+    without the top 20 dates: gross per trade -1.58 bp over 10,969 trades (removed 368 trades, short share 99.2%)
+    top 10 dates by summed gross (27,459 bp summed over all its trades):
+      date       trades  short  gross bp  share  market   down      rank
+      2021-05-21     18 100.0%     5,567  20.3% -15.64% 17 of 17    1 of 1,565
+      2021-06-18     12 100.0%     2,825  10.3%  -4.96% 17 of 17   55 of 1,565
+      2022-11-09     17 100.0%     2,775  10.1%  -6.77% 16 of 17   16 of 1,565
+      2022-05-09     22 100.0%     2,537   9.2% -10.25% 17 of 17    6 of 1,565
+      2021-05-13     16  93.8%     2,264   8.2%  -5.50% 15 of 17   40 of 1,565
+      2024-12-19     16 100.0%     2,220   8.1%  -9.18% 17 of 17    7 of 1,565
+      2025-10-30     20 100.0%     2,212   8.1%  -2.85% 17 of 17  153 of 1,565
+      2024-12-10     18  94.4%     2,190   8.0%  -1.12% 15 of 17  427 of 1,565
+      2026-06-05     19 100.0%     2,152   7.8%  -3.70% 16 of 17   86 of 1,565
+      2025-03-10     16 100.0%     2,084   7.6%  -6.66% 17 of 17   18 of 1,565
+  branch 6 (exact): 4,940 trades on 766 dates; gross per trade 10.06 bp, t clustered by date 2.86; each date weighted equally -4.50 bp, t -1.37
+    without the top 10 dates: gross per trade 5.02 bp over 4,765 trades (removed 175 trades, short share 100.0%)
+    without the top 20 dates: gross per trade 1.58 bp over 4,626 trades (removed 314 trades, short share 100.0%)
+    top 10 dates by summed gross (49,685 bp summed over all its trades):
+      date       trades  short  gross bp  share  market   down      rank
+      2021-05-21     18 100.0%     5,567  11.2% -15.64% 17 of 17    1 of 1,565
+      2021-06-18     12 100.0%     2,825   5.7%  -4.96% 17 of 17   55 of 1,565
+      2024-12-10     17 100.0%     2,642   5.3%  -1.12% 15 of 17  427 of 1,565
+      2022-05-09     21 100.0%     2,401   4.8% -10.25% 17 of 17    6 of 1,565
+      2024-12-19     16 100.0%     2,220   4.5%  -9.18% 17 of 17    7 of 1,565
+      2025-10-30     20 100.0%     2,212   4.5%  -2.85% 17 of 17  153 of 1,565
+      2025-03-10     16 100.0%     2,084   4.2%  -6.66% 17 of 17   18 of 1,565
+      2021-01-11     19 100.0%     2,001   4.0%  -1.94% 14 of 17  278 of 1,565
+      2026-02-05     19 100.0%     1,913   3.9% -12.22% 17 of 17    4 of 1,565
+      2021-11-18     17 100.0%     1,898   3.8%  -0.95% 12 of 17  468 of 1,565
 
 risk at entry, % of equity: p10 1.000, p25 1.000, p50 1.000, p75 1.000; under 0.99% (the 3x notional cap binds) 0.0%
 mean R by exit reason: signal -0.178 (2,566), stop -0.736 (3,577), target 0.435 (5,194)
