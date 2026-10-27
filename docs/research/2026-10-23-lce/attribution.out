@@ -71,6 +71,21 @@ planned R:R = (target - entry_price) / (entry_price - stop_init), times the side
     >= 2                6  0.000  33.3%   33.3%  -0.572    2.91  -11.34
     < 0.5 (both)   15,249  0.594  30.0%   69.0%  -0.392   -3.47  -16.05
 
+which zone the signal bar touched, branches 1 and 6 (their at_zone), each trade under its own combo:
+near = the zone on the stop side (for a long the one at or below the close: demand; for a short the one
+above: supply), far = the zone on the target side (for a long: supply above)
+  branch  touched     trades  share    win  target  mean R R:R p50   gross     net
+  1       near only    3,643  0.370  39.9%   51.7%  -0.555    0.54   -2.34  -15.93
+  1       far only     2,210  0.225  32.0%   67.3%  -0.296    0.30   -1.17  -13.66
+  1       both         3,982  0.405  33.3%   59.8%  -0.470    0.34   -4.27  -17.09
+  6       near only    4,106  0.366  44.3%   55.0%  -0.471    0.57   -0.72  -14.03
+  6       far only     2,781  0.248  32.8%   69.8%  -0.274    0.25   -0.84  -13.27
+  6       both         4,321  0.386  36.1%   62.0%  -0.417    0.34   -3.38  -15.98
+  1 and 6 near only    7,749  0.368  42.2%   53.4%  -0.510    0.56   -1.48  -14.93
+  1 and 6 far only     4,991  0.237  32.5%   68.7%  -0.284    0.27   -0.99  -13.44
+  1 and 6 both         8,303  0.395  34.8%   60.9%  -0.442    0.34   -3.81  -16.51
+  consistency: branch 1 and 6 trades touching neither zone 0, with a NaN level 0 (0 and 0 expected)
+
 risk at entry, % of equity: p10 0.721, p25 0.882, p50 1.000, p75 1.000; under 0.99% (the 3x notional cap binds) 34.7%
 mean R by exit reason: signal -0.548 (150), stop -1.327 (10,190), target 0.160 (15,312)
 trades with nonzero funding: 1.5%
@@ -149,6 +164,21 @@ planned R:R = (target - entry_price) / (entry_price - stop_init), times the side
     1-2             2,170  0.191  35.8%   27.8%  -0.138   -1.86  -16.81
     >= 2               22  0.002  36.4%   18.2%  -0.073   -2.99  -19.07
     < 0.5 (both)    3,795  0.335  52.1%   72.5%  -0.065   -1.47  -13.84
+
+which zone the signal bar touched, branches 1 and 6 (their at_zone), each trade under its own combo:
+near = the zone on the stop side (for a long the one at or below the close: demand; for a short the one
+above: supply), far = the zone on the target side (for a long: supply above)
+  branch  touched     trades  share    win  target  mean R R:R p50   gross     net
+  1       near only    2,650  0.524  43.2%   37.7%  -0.146    0.84   -2.55  -17.27
+  1       far only     2,300  0.455  45.7%   52.3%  -0.053    0.51    0.88  -12.91
+  1       both           108  0.021  53.7%   61.1%  -0.095    0.39   -6.18  -19.48
+  6       near only    2,441  0.494  44.9%   39.2%  -0.043    0.90    8.95   -5.30
+  6       far only     2,428  0.491  46.7%   53.4%  -0.006    0.52   12.02   -1.38
+  6       both            71  0.014  47.9%   56.3%  -0.108    0.50  -18.91  -31.39
+  1 and 6 near only    5,091  0.509  44.0%   38.5%  -0.096    0.87    2.96  -11.53
+  1 and 6 far only     4,728  0.473  46.2%   52.9%  -0.028    0.52    6.60   -6.99
+  1 and 6 both           179  0.018  51.4%   59.2%  -0.100    0.42  -11.23  -24.20
+  consistency: branch 1 and 6 trades touching neither zone 0, with a NaN level 0 (0 and 0 expected)
 
 risk at entry, % of equity: p10 1.000, p25 1.000, p50 1.000, p75 1.000; under 0.99% (the 3x notional cap binds) 0.0%
 mean R by exit reason: signal -0.178 (2,566), stop -0.736 (3,577), target 0.435 (5,194)

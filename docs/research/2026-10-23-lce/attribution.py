@@ -38,6 +38,13 @@ For each judged plugin (lce_pct, then lce_atr):
     (the bracket's own plan, before the gap to the next open) is printed for comparison. Quartiles, the
     shares below 0.5 and 1.0, and per bucket (<= 0, 0-0.5, 0.5-1, 1-2, >= 2; and < 0.5 together):
     trades, win rate, target-exit share, mean R, gross and net bp per trade.
+  Which zone the signal bar touched, for branches 1 and 6 (whose condition includes at_zone: the bar's
+    range overlaps the zone just below the close or the one just above it, either side). From each trade's
+    own combo's level features at the signal bar (z_dn_c, z_up_lo, z_up_c, z_up2_c, from which the two
+    zones and their half-width follow as level_features draws them) and the bar's low and high. "Near":
+    the zone on the stop side, which the flowchart means ("buy dips into the cloud at demand": for a long,
+    the zone at or below the close). "Far": the zone on the target side (for a long, supply above). Per
+    branch: near only, far only, both, with the per-group line.
   From oos_trades alone, for the note's claims and fidelity sections: risk at entry as a share of equity
     (qty x |entry_price - stop_init| / equity_before; 1% unless the 3x-equity notional cap binds),
     mean R by exit reason, the share of trades that paid or received funding, the share of fills before
@@ -72,6 +79,7 @@ from perp_lab.validate.walkforward import combo_key, modal_params
 
 RUNS = {"lce_pct": "20261027-071510-8626d9", "lce_atr": "20261027-075940-4464e6"}     # trials 8 and 9
 SIDES = np.array([0, 1, 1, -1, 1, -1, -1])                    # by branch, as the plugin's SIDES
+LEVELS = ["z_dn_c", "z_up_lo", "z_up_c", "z_up2_c"]          # the signal bar's nearest levels (features)
 COLS = ["symbol", "side", "signal_time", "entry_time", "exit_time", "entry_price", "qty", "notional",
         "stop_init", "target", "exit_reason", "fees", "slippage", "funding", "pnl_gross", "pnl",
         "equity_before", "r_multiple", "fold", "combo"]
@@ -99,22 +107,25 @@ def features(cfg, src: PluginSource, sym: str, bars: pd.DataFrame, params: dict,
 
 
 def per_coin(cfg, plans: dict, sym: str) -> dict:
-    """For each plugin: the branch at each of the coin's trades' signal bars under every combo in its plan,
-    the signal bars' closes, and (modal combo) the session days' level spacing."""
+    """For each plugin: the branch and the nearest levels at each of the coin's trades' signal bars under
+    every combo in its plan, the signal bars' close, low and high, and (modal combo) the session days'
+    level spacing."""
     bars = load_bars(cfg, sym, TF)
     t = bars.open_time.to_numpy(np.int64)
     assert len(t) and t.max() < HOLDOUT.value // 10**6, sym
-    close = bars.close.to_numpy(float)
+    close, low, high = (bars[c].to_numpy(float) for c in ("close", "low", "high"))
     out = {}
     for name, (src, combos, modal, trades) in plans.items():
         sig = trades.loc[trades.symbol == sym, "signal_time"].to_numpy(np.int64)
         i = np.searchsorted(t, sig)
         assert (i < len(t)).all() and (t[np.minimum(i, len(t) - 1)] == sig).all(), (name, sym)
-        res = {"index": trades.index[trades.symbol == sym], "close": close[i], "branch": {}}
+        res = {"index": trades.index[trades.symbol == sym], "close": close[i], "low": low[i], "high": high[i],
+               "branch": {}, "levels": {}}
         for key, params in combos.items():
-            cols = ["sig_branch"] + (["sday", "anchor_fb", "spacing_u"] if key == modal else [])
+            cols = ["sig_branch"] + LEVELS + (["sday", "anchor_fb", "spacing_u"] if key == modal else [])
             f = features(cfg, src, sym, bars, params, cols)
             res["branch"][key] = f.sig_branch.to_numpy()[i].astype(int)
+            res["levels"][key] = f[LEVELS].to_numpy()[i]
             if key == modal:
                 days = f.groupby("sday", sort=True)[["anchor_fb", "spacing_u"]].first()
                 res["spacing"] = days.loc[days.anchor_fb.notna(), "spacing_u"].dropna().to_numpy()
@@ -217,6 +228,21 @@ def report(name: str, src: PluginSource, v: dict, s: dict, d: Path, t: pd.DataFr
         print(f"    {label:<13} {st['trades']:>7,} {st['trades'] / n:>6.3f} {st['win']:>6.1%} {st['target']:>7.1%}"
               f" {st['r']:>7.3f} {st['gross']:>7.2f} {st['net']:>7.2f}")
 
+    print("\nwhich zone the signal bar touched, branches 1 and 6 (their at_zone), each trade under its own combo:"
+          "\nnear = the zone on the stop side (for a long the one at or below the close: demand; for a short the one"
+          "\nabove: supply), far = the zone on the target side (for a long: supply above)")
+    print(f"  {'branch':<7} {'touched':<10} {'trades':>7} {'share':>6} {'win':>6} {'target':>7} {'mean R':>7}"
+          f" {'R:R p50':>7} {'gross':>7} {'net':>7}")
+    for label, br in (("1", [1]), ("6", [6]), ("1 and 6", [1, 6])):
+        g = t[t.br_own.isin(br)]
+        for kind, m in (("near only", g.near & ~g.far), ("far only", g.far & ~g.near), ("both", g.near & g.far)):
+            st = stats(g[m])
+            print(f"  {label:<7} {kind:<10} {st['trades']:>7,} {st['trades'] / len(g):>6.3f} {st['win']:>6.1%}"
+                  f" {st['target']:>7.1%} {st['r']:>7.3f} {st['rr']:>7.2f} {st['gross']:>7.2f} {st['net']:>7.2f}")
+    g = t[t.br_own.isin([1, 6])]
+    print(f"  consistency: branch 1 and 6 trades touching neither zone {int((~g.near & ~g.far).sum())},"
+          f" with a NaN level {int(g.lv_nan.sum())} (0 and 0 expected)")
+
     risk = t.qty * (t.entry_price - t.stop_init).abs() / t.equity_before * 100
     print(f"\nrisk at entry, % of equity: {q(risk, (0.1, 0.25, 0.5, 0.75))}; under 0.99% (the 3x notional cap binds) "
           f"{(risk < 0.99).mean():.1%}")
@@ -269,20 +295,34 @@ def main():
         src, v, s, d = meta[name]
         _, combos, modal, t = plans[name]
         t = t.copy()
-        t["br_modal"], t["br_own"], t["close"] = 0, 0, np.nan
+        t["br_modal"], t["br_own"] = 0, 0
+        t["close"], t["low"], t["high"] = np.nan, np.nan, np.nan
+        lv = np.full((len(t), len(LEVELS)), np.nan)
         for sym in syms:
             r = res[sym][name]
             idx = r["index"]
             t.loc[idx, "br_modal"] = r["branch"][modal]
-            t.loc[idx, "close"] = r["close"]
+            t.loc[idx, ["close", "low", "high"]] = np.c_[r["close"], r["low"], r["high"]]
             own = t.loc[idx, "combo"].to_numpy()
             t.loc[idx, "br_own"] = np.select([own == k for k in r["branch"]], list(r["branch"].values()), -1)
+            pos = t.index.get_indexer(idx)
+            for k, x in r["levels"].items():
+                lv[pos[own == k]] = x[own == k]
         assert (t.br_own >= 0).all(), name
         t["br_modal"], t["br_own"] = t.br_modal.astype(int), t.br_own.astype(int)
         risk = (t.entry_price - t.stop_init) * t.side
         assert (risk > 0).all(), name
         t["rr_fill"] = (t.target - t.entry_price) * t.side / risk
         t["rr_close"] = (t.target - t.close) * t.side / ((t.close - t.stop_init) * t.side)
+        # The two zones at_zone looks at, as level_features draws them: the one whose centre d1 is the
+        # highest <= close, and the one whose centre u1 is the lowest > close; half-width hb (zone u / 2).
+        dn, up_lo, up_c, up2_c = lv.T
+        hb = np.where(up_lo < up_c, up_c - up_lo, up2_c - up_lo)        # z_up_lo is u1 - hb, else u2 - hb
+        u1 = np.where(up_c > t.close, up_c, up2_c)                      # z_up_c is d1 when d1 == close
+        below, above = t.low.to_numpy() <= dn + hb, t.high.to_numpy() >= u1 - hb
+        long = t.side.to_numpy() == 1
+        t["near"], t["far"] = np.where(long, below, above), np.where(long, above, below)
+        t["lv_nan"] = np.isnan(dn + hb + u1)
         report(name, src, v, s, d, t, modal, {"spacing": [res[sym][name]["spacing"] for sym in syms]})
 
 
