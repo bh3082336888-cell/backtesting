@@ -53,6 +53,7 @@ function build() {
   scale = new Scale(chart, series);
   shade = new ShadeLayer(scale);
   trades = new TradeLayer(scale);
+  trades.keepClear = logoBox;
   series.attachPrimitive(shade);
   series.attachPrimitive(trades);
   markers = LWC.createSeriesMarkers(series, []);
@@ -62,6 +63,17 @@ function build() {
   el.fit.addEventListener("click", fit);
   el.goto.addEventListener("click", () => goTo(payload, false));
   el.signal.addEventListener("change", () => payload && drawTrades(payload));
+}
+
+/** TradingView's attribution logo (kept on, as its licence asks) in pane pixels, so time tags stay clear of it. */
+function logoBox() {
+  const logo = el.chart.querySelector("#tv-attr-logo");
+  if (!logo || !logo.parentElement) return null;
+  const r = logo.getBoundingClientRect();
+  const pane = logo.parentElement.getBoundingClientRect();
+  if (!r.width) return null;
+  return { left: r.left - pane.left - 2, right: r.right - pane.left + 2, top: r.top - pane.top - 2,
+           bottom: r.bottom - pane.top + 2 };
 }
 
 // ---------------------------------------------------------------- drawing a payload

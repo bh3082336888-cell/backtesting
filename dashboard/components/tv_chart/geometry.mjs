@@ -107,10 +107,11 @@ export function visibleTags(tags, x, width) {
 
 /** Time tags laid out at the foot of the pane so none overprints another. Each tag {x, w, side} sits beside its
  *  time's line (an entry tag ends at it, an exit tag starts at it), kept inside [0, width], and takes the lowest
- *  row (0 at the foot) where it clears the tags already there, left to right. Returns the tags with `left` and
- *  `row`. */
-export function stackTags(tags, width, gap = 2) {
+ *  row (0 at the foot) where it clears the tags already there, left to right, and the `keepClear` slots
+ *  ([row, left, right], such as TradingView's logo). Returns the tags with `left` and `row`. */
+export function stackTags(tags, width, { gap = 2, keepClear = [] } = {}) {
   const rows = [];
+  for (const [row, l, r] of keepClear) (rows[row] = rows[row] || []).push([l, r]);
   return [...tags].sort((a, b) => a.x - b.x).map((t) => {
     const left = Math.max(0, Math.min(t.side === "entry" ? t.x - t.w : t.x, width - t.w));
     const right = left + t.w;
@@ -119,6 +120,17 @@ export function stackTags(tags, width, gap = 2) {
     (rows[row] = rows[row] || []).push([left, right]);
     return { ...t, left, row };
   });
+}
+
+/** The tag-row slots ([row, left, right]) a box covers, for `stackTags` to keep clear of: row k spans
+ *  [foot - k·step, foot - k·step + tagH]. */
+export function slotsUnder(box, foot, step, tagH) {
+  const out = [];
+  for (let k = 0; foot - k * step + tagH > box.top; k++) {
+    const top = foot - k * step;
+    if (top < box.bottom) out.push([k, box.left, box.right]);
+  }
+  return out;
 }
 
 /** Where a trade's R:R label goes: centred on the part of the trade in view, at the reward box's far edge and

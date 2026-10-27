@@ -7,11 +7,12 @@
 // profile) are further Layers.
 
 import {
-  BOX_ALPHA, EDGE_ALPHA, hitTrade, labelSpot, spanRects, stackTags, stepLines, timeToLogical, tradeShapes,
-  visibleTags, withAlpha,
+  BOX_ALPHA, EDGE_ALPHA, hitTrade, labelSpot, slotsUnder, spanRects, stackTags, stepLines, timeToLogical,
+  tradeShapes, visibleTags, withAlpha,
 } from "./geometry.mjs";
 
 const TAG_H = 16;            // time tag height, px
+const TAG_STEP = TAG_H + 2;  // one row of time tags to the next
 const FONT = "system-ui, sans-serif";
 
 /** Times (epoch ms) and prices to CSS pixels on the chart's main pane. Times between bars land between them,
@@ -211,6 +212,7 @@ export class TradeLayer extends Layer {
   constructor(scale) {
     super(scale);
     this.hits = [];
+    this.keepClear = () => null;    // the pane box time tags must not cover (TradingView's logo), if any
   }
 
   draw(ctx, size, z) {
@@ -256,9 +258,11 @@ export class TradeLayer extends Layer {
     ctx.font = `11px ${this.font}`;
     const shown = tagged.flatMap((tr) => visibleTags(tr.time_tags, x, size.width))
       .map((t) => ({ ...t, w: ctx.measureText(t.text).width + 8 }));
-    const foot = size.height - TAG_H - 2;
-    for (const t of stackTags(shown, size.width)) {
-      const top = foot - t.row * (TAG_H + 2);
+    const foot = size.height - TAG_STEP;
+    const logo = this.keepClear();
+    const keepClear = logo ? slotsUnder(logo, foot, TAG_STEP, TAG_H) : [];
+    for (const t of stackTags(shown, size.width, { keepClear })) {
+      const top = foot - t.row * TAG_STEP;
       ctx.globalAlpha = 0.6;
       polyline(ctx, [[t.x, 0], [t.x, top]], t.color, 1, [1, 3]);
       ctx.globalAlpha = 1;

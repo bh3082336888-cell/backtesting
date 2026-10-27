@@ -4,8 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  boxRects, focusRange, focusTrade, hitTrade, labelSpot, spanRects, stackTags, stepLines, timeToLogical, tradeShapes,
-  visibleTags, withAlpha,
+  boxRects, focusRange, focusTrade, hitTrade, labelSpot, slotsUnder, spanRects, stackTags, stepLines, timeToLogical,
+  tradeShapes, visibleTags, withAlpha,
 } from "./geometry.mjs";
 
 const x = (t) => (t - 1000) / 10;      // 10 ms per pixel, t = 1000 at the left edge
@@ -59,6 +59,15 @@ test("time tags that would overprint stack in rows above the foot", () => {
     ["14:30 exit", 150, 1],
   ]);
   assert.equal(stackTags([{ x: 395, w: 80, side: "exit" }], 400)[0].left, 320);   // kept inside on the right
+});
+
+test("time tags keep clear of TradingView's logo at the foot of the pane", () => {
+  // a 300 px pane: the logo 10 px in from the bottom left (35 x 19); tags 16 px high, rows 18 px apart from y 282
+  const logo = slotsUnder({ left: 10, right: 45, top: 271, bottom: 290 }, 282, 18, 16);
+  assert.deepEqual(logo, [[0, 10, 45], [1, 10, 45]]);
+  const tags = [{ x: 30, w: 80, side: "exit", text: "by the logo" }, { x: 200, w: 60, side: "exit", text: "clear" }];
+  assert.deepEqual(stackTags(tags, 400, { keepClear: logo }).map((t) => [t.text, t.left, t.row]),
+                   [["by the logo", 30, 2], ["clear", 200, 0]]);
 });
 
 test("a time maps to a logical index between bars, and past the ends at the bar interval", () => {
