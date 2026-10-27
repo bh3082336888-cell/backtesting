@@ -194,7 +194,7 @@ Spec: the section "Amendment (2026-10-27): the chart engine is TradingView Light
     - `risk box ends at the breakeven time`
     - `time tags skip times outside the visible range`
 - [ ] **Step 2:** Run `.venv/bin/python -m pytest -q tests/test_tv_chart.py` and
-  `node --test dashboard/components/tv_chart/`. Expected: FAIL.
+  `node --test 'dashboard/components/tv_chart/*.test.mjs'`. Expected: FAIL.
 - [ ] **Step 3:** Implement. Vendor the library: `npm pack lightweight-charts@5.2.1` into a temp
   directory, then copy `dist/lightweight-charts.standalone.production.js`, `LICENSE` and `NOTICE`.
   - **Chart:** `createChart` with the dashboard palette (dark and light), the time scale in UTC,
@@ -207,7 +207,7 @@ Spec: the section "Amendment (2026-10-27): the chart engine is TradingView Light
     The crosshair-move handler shows the trade tooltip in a floating div when inside a box.
   - **Python side:** register the component with
     `components.declare_component("tv_chart", path=...)`.
-- [ ] **Step 4:** Run `.venv/bin/python -m pytest -q tests/test_tv_chart.py tests/test_trade_chart.py tests/test_dashboard.py` and `node --test dashboard/components/tv_chart/`. Expected: PASS.
+- [ ] **Step 4:** Run `.venv/bin/python -m pytest -q tests/test_tv_chart.py tests/test_trade_chart.py tests/test_dashboard.py` and `node --test 'dashboard/components/tv_chart/*.test.mjs'`. Expected: PASS.
 - [ ] **Step 5:** Smoke-check it in a browser. Start the dashboard from this worktree on port 8502:
   `STREAMLIT_SERVER_HEADLESS=true .venv/bin/lab dashboard --port 8502` (a separate port, so it
   doesn't clash with the one on 8501). Open a run with trades in Playwright if available, otherwise
