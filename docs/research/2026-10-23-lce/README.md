@@ -14,8 +14,10 @@ makes.
 
 In short:
 - **`lce_pct` loses before costs:** −2.47 bp per trade gross.
-- **`lce_atr` has a small edge before costs:** +2.42 bp per trade gross. Binance's costs, about
-  14 bp per trade, swamp it.
+- **`lce_atr` has a small positive gross:** +2.42 bp per trade. Binance's costs, about 14 bp per
+  trade, swamp it.
+  - It is not an edge the data can tell from luck. Its t clustered by date is 1.19.
+  - Ten market-wide sell-off days carry almost all of it: without them it is +0.06 bp.
 - Neither result looks like Tradewriter's account of his own trading:
   - The bracket's planned reward to risk, at the signal bar's close, has a median of 0.558
     (`lce_pct`) and 0.666 (`lce_atr`), against his 1.5–2R.
@@ -98,12 +100,17 @@ ask whether the trades make money before costs. Read plainly, the numbers say th
   8.21 bp and slippage 4.74 bp, 12.95 bp a trade in all.
 - Gross is negative on both sides (verdict): long −2.94 bp, short −2.06 bp.
 
-**`lce_atr` has a small positive edge before costs, and costs swamp it.**
+**`lce_atr` has a small positive gross, and costs swamp it.**
 - Gross is +2.42 bp per trade. The before-costs Sharpe is +0.67, against a random p95 of +0.49,
   at the 97.5th percentile of the random runs (verdict).
 - Fees (8.62 bp), slippage (5.26 bp) and funding (0.15 bp) add up to 14.03 bp a trade, so net is
   −11.61 bp.
-- The gross edge is all on the short side (verdict): short +7.55 bp, long −2.56 bp.
+- The positive gross is all on the short side (verdict): short +7.55 bp, long −2.56 bp.
+- **It is statistically weak and comes from a few days** (section 3, "By date"):
+  - The before-costs Sharpe of 0.67 over 2,191 days is a t of about 1.64, from one comparison
+    among N = 9 trials, with no deflation applied.
+  - The gross per trade has a t of 1.19 when clustered by date.
+  - Each date weighted equally gives −3.95 bp.
 - By the regime at the signal (verdict), gross is:
 
   | regime | gross, bp | trades |
@@ -127,10 +134,17 @@ time, in a sealed sandbox worker on research bars, and `sig_branch` is joined at
 - The modal params are the combo selected in the most folds, as
   `walkforward.modal_params` computes it. For both plugins that is `theta = 0.02, vp_days = 5`,
   which equals each run's sensitivity base.
-- Modal-param branches are wrong for trades from folds that picked another combo. So
-  `attribution.py` also attributes **each trade under its own fold's combo**, rerunning every combo
-  some fold selected. That cross-check is exact: under its own combo, every one of the 36,989
-  trades' signal bars has a branch on the trade's side.
+- For `lce_atr` that is a tie:
+  - `vp_days = 5` and `vp_days = 10` (both at `theta = 0.02`) were each selected in 17 folds.
+  - `modal_params` takes the first combo `value_counts` lists, and `value_counts` keeps tied combos
+    in their order of first appearance.
+  - Fold 0 selected `vp_days = 5`, so the tie went to it. The judge's sensitivity check and
+    random-entry benchmark used the same params.
+- Modal-param branches can be wrong for trades from folds that picked another combo: 94.0%
+  (`lce_pct`) and 73.2% (`lce_atr`) of those trades get the same branch. So `attribution.py` also
+  attributes **each trade under its own fold's combo**, rerunning every combo some fold selected.
+  That cross-check is exact: under its own combo, every one of the 36,989 trades' signal bars has a
+  branch on the trade's side.
 
 | | `lce_pct` | `lce_atr` |
 |---|---|---|
@@ -186,15 +200,15 @@ The modal-params table for `lce_atr` (in `attribution.out`) tells the same story
 - branch 1: −2.35 bp;
 - 1,651 trades with no branch: +8.20 bp.
 
-**Branch 6 carries `lce_atr`'s gross edge.** Branch 6 sells the rip into the cloud at a zone, with
-both clouds bearish: +10.06 bp over 4,940 trades. Against it:
+**Branch 6 carries `lce_atr`'s positive gross.** Branch 6 sells the rip into the cloud at a zone,
+with both clouds bearish: +10.06 bp over 4,940 trades. Against it:
 - branch 1, its long mirror, is −1.07 bp over 5,058 trades;
 - the trend-flip branches 2 and 5 lose 14.03 and 12.57 bp gross;
 - branches 3 and 4 have 41 trades between them, too few to read.
 
 Branch 3 is the only branch that is net positive, on 17 trades. Branch 6 nets −3.75 bp.
 
-The edge is not stable across folds or years (attribution):
+The positive gross is not stable across folds or years (attribution):
 
 | folds that selected | folds | trades | gross, bp | net, bp | branch 6 gross, bp |
 |---|---|---|---|---|---|
@@ -211,6 +225,49 @@ By year of the signal, gross runs:
 | gross, bp | +8.62 | +3.71 | −7.73 | +5.14 | +5.06 | −0.38 | +3.99 |
 
 Net is negative in every year, from −8.65 to −21.31 bp.
+
+**By date** (attribution, "how concentrated the gross is"). Each trade is dated by the New York date
+of its signal. "Clustered t" treats the trades of one date as one draw, because the 17 coins trade
+the same session. The market's move is the equal-weight mean, over the coins, of
+close(15:55) / close(09:40) − 1. Its rank is among the 1,565 weekdays of the OOS span, where 1 is
+the worst.
+
+| | `lce_atr`, all trades | `lce_atr`, branch 6 | `lce_pct`, all trades |
+|---|---|---|---|
+| trades, dates | 11,337 on 1,438 | 4,940 on 766 | 25,652 on 1,551 |
+| gross per trade, bp (t clustered by date) | +2.42 (1.19) | +10.06 (2.86) | −2.47 (−11.04) |
+| each date weighted equally, bp (t) | −3.95 (−1.92) | −4.50 (−1.37) | −2.18 (−9.39) |
+| without the top 10 dates | +0.06 | +5.02 | −2.60 |
+| without the top 20 dates | −1.58 | +1.58 | −2.72 |
+| trades on the top 10 dates; short share | 174; 98.9% | 175; 100.0% | 167; 76.0% |
+
+What it shows:
+- **`lce_atr`'s ten best dates carry almost all of its gross.** Their shares of the summed gross
+  are 20.3%, 10.3%, 10.1%, 9.2%, 8.2%, 8.1%, 8.1%, 8.0%, 7.8% and 7.6%. Every one is a session in
+  which 15 to 17 of the 17 coins fell, and nine of the ten rank among the worst 160 of 1,565:
+
+  | date | market's move | rank (of 1,565) | note |
+  |---|---|---|---|
+  | 2021-05-21 | −15.64% | 1 | |
+  | 2021-06-18 | −4.96% | 55 | |
+  | 2022-11-09 | −6.77% | 16 | the FTX collapse |
+  | 2022-05-09 | −10.25% | 6 | the LUNA collapse |
+  | 2021-05-13 | −5.50% | 40 | |
+  | 2024-12-19 | −9.18% | 7 | |
+  | 2025-10-30 | −2.85% | 153 | |
+  | 2024-12-10 | −1.12% | 427 | |
+  | 2026-06-05 | −3.70% | 86 | |
+  | 2025-03-10 | −6.66% | 18 | |
+
+  On those days the plugin took 12 to 22 trades across the coins, 94% to 100% of them short. That
+  is one correlated bet on a falling market, not that many independent trades.
+- **On a typical date `lce_atr` loses before costs.** Weighting each date equally gives −3.95 bp.
+- **Branch 6's +10.06 bp follows the same pattern.** Its clustered t is 2.86, but weighting each
+  date equally gives −4.50 bp, and its top 10 dates include seven of the ten above. It is also one
+  of six branches, singled out after the result.
+- **`lce_pct`'s loss is broad, not a few bad days.** It loses on a typical date (−2.18 bp, t −9.39),
+  and removing its best dates makes the gross worse (−2.60, −2.72). Its top dates hold modest sums
+  (328 bp at most) and include ordinary market days.
 
 ## 4. Against his claims
 
@@ -295,11 +352,11 @@ plausibly turn these results into a pass.
 | 5 | **Crypto has no 9:30 open auction.** The window is clock time only. | 64.6% / 53.9% of fills came before noon. | **Plausibly.** ES's open dynamics don't exist on crypto. This is what the ES leg tests. |
 | 6 | **Volume profiles** come from 5m bars, not intrabar data. | The spacing lands near the step (median 0.279 / 0.271 u); the anchor falls back on 3.9% / 0% of days. | Unlikely on its own. |
 | 7 | **Several coins.** He takes at most 2 trades a day in all; we allow 2 a day per coin, across 17 coins. | 16.39 and 7.24 trades per weekday across the book, on average; 0 of 17 coins net positive in either trial. | No. It changes the count and the weights, not the bp per trade, and no coin was positive. |
-| 8 | Found: **"at a level" ignores the side.** Branches 1 and 6 need `at_zone`: the bar overlaps the zone just below the close *or* the one just above. "Buy dips into the cloud at demand" means the zone on the stop side. A long can fire on a bar that touched the supply above it, and its target is then that zone's lower edge. Branches 2–5's `touched` ignores the side in the same way (not measured here). | Among branch 1 and 6 trades: far zone only 23.7% for `lce_pct` and 47.3% for `lce_atr`; both zones 39.5% and 1.8%; near zone only 36.8% and 50.9%. Median planned R:R is 0.27 for far only and 0.56 for near only (`lce_pct`); 0.52 and 0.87 (`lce_atr`). | **Not on this evidence.** The trades that follow the rule as taught (near only) do no better before costs than the far-only ones: −1.48 against −0.99 bp (`lce_pct`), +2.96 against +6.60 bp (`lce_atr`). |
+| 8 | Found: **"at a level" ignores the side.** Branches 1 and 6 need `at_zone`: the bar overlaps the zone just below the close *or* the one just above. "Buy dips into the cloud at demand" means the zone on the stop side. A long can fire on a bar that touched only the supply above it. Its target is then that zone's lower edge when the close is below the zone, or the next zone's lower edge when the close is inside it. Branches 2–5's `touched` ignores the side in the same way (not measured here). | Among branch 1 and 6 trades: far zone only 23.7% for `lce_pct` and 47.3% for `lce_atr`; both zones 39.5% and 1.8%; near zone only 36.8% and 50.9%. Median planned R:R is 0.27 for far only and 0.56 for near only (`lce_pct`); 0.52 and 0.87 (`lce_atr`). | **Not on this evidence.** The trades that touched the zone the flowchart means (near, with or without far: 76.3% of `lce_pct`'s branch 1 and 6 trades, 52.7% of `lce_atr`'s) do no better before costs than the far-only ones: −2.69 against −0.99 bp (`lce_pct`), +2.48 against +6.60 bp (`lce_atr`). |
 | 9 | Found: **no minimum room to the target.** The bracket needs only stop < close < target, so trades with almost no room to the next zone are taken. He states 1.5–2R and would skip them. | See the table below. | **Not on crypto.** No slice by planned R:R is net positive. In `lce_pct`, gross rises with R:R but stays below costs. A gross of a few bp would matter at ES's costs, so the ES spec should state a rule here before any ES result. |
 | 10 | Found: **the 3×-equity notional cap.** A trade whose stop is closer than a third of a percent of price can't risk the full 1% of equity; he risks the same on every trade. | Risk at entry was under 0.99% of equity on 34.7% of `lce_pct`'s trades (p10 0.721%) and 0.0% of `lce_atr`'s. | No. It changes the weights in the equity curve, not the bp per trade. |
-| 11 | Found: **the ±10/20% sensitivity tests fewer knobs than it lists.** `max_trades = 2` rounds back to 2, so it has no rows. `atr_n` doesn't enter `lce_pct` (its four rows all give −17.39). `vp_days` and `wait_bars` get two distinct values each. | The island test was n/a for both, since the base Sharpe was ≤ 0. | No. It limits the robustness check, which didn't decide anything here. |
-| 12 | Found: **funding is paid.** Binance's 16:00 UTC settlement is 11:00 or 12:00 New York, inside the session; the spec had called it immaterial for trades flat by 15:55. | Nonzero funding on 1.5% / 17.8% of trades; 0.01 / 0.15 bp a trade. | No. |
+| 11 | Found: **the ±10/20% sensitivity tests fewer knobs than it lists.** `max_trades = 2` rounds back to 2, so it has no rows. `atr_n` doesn't enter `lce_pct`: its four rows all equal the base Sharpe, −17.39 (summary.json's sensitivity rows, in the git-ignored run directory). `vp_days` and `wait_bars` get two distinct values each, and in `lce_pct` the `wait_bars = 7` row also equals the base exactly. | The island test was n/a for both, since the base Sharpe was ≤ 0. | No. It limits the robustness check, which didn't decide anything here. |
+| 12 | Found: **funding is paid.** Binance's 16:00 UTC settlement is 11:00 or 12:00 New York, inside the session; the plan ([`docs/superpowers/plans/2026-10-23-lce-model.md`](../../superpowers/plans/2026-10-23-lce-model.md)) had called it immaterial for trades flat by 15:55. | Nonzero funding on 1.5% / 17.8% of trades; 0.01 / 0.15 bp a trade. | No. |
 | 13 | Found: **the random benchmark takes fewer trades** than the strategy, because it fires on every in-session flat bar but can enter only where the bracket is valid. Accepted by the user on 2026-10-27 (spec, "Known residual"). | Ratios 0.934 and 0.989. With costs, fewer random trades make the benchmark harder to beat, and both plugins beat it anyway. | No. The kills come from Sharpe ≤ 0 and the Deflated Sharpe, not from the benchmark. |
 | 14 | Found (final code review): **the plugin's win reconstruction leaves out liquidation.** This is safe while the daily ATR stays under about 58% of price. | 0 liquidations in either run (verdict). | No. |
 
@@ -334,7 +391,8 @@ subset.
 
 The rules for these looks are in the spec ("Looks at real data before the trials"):
 - no forward returns, P&L, hit rate or R;
-- research bars only (`load_bars` stops at 2026-07-01, and every script asserts it);
+- research bars only: `load_bars` stops at 2026-07-01. `looks.py` and `looks_bracket.py` also
+  assert it; `perf.py` relies on `load_bars` alone, and computes only timing;
 - plugin code only inside the sandbox.
 
 No look found a bug, so no rule, constant or plugin line changed after them. The plugin hashes in
@@ -367,29 +425,44 @@ The spec leaves ES/SPX to its own spec ("ES leg"). It needs:
 - **The CME calendar:** holidays and early closes.
 - **A third, literal "points" translation:** u = 82.4 points, fixed.
 
-It would run the same plugin code, so the comparison is fair. On ES the three translations start
-from one calibration: u was set from ES's median ATR(14), 82.4 points, which is 1.169% of price. So
-they differ only as ES's price and volatility move away from those medians, and the ES leg tests the
-model more than the translation.
+It would run the same plugin code, so the comparison is fair.
 
-**Why trial 9's numbers make it worth running.** `lce_atr`'s gross was +2.42 bp a trade. Crypto's
-costs were about 14 bp a trade. An ES round trip costs about 0.5 bp:
+**The translations on ES.** The three translations start close together on ES. The spec's
+calibration gives ES's median ATR(14) as 82.4 points and its median close as 6,923, and states
+u = 1.169% of price.
+- 1.169% is not 82.4 / 6,923, which is 1.19%. It is presumably the median of the daily ATR / close
+  ratio, which need not equal the ratio of the two medians.
+- So at ES's median close, `lce_pct`'s u (0.01169 × 6,923 ≈ 80.9 points) is about 2% smaller than
+  the literal translation's 82.4 points.
+- `lce_atr`'s u follows ES's own ATR from day to day.
+
+They differ by that 2%, and by how far ES's price and volatility move from the medians. So the ES
+leg tests the model more than the translation.
+
+**What trial 9 says about the ES leg.** An ES round trip costs about 0.5 bp, against about 14 bp a
+trade on Binance:
 - one tick of 0.25 points at the median close of 6,923 is 0.36 bp;
 - commission adds roughly 0.1 bp on a full contract, and more per dollar on the micros he trades.
 
-The ES spec fixes the exact number. A gross edge of trial 9's size would clear that several times
-over.
+The ES spec fixes the exact number. At first sight, `lce_atr`'s +2.42 bp gross would clear that
+several times over. **But these trials give little basis for that hypothesis:**
+- **It is weak statistically.** The gross per trade has a t of 1.19 when clustered by date. The
+  before-costs Sharpe is a t of about 1.64: one comparison among N = 9 trials, not deflated.
+  Weighting each date equally, the gross is −3.95 bp.
+- **It comes from a few crypto crash days.** Without its ten best dates it is +0.06 bp. On those
+  dates the plugin was short most of the 17 coins at once, into market-wide crypto sell-offs (FTX,
+  LUNA and others; section 3, "By date"). That is correlated short exposure across coins, not
+  timing skill trade by trade. ES has neither the 17-coin stack nor these crypto-specific crashes.
+- **It rests on one branch and one side.** Branch 6 and the shorts carry it. It is positive in the
+  folds that selected `vp_days = 10` or `theta = 0.01`, −2.76 bp in the modal folds, and negative
+  in 2022 and 2025.
+- **The other translation lost.** `lce_pct` lost before costs, broadly: t −11.04 by date.
 
-**This is a hypothesis for the ES leg, not a result.**
-- The +2.42 bp is crypto's gross, not ES's.
-- It is one before-costs comparison (Sharpe 0.67 against a random p95 of 0.49) among N = 9 trials.
-- It rests on branch 6 and the short side.
-- It is positive in the folds that selected `vp_days = 10` or `theta = 0.01`, and −2.76 bp in the
-  modal folds. It is negative in 2022 and 2025.
-- The other translation, `lce_pct`, lost before costs.
-
-The ES leg is new trials, counted in N. Its rules should be fixed before any ES result is seen,
-including whether to require room to the target (gap 9).
+So "LCE has a small gross edge that ES's low costs would let through" has little support here. The
+ES leg can still answer the question the spec asked: whether LCE has a signal on the market it was
+built for. It should be argued from that question, not from trial 9. It is new trials, counted in
+N. Its rules should be fixed before any ES result is seen, including whether to require room to the
+target (gap 9).
 
 ## 9. What this ends
 
@@ -404,5 +477,6 @@ What it teaches: on these 17 coins over 2020-07 → 2026-07, Tradewriter's flowc
 taught, has no edge net of Binance's costs.
 - In fixed-percentage units (`lce_pct`), its brackets lose even before costs. They take many trades
   with almost no room to the target.
-- In daily-ATR units (`lce_atr`), it shows a small gross edge, carried by one branch and one side,
-  about a sixth of the cost of a round trip (2.42 against 14.03 bp).
+- In daily-ATR units (`lce_atr`), it shows a small positive gross: 2.42 bp, about a sixth of the
+  14.03 bp a trade costs. That gross comes from short trades on a handful of market-wide sell-off
+  days. On a typical date it loses even before costs.
