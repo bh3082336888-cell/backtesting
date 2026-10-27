@@ -21,6 +21,7 @@
     button { font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--grid);
              border-radius: 4px; padding: 2px 10px; cursor: pointer; }
     button:hover { border-color: var(--muted); }
+    button[hidden] { display: none; }
     #chart { position: relative; flex: 1; min-height: 0; }
     #tip { position: fixed; z-index: 10; max-width: 380px; padding: 6px 8px; pointer-events: none;
            background: var(--bg); color: var(--ink); border: 1px solid var(--muted); border-radius: 4px;
@@ -36,6 +37,7 @@
     <span id="key"></span>
     <label class="toggle" title="the signal bar's close, joined to the fill"><input type="checkbox" id="signal"
       checked> signal bar</label>
+    <button id="goto" type="button" title="scroll back to the focused trade" hidden>focused trade</button>
     <button id="fit" type="button" title="see the whole range and fit the price axis (or double-click the chart)">fit</button>
   </div>
   <div id="chart"></div>

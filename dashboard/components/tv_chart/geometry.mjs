@@ -169,6 +169,17 @@ export function focusRange(l0, l1, current, pad) {
   return { from: l0 - pad, to: l1 + pad };
 }
 
+/** The logical range that brings a trade's part in the window on screen with `pad` bars either side (as
+ *  `focusRange`), or null when it is already on screen or not in the window. `logical(t)` maps a time to a
+ *  logical index. */
+export function focusTrade(trade, win, logical, current, pad) {
+  const span = clipSpan(trade.boxes.span[0], trade.boxes.span[1], win);
+  if (!span) return null;
+  const l0 = logical(span[0]);
+  const l1 = logical(span[1]);
+  return l0 == null || l1 == null ? null : focusRange(l0, l1, current, pad);
+}
+
 /** Shaded spans (folds, warmup) on screen, each with its pixel edges and `lx`, where its label starts. */
 export function spanRects(spans, x, width) {
   const out = [];

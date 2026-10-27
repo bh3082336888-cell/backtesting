@@ -6,7 +6,7 @@
 // screen. Navigation is the library's own: drag to pan, wheel or pinch to zoom, drag an axis to stretch it, and the
 // price axis fits the candles in view.
 
-import { focusRange } from "./geometry.mjs";
+import { focusTrade } from "./geometry.mjs";
 import { Scale, ShadeLayer, TradeLayer } from "./primitives.js";
 
 const LWC = window.LightweightCharts;
@@ -26,8 +26,8 @@ const Streamlit = {
 // ---------------------------------------------------------------- state
 
 const $ = (id) => document.getElementById(id);
-const el = { title: $("title"), ohlc: $("ohlc"), key: $("key"), signal: $("signal"), fit: $("fit"),
-             chart: $("chart"), tip: $("tip") };
+const el = { title: $("title"), ohlc: $("ohlc"), key: $("key"), signal: $("signal"), goto: $("goto"),
+             fit: $("fit"), chart: $("chart"), tip: $("tip") };
 
 let chart = null;
 let series = null;
@@ -60,6 +60,7 @@ function build() {
   chart.subscribeClick(onClick);
   chart.subscribeDblClick(fit);
   el.fit.addEventListener("click", fit);
+  el.goto.addEventListener("click", () => goTo(payload, false));
   el.signal.addEventListener("change", () => payload && drawTrades(payload));
 }
 
@@ -137,25 +138,33 @@ function priceLines(p) {
   }
 }
 
+function focusedTrade(p) {
+  return p && p.focus != null ? p.trades.find((t) => t.id === p.focus) || null : null;
+}
+
 /** New candles: show the focused trade with context, else the whole range. A new focus on the same candles:
  *  scroll to it only if it isn't whole on screen. Anything else leaves the user's view as it is. */
 function view(p, fresh) {
   const changed = p.focus !== focused;
   focused = p.focus;
-  const tr = p.focus == null ? null : p.trades.find((t) => t.id === p.focus);
+  const tr = focusedTrade(p);
+  el.goto.hidden = !tr;
   if (!fresh && !(tr && changed)) return;
   requestAnimationFrame(() => {             // once the chart has taken the new data
-    if (!tr) {
-      fit();
-      return;
-    }
-    const [t0, t1] = tr.boxes.span;
-    const l0 = scale.logical(Math.max(t0, p.window[0]));
-    const l1 = scale.logical(Math.min(t1, p.window[1]));
-    const range = focusRange(l0, l1, fresh ? null : chart.timeScale().getVisibleLogicalRange(), p.context);
-    if (range) chart.timeScale().setVisibleLogicalRange(range);
-    chart.priceScale("right").applyOptions({ autoScale: true });
+    if (tr) goTo(p, fresh);
+    else fit();
   });
+}
+
+/** Bring the focused trade on screen with context bars either side; `fresh` ignores the current view. Also the
+ *  "focused trade" button's action, as picking the same trade again in Jump to trade changes nothing. */
+function goTo(p, fresh) {
+  const tr = focusedTrade(p);
+  if (!tr) return;
+  const current = fresh ? null : chart.timeScale().getVisibleLogicalRange();
+  const range = focusTrade(tr, p.window, (t) => scale.logical(t), current, p.context);
+  if (range) chart.timeScale().setVisibleLogicalRange(range);
+  chart.priceScale("right").applyOptions({ autoScale: true });
 }
 
 function fit() {

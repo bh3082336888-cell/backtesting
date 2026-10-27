@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  boxRects, focusRange, hitTrade, labelSpot, spanRects, stackTags, stepLines, timeToLogical, tradeShapes,
+  boxRects, focusRange, focusTrade, hitTrade, labelSpot, spanRects, stackTags, stepLines, timeToLogical, tradeShapes,
   visibleTags, withAlpha,
 } from "./geometry.mjs";
 
@@ -125,6 +125,15 @@ test("focus leaves a trade in view alone, else brings it in with context", () =>
   // the zoom is too tight for the trade and its context (or there is no view yet): show both
   assert.deepEqual(focusRange(300, 310, { from: 0, to: 50 }, 40), { from: 260, to: 350 });
   assert.deepEqual(focusRange(300, 310, null, 40), { from: 260, to: 350 });
+});
+
+test("going to the focused trade scrolls to its part in the window, or stays when it is on screen", () => {
+  const logical = (t) => (t - 1000) / 100;              // a bar every 100 ms from t = 1000
+  // LONG spans 1000..4000: logical 0..30; the window cuts it at 3000 (logical 20)
+  assert.deepEqual(focusTrade(LONG, [0, 3000], logical, { from: 200, to: 300 }, 40), { from: -40, to: 60 });
+  assert.equal(focusTrade(LONG, ALL, logical, { from: -5, to: 50 }, 40), null);
+  assert.deepEqual(focusTrade(LONG, ALL, logical, null, 5), { from: -5, to: 35 });
+  assert.equal(focusTrade(LONG, [5000, 6000], logical, null, 5), null);   // not in the window at all
 });
 
 test("fold shading spans the pane, its label at the band's visible start", () => {

@@ -290,7 +290,8 @@ def trades_chart_section(r, rid, folds=None):
                f"dotted: {lines}. The focused trade gets its "
                "Entry, TP and SL price lines on the axis; time tags (UTC) and the R:R label show for it, or for "
                f"every trade when {tc.TAG_ALL} or fewer are in range. Pick one in Jump to trade, or click a box to "
-               f"focus it. Hover a box for the whole trade.{shade}")
+               "focus it; \"focused trade\" above the chart scrolls back to it. Hover a box for the whole "
+               f"trade.{shade}")
     if len(here):
         with st.expander(f"Trades in range ({len(here)})"):
             cols = [x for x in ["side", "signal_time", "entry_time", "entry_price", "exit_time", "exit_price",
