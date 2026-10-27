@@ -1,4 +1,5 @@
-// The trade chart's pure geometry: times and prices to pixels, with a given scale. `node --test` runs this.
+// The trade chart's pure geometry: times and prices to pixels, with a given scale.
+// Run: node --test 'dashboard/components/tv_chart/*.test.mjs' (the glob picks up every test file here).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 

@@ -1,7 +1,0 @@
-{
-  "name": "tv-chart",
-  "private": true,
-  "description": "Perp Lab's trade chart component (static files, no build). Its .js files are ES modules; `node --test dashboard/components/tv_chart/` runs `main`, the geometry tests (Node 22+ treats a directory argument as a module to run).",
-  "type": "module",
-  "main": "geometry.test.mjs"
-}
