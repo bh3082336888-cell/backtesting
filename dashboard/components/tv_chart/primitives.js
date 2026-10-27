@@ -3,8 +3,7 @@
 // `Layer` is the base: once attached to the series it draws its `data` in two passes, z = "bottom" (under the
 // candles: shading and boxes) and z = "normal" (over them: lines, labels, tags), with the shared `Scale` mapping
 // times (epoch ms) and prices to pixels. A layer asks for a redraw when its data changes. The trade chart's own
-// layers are `ShadeLayer` (folds, warmup) and `TradeLayer` (positions); the LCE layers (zones, clouds, the volume
-// profile) are further Layers.
+// layers are `ShadeLayer` (folds, warmup) and `TradeLayer` (positions).
 
 import {
   BOX_ALPHA, EDGE_ALPHA, hitTrade, labelSpot, slotsUnder, spanRects, stackTags, stepLines, timeToLogical,

@@ -66,7 +66,7 @@ def test_payload_is_json_and_holds_the_window():
     assert p["candles"][0] == {"time": ms(0) // 1000, "open": 99.5, "high": 102.0, "low": 98.0, "close": 100.0}
     assert p["candles"][-1]["time"] == ms(199) // 1000                     # UTC seconds
     assert [tr["id"] for tr in p["trades"]] == [0, 1, 2, 3, 4]             # the one outside is left out
-    assert p["layers"] == {} and p["focus"] is None and p["palette"] == P
+    assert "layers" not in p and p["focus"] is None and p["palette"] == P
 
     short = p["trades"][1]
     assert short["side"] == -1
@@ -224,7 +224,7 @@ def test_level_paths_read_back_from_parquet(tmp_path, empty):
     assert any("target at exit —" in line for line in a["tooltip"])
 
 
-# ---------------------------------------------------------------- paper runs, density, layers
+# ---------------------------------------------------------------- paper runs, density
 
 def test_paper_warmup_is_shaded_and_paper_trades_are_boxed():
     c = candles("2026-08-01", n=60).assign(live=[False] * 40 + [True] * 20)
@@ -261,11 +261,6 @@ def test_payload_coarsens_only_past_50000_bars():
         ("entry", m5(39_999) // 1000, 40_100.5), ("exit", m5(40_002) // 1000, 40_103.0)]   # on the 15m candles
     assert tr["signal"] == {"time": m5(40_000), "price": 40_100.0}       # the run's own 5m bar, not the 15m one
     assert [x["time"] for x in tr["time_tags"]] == [m5(40_001), m5(40_004)]
-
-
-def test_no_overlay_means_empty_layers():
-    assert payload(candles(n=50), [], overlay=None, layers=frozenset({"zones", "cloud5", "profile"}))["layers"] == {}
-    assert payload(candles(n=50), [])["layers"] == {}
 
 
 def test_price_format_follows_the_price():

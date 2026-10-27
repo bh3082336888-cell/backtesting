@@ -128,7 +128,7 @@ def _trade(label, r: dict, b: dict, tip: str, p: dict, lo: int, hi: int, fmt: st
 # ---------------------------------------------------------------- the payload
 
 def chart_payload(candles: pd.DataFrame, trades: pd.DataFrame, tf: str, *, focus=None, palette: dict,
-                  overlay=None, layers: frozenset = frozenset(), folds: pd.DataFrame | None = None,
+                  folds: pd.DataFrame | None = None,
                   title: str = "") -> dict:
     """What the trade chart draws, as JSON (strict: no NaN), for the run's candles at timeframe `tf` in the window
     [first bar, last bar + tf):
@@ -141,14 +141,13 @@ def chart_payload(candles: pd.DataFrame, trades: pd.DataFrame, tf: str, *, focus
         in-box label (`tagged`) for that trade, or for every trade when at most TAG_ALL are in view;
       * `markers`: the entry and exit dots, each on the (possibly coarser) candle holding its time, at its price;
       * `folds`: the shaded spans and their labels (test folds, or a paper run's warmup); `exits`: the exit
-        reasons in view and their colours; `focus`: the focused trade's id, None when it isn't in view;
-      * `layers`: the LCE overlay's layers; empty without an `overlay` (Task 4 fills it)."""
+        reasons in view and their colours; `focus`: the focused trade's id, None when it isn't in view."""
     p = {**tc.PALETTE, **palette}
     shown = tc.display_tf(tf, len(candles), MAX_TV_BARS)
     bars = candles if shown == tf else tc.resample(candles, shown)
     out = {"title": title, "tf": tf, "shown": shown, "bar_ms": TF_MS[shown], "window": None,
            "context": tc.CONTEXT_BARS, "price_format": _price_format(bars), "candles": _candles(bars), "trades": [],
-           "markers": [], "focus": None, "folds": [], "exits": {}, "palette": p, "layers": {}}
+           "markers": [], "focus": None, "folds": [], "exits": {}, "palette": p}
     if candles.empty:
         return out
     lo, hi = candles.index[0], candles.index[-1] + pd.Timedelta(milliseconds=TF_MS[tf])
