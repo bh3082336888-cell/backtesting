@@ -7,11 +7,13 @@ import json
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 import typer
 
+from perp_lab import runlock
 from perp_lab.config import load_config
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -102,12 +104,13 @@ def backtest(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
     src = PluginSource.read(strategy)
     p = json.loads(params)
     per, trades = {}, []
-    for s in research_symbols(cfg, _syms(cfg, symbols), tf):
-        bars = load_bars(cfg, s, tf)
-        with _sandbox_required(), client.Batch(cfg, src, s, tf, bars) as batch:
-            r = batch.backtest({**src.meta.params, **p}, EngineParams.from_config(cfg, s))
-        per[s] = daily_returns(r.equity, r.time)
-        trades += r.trades
+    with runlock.plugin_runs(cfg):
+        for s in research_symbols(cfg, _syms(cfg, symbols), tf):
+            bars = load_bars(cfg, s, tf)
+            with _sandbox_required(), client.Batch(cfg, src, s, tf, bars) as batch:
+                r = batch.backtest({**src.meta.params, **p}, EngineParams.from_config(cfg, s))
+            per[s] = daily_returns(r.equity, r.time)
+            trades += r.trades
     tr = pd.DataFrame(trades)
     m = summarize(portfolio_returns(per), tr)
     rid = new_run_id()
@@ -135,7 +138,7 @@ def walkforward(strategy: str, tf: str = "1h", symbols: Optional[str] = None,
     from perp_lab.validate.pipeline import validate_strategy
     cfg = load_config(config)
     try:
-        with _sandbox_required():
+        with runlock.plugin_runs(cfg), _sandbox_required():
             rec, report = validate_strategy(cfg, strategy, tf, _syms(cfg, symbols), seeds, workers, notes,
                                             parent_run_id=parent_run)
     except UndeclaredTimeframe as e:            # a trial at a timeframe it doesn't declare: nothing ran
@@ -241,18 +244,25 @@ def holdout_init(config: Optional[str] = CfgOpt):
 
 @app.command()
 def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers: Optional[int] = None,
+          proposer: bool = typer.Option(False, "--proposer", help="mark the judgement as the proposer's: a bare "
+                                        "`lab exam` skips it, only `lab exam --id N` examines it"),
           config: Optional[str] = CfgOpt):
     """Promote or kill a plugin against its PARENT; promoted plugins queue for the holdout exam,
     which only `lab exam` runs."""
-    from perp_lab.judge.judge import JudgeRefused
+    from perp_lab.judge.judge import JudgeRefused, TransientFailure
     from perp_lab.judge.judge import judge as run_judge
     cfg = load_config(config)
     try:
-        with _sandbox_required():
-            j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers)
+        with runlock.plugin_runs(cfg), _sandbox_required():
+            j = run_judge(cfg, strategy, tf, _syms(cfg, symbols) if symbols else None, workers,
+                        judged_by="proposer" if proposer else None)
     except JudgeRefused as e:
         typer.secho(f"refused: {e}", fg="red")
         raise typer.Exit(2)
+    except TransientFailure as e:
+        typer.secho(f"transient sandbox failure ({e.kind}); the trial is registered; "
+                    "run lab judge on the same file again", fg="yellow")
+        raise typer.Exit(1)
     again = " (already judged)" if j.get("existing") else ""
     typer.secho(f"{j['strategy']} @ {j['timeframe']}  →  {j['decision'].upper()}{again}", bold=True,
                 fg="green" if j["decision"] == "promote" else "red")
@@ -260,6 +270,45 @@ def judge(strategy: str, tf: str = "4h", symbols: Optional[str] = None, workers:
         typer.echo(f"  ✗ {r}")
     dsr = "—" if j["dsr"] is None else f"{j['dsr']:.2f}"
     typer.echo(f"Deflated Sharpe {dsr} (N={j['n_trials']})   holdout: {j['holdout_status']} ({j['holdout_reason']})")
+    typer.echo(f"verdict: {j['verdict_path']}")
+
+
+@app.command("preflight")
+def preflight_cmd(file: Path = typer.Argument(..., help="the plugin file; its name is the file's stem"),
+                  tf: str = typer.Option(..., "--tf", help="the timeframe it would be judged at"),
+                  config: Optional[str] = CfgOpt):
+    """The judge's checks a plugin can fail before any trial, on synthetic bars only (nothing recorded):
+    metadata, lookahead, a mirror of a judged plugin, and position overlap with every other plugin.
+    Prints the JSON report; exits 0 (passed), 3 (failed a check) or 1 (no sandbox, or another error)."""
+    from perp_lab import preflight as pf
+    from perp_lab.sandbox.errors import SandboxUnavailable
+    try:
+        cfg = load_config(config)
+        with runlock.plugin_runs(cfg):   # outermost only: the lock is not re-entrant
+            report = pf.preflight(cfg, file, tf)
+    except Exception as e:
+        if not isinstance(e, SandboxUnavailable):
+            log.exception("preflight of %s failed", file)        # the traceback, for humans, on stderr
+        report = {**pf.blank_report(), "error": f"{type(e).__name__}: {e}"}
+    typer.echo(json.dumps(report))
+    raise typer.Exit(0 if report["ok"] else 1 if report["error"] else 3)
+
+
+@app.command("verdict-refresh")
+def verdict_refresh(strategy: str, tf: str = typer.Option(..., "--tf", help="the timeframe it was judged at"),
+                    config: Optional[str] = CfgOpt):
+    """Recompute a judgement's diagnostics from a walk-forward run on today's data and rules. The decision
+    is unchanged and no trial is added."""
+    from perp_lab.judge.judge import JudgeRefused, refresh_verdict
+    cfg = load_config(config)
+    try:
+        with runlock.plugin_runs(cfg), _sandbox_required():
+            j = refresh_verdict(cfg, strategy, tf)
+    except JudgeRefused as e:
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(2)
+    typer.echo(f"{j['strategy']} @ {j['timeframe']}: diagnostics from {j['diagnostics']['data']} data "
+               f"(run {j['diagnostics_run_id']})")
     typer.echo(f"verdict: {j['verdict_path']}")
 
 
@@ -307,14 +356,22 @@ def withdraw(strategy: Optional[str] = typer.Argument(None, help="the plugin, by
 
 
 @app.command()
-def exam(config: Optional[str] = CfgOpt):
-    """Attempt the holdout exam for every pending promotion (budget rules apply). The only command
-    that runs exams; the proposer never runs it."""
-    from perp_lab.judge.judge import exam_pending
-    done = exam_pending(load_config(config))
+def exam(judgement: Optional[int] = typer.Option(None, "--id", help="examine this one judgement, whoever judged it"),
+         config: Optional[str] = CfgOpt):
+    """Attempt the holdout exam for every pending promotion (budget rules apply), except a proposer's:
+    those wait for `lab exam --id N`. The only command that runs exams; the proposer never runs it."""
+    from perp_lab.judge.judge import JudgeRefused, exam_pending
+    try:
+        done = exam_pending(load_config(config), only_id=judgement)
+    except JudgeRefused as e:
+        typer.secho(f"refused: {e}", fg="red")
+        raise typer.Exit(2)
     if not done:
         typer.echo("no pending exams")
     for j in done:
+        if j.get("awaiting_review"):
+            typer.echo(f"{j['strategy']} @ {j['timeframe']}: awaiting review: lab exam --id {j['id']}")
+            continue
         if j.get("in_progress"):
             typer.echo(f"{j['strategy']} @ {j['timeframe']}: in progress elsewhere (another `lab exam` is running)")
             continue

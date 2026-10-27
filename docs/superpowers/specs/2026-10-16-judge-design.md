@@ -23,7 +23,7 @@ Resolved by the 3b-1 sandbox: `docs/superpowers/specs/2026-10-17-plugin-sandbox-
 |---|---|
 | Holdout rationing | Global cap on reads **and** at most one read per family. The proposer sees pass/fail only. |
 | Promote rule | Child passes every absolute gate. If its parent also passed, the child must also beat the parent on a paired comparison of OOS daily returns. A failing parent never lowers the bar. |
-| Multiple testing | Deflated Sharpe Ratio gate. N counts trials store-wide, so starting new families doesn't reset it. |
+| Multiple testing | Deflated Sharpe Ratio gate. N counts trials store-wide, so starting new families doesn't reset it. A trial is registered before plugin code first runs on real bars, so N counts registered trials as well as recorded walk-forward runs: a run that crashes still counts. |
 | Holdout pass | Positive, and consistent with the child's own walk-forward record. |
 | Paper gate | Every strategy (hand-written included) needs a passed holdout exam to be approved for paper. |
 | Shape | A synchronous `lab judge` command plus a `perp_lab/judge/` package. No queue or daemon. |
@@ -134,7 +134,9 @@ the dashboard shows judgements and the holdout budget.
     then re-raised (exit 1).
 
 `lab exam` retries every judgement with `holdout_status = pending`, oldest first, through the
-same budget checks.
+same budget checks, except those with `judged_by = "proposer"` (set by `lab judge --proposer`): a
+bare `lab exam` lists them as `awaiting review: lab exam --id N` and spends nothing. `lab exam --id N`
+examines that one judgement, whoever judged it; a minted read can't be taken back, so a human names it.
 
 ## Family identity
 
@@ -228,6 +230,11 @@ Too few trades is a fail ("not enough evidence"); the read is spent either way.
   reasons, walk-forward OOS metrics and report path, DSR, N, SR0, beats-parent fraction,
   and `holdout_status` ∈ {`n/a` (killed), `pending`, `passed`, `failed`, `blocked`} with a
   fixed reason code.
+  Since 3b-2 (`"schema": 2`) it also carries a `diagnostics` block of aggregates (gate inputs,
+  before-costs Sharpe, per-trade bp, sides, exits, regimes, breadth, IS against OOS, selection,
+  overlap with earlier judged runs; docs/superpowers/specs/2026-10-19-proposer-design.md, "Verdict
+  diagnostics"), computed from walk-forward data only, never from a holdout run; `null` for a kill
+  without a walk-forward run.
   It never contains holdout returns, Sharpe, trades or any number computed from holdout data.
   This is the proposer's only input in Phase 3b.
 - **Holdout details:** in the `runs` table and run directory like any run; shown to the human

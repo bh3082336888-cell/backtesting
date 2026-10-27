@@ -2,7 +2,8 @@
 
 Spec: docs/superpowers/specs/2026-10-16-judge-design.md. Flow: pre-checks -> idempotency ->
 lookahead (the child's, then the parent's) -> parent run -> child walk-forward -> gates -> decision ->
-judgement + lineage edge -> (a promotion supersedes its parent's pending exam) -> public verdict.
+judgement + lineage edge -> (a promotion supersedes its parent's pending exam) -> diagnostics ->
+public verdict.
 
 `judge` never runs an exam: a promotion waits as `pending` (`awaiting_exam`) for `lab exam`
 (`exam_pending` -> `attempt_exam`). The proposer runs `lab judge`, so it must not be able to time
@@ -20,11 +21,13 @@ from typing import Callable
 import pandas as pd
 
 from perp_lab.engine.metrics import summarize
+from perp_lab import runlock
 from perp_lab.judge import budget, gates
+from perp_lab.judge.diagnostics import diagnostics
 from perp_lab.judge.exam import cost_hours, run_exam, window_data_problems, window_end
 from perp_lab.plugins import PluginMetaError, PluginSource, UndeclaredTimeframe, require_timeframe
 from perp_lab.sandbox import client
-from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
+from perp_lab.sandbox.errors import TRANSIENT_KINDS, PluginError, SandboxUnavailable
 from perp_lab.runs import data_id, data_identity, new_run_id, per_coin_min, repo_commit, write_run
 from perp_lab.store import db
 from perp_lab.strategy import list_plugins, plugin_hash
@@ -34,13 +37,25 @@ from perp_lab.validate.pipeline import validate_strategy
 log = logging.getLogger(__name__)
 
 PARENT_BOOT = 5_000
-VERDICT_KEYS = {"strategy", "timeframe", "strategy_hash", "lineage_id", "parent_run_id", "decision",
+VERDICT_SCHEMA = 2         # 2: the diagnostics block
+VERDICT_KEYS = {"schema", "strategy", "timeframe", "strategy_hash", "lineage_id", "parent_run_id", "decision",
                 "reasons", "dsr", "n_trials", "sr0", "parent_passed", "beats_parent_frac",
-                "holdout_status", "holdout_reason", "walkforward"}
+                "holdout_status", "holdout_reason", "walkforward", "diagnostics"}
 
 
 class JudgeRefused(Exception):
     """A pre-check failed; nothing was recorded."""
+
+
+TRANSIENT_MAX_ATTEMPTS = 3   # a machine-caused failure is a kill only on the 3rd attempt
+
+
+class TransientFailure(RuntimeError):
+    """A sandbox failure the machine may have caused, on an early attempt: only the trial is recorded."""
+
+    def __init__(self, kind: str):
+        super().__init__(kind)
+        self.kind = kind
 
 
 def oos_portfolio(run_dir) -> pd.Series:
@@ -57,17 +72,20 @@ def verdict_path(cfg, strategy: str, tf: str, strategy_hash: str) -> Path:
 
 def write_verdict(cfg, j: dict) -> Path:
     """The proposer's only window on a judgement. Holdout outcome as status + fixed code only:
-    never a number computed from holdout data, never the holdout run's id."""
+    never a number computed from holdout data, never the holdout run's id. The diagnostics come
+    from a walk-forward run (None for a kill without one)."""
     wf = None
     if j["child_run_id"]:
         run_dir = db.run_row(cfg, j["child_run_id"])["run_dir"]
         wf = {"run_id": j["child_run_id"], "metrics": run_summary(run_dir).get("metrics"),
               "report": str(Path(run_dir) / "report.md")}
-    out = {k: j[k] for k in VERDICT_KEYS - {"walkforward"}}
+    out = {"schema": VERDICT_SCHEMA}
+    out.update({k: j[k] for k in VERDICT_KEYS - {"schema", "walkforward", "reasons"}})
+    out["reasons"] = j["verdict_reasons"] if j.get("verdict_reasons") is not None else j["reasons"]
     out["walkforward"] = wf
     p = verdict_path(cfg, j["strategy"], j["timeframe"], j["strategy_hash"])
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(out, indent=1, default=str))
+    p.write_text(json.dumps(out, indent=1, sort_keys=True, default=str))   # no dict's order says what came first
     return p
 
 
@@ -97,6 +115,30 @@ def _require_timeframe(src: PluginSource, tf: str, role: str = "") -> None:
         require_timeframe(src, tf, role)
     except UndeclaredTimeframe as e:
         raise JudgeRefused(str(e)) from e
+
+
+def precheck(src: PluginSource, tf: str) -> None:
+    """The judge's refusals that read only plugin source, so no code runs and they hold on any machine:
+    `tf` declared; a PARENT that is a plugin in strategies/, isn't the plugin itself, isn't
+    byte-identical to it and declares `tf` too. `lab preflight` runs them on a staged file."""
+    _precheck(src, tf)
+
+
+def _precheck(src: PluginSource, tf: str) -> PluginSource | None:
+    """precheck; the parent's source as it was read and checked (None for a root), for the judge to run."""
+    _require_timeframe(src, tf)
+    parent = src.meta.parent
+    if parent is None:
+        return None
+    if parent == src.name:
+        raise JudgeRefused(f"{src.name} names itself as its PARENT")
+    if parent not in list_plugins():
+        raise JudgeRefused(f"PARENT '{parent}' is not a plugin in strategies/")
+    psrc = read_plugin(parent)
+    if psrc.hash == src.hash:
+        raise JudgeRefused(f"{src.name} is byte-identical to its parent {parent}; not a variation")
+    _require_timeframe(psrc, tf, "parent ")   # its walk-forward runs at tf too, and is a trial
+    return psrc
 
 
 def plugin_parent(name: str, src: PluginSource | None = None) -> str | None:
@@ -159,7 +201,7 @@ def lookahead_failures(cfg, src) -> list[str]:
     """The causality check at the synthetic bars' default dates, plus the dated check over the
     holdout up to DATED_AHEAD_DAYS past today. attempt_exam repeats the dated check over the
     actual exam window just before the read, so dates after the judged span are covered too."""
-    until = max(_now(), cfg.holdout_start) + pd.Timedelta(days=DATED_AHEAD_DAYS)
+    until = max(_now().floor("D"), cfg.holdout_start) + pd.Timedelta(days=DATED_AHEAD_DAYS)
     return list(dict.fromkeys(causality_failures(cfg, src) + dated_lookahead_failures(cfg, src, until)))
 
 
@@ -192,23 +234,12 @@ def supersede(cfg, parent: str, tf: str, family: str) -> None:
 
 
 def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: int | None = None, *,
-          validate: Callable = validate_strategy) -> dict:
+          validate: Callable = validate_strategy, judged_by: str | None = None) -> dict:
     jc = cfg["judge"]
     src = read_plugin(name)              # read once: this src and h are what is checked, run and recorded
     h = src.hash
-    _require_timeframe(src, tf)
+    psrc = _precheck(src, tf)            # likewise the parent's; source only, so first, on any machine
     parent = src.meta.parent
-    psrc = None
-    if parent is not None:
-        if parent == name:
-            raise JudgeRefused(f"{name} names itself as its PARENT")
-        if parent not in list_plugins():
-            raise JudgeRefused(f"PARENT '{parent}' is not a plugin in strategies/")
-        psrc = read_plugin(parent)
-        if psrc.hash == h:
-            raise JudgeRefused(f"{name} is byte-identical to its parent {parent}; not a variation")
-        _require_timeframe(psrc, tf, "parent ")   # its walk-forward runs at tf too, and is a trial
-    # The refusals above read only plugin source (no code runs), so they come first, on any machine.
     client.check(cfg)                    # no sandbox, no judging: SandboxUnavailable propagates
 
     existing = db.get_judgement(cfg, h, tf)
@@ -220,7 +251,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     if fails:
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
-            "parent_run_id": None, "lineage_id": family, "decision": "kill",
+            "parent_run_id": None, "lineage_id": family, "decision": "kill", "judged_by": judged_by,
             "reasons": [f"lookahead: {f}" for f in fails], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
 
@@ -244,15 +275,18 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         if parent_row is None:
             parent_row = run_parent(symbols)
 
+    db.register_trial(cfg, name, h, tf, attempt=True)   # plugin code is about to see real bars
     try:
         rec, _ = validate(cfg, name, tf, symbols, workers=workers,
                           parent_run_id=parent_row["run_id"] if parent_row else None, lineage_id=family, src=src)
     except PluginError as e:
         log.warning("%s failed in the sandbox: %s\n%s", name, e.reason(), e.stderr.decode("utf-8", "replace"))
+        if e.kind in TRANSIENT_KINDS and db.trial_attempts(cfg, h, tf) < TRANSIENT_MAX_ATTEMPTS:
+            raise TransientFailure(e.kind) from e
         jid = db.record_judgement(cfg, {
             "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": None,
-            "parent_run_id": None, "lineage_id": family, "decision": "kill", "reasons": [e.reason()],
-            "holdout_status": "n/a", "holdout_reason": "n/a"})
+            "parent_run_id": None, "lineage_id": family, "decision": "kill", "judged_by": judged_by, "reasons": [e.reason()],
+            "verdict_reasons": [e.public_reason()], "holdout_status": "n/a", "holdout_reason": "n/a"})
         return finish(cfg, jid)
     child = db.run_row(cfg, rec["run_id"])
     if parent_row is not None and parent_row["data_id"] != child["data_id"]:
@@ -287,7 +321,7 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
     jid = db.record_judgement(cfg, {
         "strategy": name, "timeframe": tf, "strategy_hash": h, "child_run_id": child["run_id"],
         "parent_run_id": parent_row["run_id"] if parent_row else None, "lineage_id": family,
-        "decision": decision, "reasons": reasons, "dsr": d["dsr"], "n_trials": n, "sr0": d["sr0"],
+        "decision": decision, "judged_by": judged_by, "reasons": reasons, "dsr": d["dsr"], "n_trials": n, "sr0": d["sr0"],
         "parent_passed": parent_passed, "beats_parent_frac": frac,
         "holdout_status": "pending" if decision == "promote" else "n/a",
         "holdout_reason": "awaiting_exam" if decision == "promote" else "n/a"})
@@ -300,7 +334,46 @@ def judge(cfg, name: str, tf: str, symbols: list[str] | None = None, workers: in
         except Exception:
             finish(cfg, jid)   # the verdict file must exist even when this step fails
             raise
+    try:                       # last: a failure here must not skip the edge or the supersede
+        db.set_diagnostics(cfg, jid, diagnostics(cfg, child["run_dir"], data="judged",
+                                                 earlier=db.earlier_runs(cfg, jid)), child["run_id"])
+    except Exception:
+        finish(cfg, jid)
+        raise
     return finish(cfg, jid)    # a promotion stays pending (awaiting_exam): only `lab exam` examines
+
+
+def _todays_rules(run_dir) -> bool:
+    """A run made under today's benchmark rules: a before-costs pass and a side-matched random entry."""
+    s = run_summary(run_dir)
+    return bool(s.get("before_costs")) and (s.get("random_entry") or {}).get("long_share") is not None
+
+
+def refresh_verdict(cfg, name: str, tf: str, *, validate: Callable = validate_strategy) -> dict:
+    """Recompute a judgement's diagnostics from a walk-forward run on today's data and rules. Decision
+    fields are never written, and the (plugin version, timeframe) pair is already a trial, so N does not
+    move. A kill that has no run (lookahead, plugin error) is refused: making one would run its plugin on
+    real bars with nothing recorded about what it saw."""
+    src = read_plugin(name)
+    j = db.get_judgement(cfg, src.hash, tf)
+    if j is None:
+        raise JudgeRefused("no judgement of this plugin version at tf")
+    if j["child_run_id"] is None:
+        raise JudgeRefused("this judgement has no walk-forward run (a kill before one); nothing to refresh")
+    client.check(cfg)
+    universe = cfg.symbols
+    row = db.latest_wf_run(cfg, name, tf, src.hash, universe, data_id=data_id(data_identity(cfg, universe)))
+    if row is None or not _todays_rules(row["run_dir"]):
+        try:
+            rec, _ = validate(cfg, name, tf, lineage_id=j["lineage_id"], src=src)
+        except PluginError as e:
+            log.warning("%s failed in the sandbox: %s\n%s", name, e.reason(), e.stderr.decode("utf-8", "replace"))
+            raise JudgeRefused(f"{name} failed in the sandbox: {e.public_reason()}") from e
+        row = db.run_row(cfg, rec["run_id"])
+    data = "judged" if row["run_id"] == j["child_run_id"] else "refreshed"
+    db.set_diagnostics(cfg, j["id"], diagnostics(cfg, row["run_dir"], data=data,
+                                                 earlier=db.earlier_runs(cfg, j["id"])), row["run_id"])
+    return finish(cfg, j["id"])
 
 
 HOLDOUT_BOOT = 10_000
@@ -429,6 +502,10 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
     time on this machine (`budget.exams_lock`, likewise): while another `lab exam` examines this
     judgement or any other (an exam can take hours), this returns it unchanged, marked
     `in_progress`, and spends nothing.
+
+    Only after those two non-blocking locks does it take `runlock.exam_exclusive`: it waits for the
+    running plugin commands (judges, walk-forwards) to finish, new ones queue behind it, and nothing
+    runs plugin code alongside the exam.
     """
     with budget.exam_lock(cfg, jid) as mine, budget.exams_lock(cfg) as alone:
         j = db.get_judgement_by_id(cfg, jid)     # read under the lock: an exam that just ended is final
@@ -436,7 +513,8 @@ def attempt_exam(cfg, jid: int, *, run: Callable = run_exam, end_fn: Callable = 
             return j
         if not (mine and alone):
             return {**j, "in_progress": True}
-        return _attempt(cfg, j, run, end_fn, cost_fn, data_fn)
+        with runlock.exam_exclusive(cfg):        # after the non-blocking locks: waits for running judges
+            return _attempt(cfg, j, run, end_fn, cost_fn, data_fn)
 
 
 def _attempt(cfg, j: dict, run: Callable, end_fn: Callable, cost_fn: Callable, data_fn: Callable) -> dict:
@@ -554,11 +632,19 @@ def withdraw(cfg, jid: int, reason: str) -> dict:
     return finish(cfg, jid)
 
 
-def exam_pending(cfg, **kw) -> list[dict]:
+def exam_pending(cfg, only_id: int | None = None, **kw) -> list[dict]:
     """Retry every pending exam, oldest first; one crashing exam never blocks the rest. While
-    another `lab exam` is examining, each comes back unchanged, marked `in_progress`."""
+    another `lab exam` is examining, each comes back unchanged, marked `in_progress`.
+
+    A proposer's promotion is examined only when a human names it (`only_id`): a minted read can't
+    be taken back, so a bare run lists it as `awaiting_review` and spends nothing."""
+    if only_id is not None and db.get_judgement_by_id(cfg, only_id) is None:
+        raise JudgeRefused(f"no judgement with id {only_id}")
     out = []
-    for j in db.pending_judgements(cfg):
+    for j in db.pending_judgements(cfg) if only_id is None else [{"id": only_id}]:
+        if only_id is None and j.get("judged_by") == "proposer":
+            out.append({**j, "awaiting_review": True})
+            continue
         try:
             out.append(attempt_exam(cfg, j["id"], **kw))
         except Exception as e:

@@ -8,7 +8,7 @@ import pytest
 from perp_lab.sandbox.decisions import Decisions
 from perp_lab.sandbox.errors import ProtocolError
 from perp_lab.sandbox.protocol import (
-    MAX_HEADER, WORKER_DTYPES, Arrow, decisions_from, decisions_sections, read_frame, table_bytes,
+    MAX_HEADER, WORKER_DTYPES, Arrow, decisions_from, check_random, decisions_sections, read_frame, table_bytes,
     table_frame, write_frame)
 from perp_lab.strategy import Signal
 from tests.conftest import make_bars
@@ -141,3 +141,14 @@ def test_decisions_round_trip_and_validate():
         decisions_from(got, 5)            # bar 5 is out of range
     with pytest.raises(ProtocolError):
         decisions_from({k: v for k, v in got.items() if k != "i"}, 10)
+
+
+@pytest.mark.parametrize("bad", [1.5, -0.1, None, "0.5", True, float("nan")])
+def test_the_protocol_refuses_a_long_share_outside_0_1(bad):
+    with pytest.raises(ProtocolError):
+        check_random({"seed": 1, "prob": 0.1, "long": bad})
+
+
+def test_the_protocol_takes_a_random_spec_in_range():
+    spec = {"seed": 1, "prob": 0.1, "long": 1.0}
+    assert check_random(spec) == spec and check_random(None) is None

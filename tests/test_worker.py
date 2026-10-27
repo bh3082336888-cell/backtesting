@@ -26,7 +26,7 @@ from perp_lab.sandbox import client, confine, session, worker
 from perp_lab.sandbox.errors import PluginError, SandboxUnavailable
 from perp_lab.validate.causality import with_moving_columns
 from tests import sandbox_fixtures
-from tests.conftest import REAL_PLUGINS, REPO, make_bars, market_config
+from tests.conftest import REAL_PLUGINS, REPO, flat_bars, make_bars, market_config
 from tests.sandbox_fixtures import InProcessWorker, load_class
 
 IPC_CREAT, IPC_RMID = 0o1000, 0
@@ -134,7 +134,7 @@ def test_in_process_twin_gives_the_same_output(cfg):
         with make(cfg, src) as w:
             w.bars("X", "1h", bars)
             runs = [w.run(src.meta.params, ep, features=True),
-                    w.run({**src.meta.params, "bb_n": 30}, ep, k=1500, random=(3, 0.05), features=True),
+                    w.run({**src.meta.params, "bb_n": 30}, ep, k=1500, random=(3, 0.05, 0.5), features=True),
                     w.run(src.meta.params, ep, start_i=200)]
         outs.append((runs, w.stderr))                 # complete once the worker is closed
     (real, real_err), (twin, twin_err) = outs
@@ -859,3 +859,13 @@ def test_error_reply_is_printable_and_capped():
     assert r == {"kind": "exception", "type": "ValueError", "message": "?? " + "x" * 197}
     r = session.error_reply(PluginError("features", "", "column 'a' has dtype object"))["error"]
     assert r == {"kind": "features", "type": "", "message": "column 'a' has dtype object"}
+
+
+@pytest.mark.sandbox
+def test_side_matched_random_entry_through_the_sandbox(cfg):
+    src = plugin("longshare", tail="""
+Fixture.bracket = lambda self, ctx, side: (ctx["close"] * (0.9 if side > 0 else 1.1), None)
+""")
+    with client.Batch(cfg, src, "X", "1h", flat_bars(n=200)) as b:
+        res = b.backtest(src.meta.params, EngineParams(), random=(1, 1.0, 1.0))
+    assert len(res.trades) > 0 and all(t["side"] > 0 for t in res.trades)

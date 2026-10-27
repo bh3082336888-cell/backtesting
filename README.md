@@ -18,8 +18,10 @@ lab link PARENT_RUN CHILD_RUN --decision kill --reason "..."   # hand-made linea
 lab paper RUN_ID                      # only runs approved for paper in the dashboard; refuses more coins than `client.max_workers` (pass --symbols)
 lab paper-refresh PAPER_RUN_ID        # recount regime changes → paper_eligible
 lab holdout-init                      # once: create the holdout read log (the judge refuses without it)
+lab preflight FILE --tf TF            # synthetic bars only; nothing recorded; no trial
 lab judge donchian_atr_wide --tf 4h   # promote or kill against PARENT; a promotion waits for `lab exam`
-lab exam                              # the only command that runs holdout exams, and retries pending ones (budget rules apply)
+lab exam                              # the only command that runs holdout exams, and retries pending ones (budget rules apply); skips a proposer's promotions
+lab exam --id N                       # examine one judgement by id: the only way a proposer's promotion is examined
 pytest
 ```
 
@@ -124,7 +126,7 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 - A sealed worker can't query page-cache residency or evict or prefetch pages (no `mincore`, no such `madvise` advice, `MADV_HUGEPAGE` included: on a file mapping it reads 2 MiB in per fault), and after each batch of an exam's workers the files they mapped are evicted from the page cache. That narrows the page-cache channel but doesn't close it: a live process mapping the same libraries can keep a page a worker touched resident through fault-around, and a worker can still touch the pages it chooses (spec R7). A `lab paper` run's workers, which hold live holdout-window bars, are neither evicted nor kept apart from a running exam; that is accepted, since paper runs only exam-passed, hand-approved plugins (spec R6).
 - A plugin can import only what the worker loaded before sealing: `math`, `numpy` (not `numpy.testing` or `numpy.f2py`), `pandas`, `perp_lab.strategy`, `perp_lab.indicators` and `perp_lab.engine.backtest`, and whatever these load, plus the interpreter's built-in and frozen modules, which need no file (here, for one, `itertools`, `time`, `zlib` and `unicodedata`). Anything else is `ModuleNotFoundError`, and no named time zone but UTC works (the time zone database is files).
 - It reports decisions, not results: the trusted engine replays them, and any disagreement is a `mismatch`.
-- `lab judge` runs lookahead checks, walk-forward and the benchmark through workers; an error caused by the plugin is a recorded kill (`plugin_error`).
+- `lab judge` runs lookahead checks, walk-forward and the benchmark through workers; an error caused by the plugin is a recorded kill (`plugin_error`). A failure the machine may have caused (`died`, `timeout`, `cpu_limit`) is recorded only on a judgement's 3rd attempt; on the 1st and 2nd, `lab judge` exits 1 and the same file can be judged again.
 - `lab exam` streams the holdout to each worker one bar at a time, symbols in lockstep, and is the only command that runs exams; one exam runs at a time on a machine.
 - Needs Linux, Landlock ABI 6 or later, `libseccomp.so.2` and glibc 2.39 or later (older glibc makes `fstat` with a call the seal denies); without them plugin code does not run. No flag bypasses it.
 - Tests that need the real sandbox carry `@pytest.mark.sandbox`; run them alone with `pytest -m sandbox`.
@@ -135,12 +137,14 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 |---|---|
 | Signal at close of t, fill at open of t+1 | `engine/backtest.py`, `tests/test_engine_costs.py` |
 | No lookahead in any plugin | `tests/test_lookahead.py` runs every file in `strategies/`, incl. a planted cheater that must fail |
+| A trial is registered before plugin code first runs on real bars, so a crash still counts | `store/db.py::register_trial`, `tests/test_trials.py` |
 | Holdout (`holdout_start`, a **fixed date**) unreadable without a minted, logged token | `holdout.py`, `data/store.py`, `tests/test_holdout.py` |
 | Funding charged at real settlement timestamps (4h/8h both handled), reduces isolated margin | `data/store.py::align_funding`, engine step 1 |
 | Stop beats target when both inside one bar; targets need trade-through | engine step 5 |
 | Entry rejected if liquidation price sits inside the stop | engine step 4 |
 | OOS is the headline; IS is shown greyed and labelled | `validate/pipeline.py` report |
 | A strategy must beat random-entry (same exits, matched frequency) p95 OOS | `validate/benchmarks.py` |
+| Random entries take the plugin's OOS long share, not 50/50 | `validate/benchmarks.py`, `tests/test_benchmarks.py` |
 | A walk-forward (`lab walkforward`, `lab judge`, a judge's parent run) runs only at a timeframe the plugin declares; any other is refused before it can count as a trial | `plugins.py::require_timeframe`, `tests/test_judge.py`, `tests/test_walkforward_sandbox.py` |
 | Within `perp_lab` code, only the budget can unlock the holdout; one read per family, 10 in total, after 180 days | `judge/budget.py`, `tests/test_budget.py` |
 | No slippage below 2 bp, for any coin or date | `engine/slippage.py`, `tests/test_slippage.py`, `tests/test_config.py` |
@@ -155,6 +159,8 @@ Spec: `docs/superpowers/specs/2026-10-17-plugin-sandbox-design.md`.
 | Harness lineage edges can't be overwritten by hand, nor a harness-judged run re-parented | `store/db.py::add_edge` |
 | Verdicts never carry holdout numbers | `judge/judge.py::write_verdict`, `tests/test_judge_exam.py` |
 | Trade charts read research candles only before `holdout_start`, without a token; holdout exams are never charted | `dashboard/trade_chart.py`, `tests/test_trade_chart.py` |
+| `lab preflight` runs plugin code only on the synthetic market: never `load_bars`, never anything under `data/`, so its report may go to the proposer's model | `preflight.py`, `tests/test_preflight.py` |
+| A proposer promotion is examined only by `lab exam --id` | `judge/judge.py::exam_pending`, `tests/test_judge_exam.py` |
 | A promotion can be withdrawn only while pending and holding no read (checked under the mint's lock), with a reason recorded in `withdrawals.jsonl`; its family keeps its read | `judge/judge.py::withdraw`, `judge/budget.py::no_read_held`, `tests/test_judge_exam.py` |
 | No holdout read over candles that didn't come from exchange files (ccxt-stitched, incomplete or unknown months wait as `incomplete_data`) | `judge/exam.py::window_data_problems`, `tests/test_exam.py`, `tests/test_judge_exam.py` |
 

@@ -163,6 +163,21 @@ def warmup_decisions(sections: dict, warmup_k: int) -> Decisions:
     return decisions_from(sections, max(warmup_k - 1, 0))
 
 
+def check_random(random: dict | None) -> dict | None:
+    """The random-entry spec of a run request, or a refusal: the worker draws from it."""
+    if random is None:
+        return None
+    if not isinstance(random, dict):
+        raise ProtocolError("random must be an object or null")
+    seed, prob, long = random.get("seed"), random.get("prob"), random.get("long")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ProtocolError("random seed must be an int")
+    for name, v in (("prob", prob), ("long", long)):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
+            raise ProtocolError(f"random {name} must be a number in [0, 1]")
+    return random
+
+
 def position_json(pv: PositionView | None) -> dict | None:
     """The engine's position, as a step request carries it (parent side)."""
     if pv is None:

@@ -93,7 +93,7 @@ class Session:
             raise ProtocolError("run before load and bars")
         strat = self.cls(**params)
         if random is not None:
-            strat = RandomEntry(strat, random["prob"], random["seed"])
+            strat = RandomEntry(strat, random["prob"], random["seed"], random["long"])
         bars = self._bars if k is None else self._bars.iloc[:k]
         rec = Recorder(strat)
         feats = rec.prepare(bars)

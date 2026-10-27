@@ -44,6 +44,7 @@ class EngineParams:
     max_margin_frac: float = 1.0
     mmr: float = 0.005
     cum: float = 0.0
+    slippage_scale: float = 1.0       # multiplies the slippage in force (the bars' column or `slippage`); 0 = none
 
     @classmethod
     def from_config(cls, cfg, symbol: str, **over) -> "EngineParams":
@@ -103,6 +104,7 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
     SLIP = A.get("slippage")
     if SLIP is None:
         SLIP = np.full(n, ep.slippage)
+    SLIP = SLIP * ep.slippage_scale
 
     taker, maker = ep.taker, ep.maker
     lev, mmr, cum = ep.leverage, ep.mmr, ep.cum
@@ -112,7 +114,7 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
     qty = entry_px = margin = risk_amt = W_before = 0.0
     stop = target = liq = best = NAN
     entry_i = sig_i = -1
-    fees_acc = fund_acc = 0.0
+    fees_acc = fund_acc = slip_acc = 0.0
     stop_init = NAN
     tgt_init = NAN
     # the levels the position carried: each in force from its time (ms) on; [0] is the entry's
@@ -133,8 +135,9 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
     ctx = Ctx(A, symbol)
     pv = PositionView()
 
-    def close_pos(i, px, reason, fee_rate):
-        nonlocal W, side, qty, margin, fees_acc
+    def close_pos(i, px, reason, fee_rate, ref=None):
+        # `ref` is the price before slippage; a liquidation or a target fill has none (no slippage)
+        nonlocal W, side, qty, margin, fees_acc, slip_acc
         if reason == "liq":
             pnl = -margin
             fee = 0.0
@@ -143,6 +146,8 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
             fee = fee_rate * qty * px
         W += pnl - fee
         fees_acc += fee
+        if ref is not None:
+            slip_acc += qty * abs(px - ref)
         net = pnl - fees_acc - fund_acc
         trades.append({
             "symbol": symbol, "tf": tf, "side": side,
@@ -150,7 +155,7 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
             "qty": qty, "notional": qty * entry_px, "leverage": lev, "margin": qty * entry_px / lev,
             "stop_init": stop_init, "target": tgt_init,
             "exit_time": int(T[i]), "exit_price": px, "exit_reason": reason,
-            "fees": fees_acc, "funding": fund_acc, "pnl_gross": pnl, "pnl": net,
+            "fees": fees_acc, "slippage": slip_acc, "funding": fund_acc, "pnl_gross": pnl, "pnl": net,
             "equity_before": W_before, "pnl_pct": net / W_before if W_before else NAN,
             "r_multiple": net / risk_amt if risk_amt else NAN,
             "bars_held": i - entry_i + 1,
@@ -182,12 +187,12 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
                 close_pos(i, liq, "liq", 0.0)
                 pend_exit = False
             elif (side > 0 and o <= stop) or (side < 0 and o >= stop):
-                close_pos(i, o * (1 - side * slip), "stop", taker)
+                close_pos(i, o * (1 - side * slip), "stop", taker, o)
                 pend_exit = False
 
         # 3. pending exit
         if pend_exit and side != 0:
-            close_pos(i, o * (1 - side * slip), "signal", taker)
+            close_pos(i, o * (1 - side * slip), "signal", taker, o)
         pend_exit = False
 
         # 4. pending entry
@@ -218,6 +223,7 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
                     fee = taker * q * fill
                     W -= fee
                     fees_acc, fund_acc = fee, 0.0
+                    slip_acc = q * abs(fill - o)
                     best = fill
         pend_entry = None
 
@@ -229,7 +235,7 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
                     if adv == liq and liq >= stop:
                         close_pos(i, liq, "liq", 0.0)
                     else:
-                        close_pos(i, stop * (1 - slip), "stop", taker)
+                        close_pos(i, stop * (1 - slip), "stop", taker, stop)
                 elif target == target and h > target:
                     close_pos(i, target, "target", maker)
             else:
@@ -238,13 +244,13 @@ def run_backtest(strategy: Strategy, bars: pd.DataFrame, feats: pd.DataFrame, *,
                     if adv == liq and liq <= stop:
                         close_pos(i, liq, "liq", 0.0)
                     else:
-                        close_pos(i, stop * (1 + slip), "stop", taker)
+                        close_pos(i, stop * (1 + slip), "stop", taker, stop)
                 elif target == target and l < target:
                     close_pos(i, target, "target", maker)
 
         # end of window: flatten at the close
         if i == last and side != 0:
-            close_pos(i, c * (1 - side * slip), "eow", taker)
+            close_pos(i, c * (1 - side * slip), "eow", taker, c)
 
         # 6. mark to market
         k = i - start_i

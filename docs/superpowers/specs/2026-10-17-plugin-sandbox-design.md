@@ -560,7 +560,9 @@ Where it is recorded:
   `lookahead: defaults: plugin_error: cpu_limit`.
 - **Walk-forward, sensitivity, benchmark:** the judgement is `kill` with reason
   `plugin_error: <kind>`, plus `<Type>: <message>` for exceptions. These runs only ever see
-  research data, so the message may reach the verdict. No run is recorded, so it is not a trial.
+  research data, but the message stays out of the verdict, and the exception type is kept only if
+  it is a builtin. The trial was registered before the run began (see
+  `docs/superpowers/specs/2026-10-19-proposer-design.md`, "Changes to existing documents and tests").
 - **Parent plugin:** a plugin error in the parent's own runs refuses the child (exit 2), like
   3a's parent lookahead rule: `parent P fails in the sandbox; fix or judge it first`.
 - **Exam:** `holdout_status` `failed`, reason `plugin_error`. The read is spent. Neither the kind
