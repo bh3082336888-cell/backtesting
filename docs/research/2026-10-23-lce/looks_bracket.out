@@ -1,0 +1,48 @@
+LCE look: in-window bars of the OOS span 2020-07-01 .. 2026-07-01 (exclusive) with a valid bracket; research 5m bars, defaults, counts only
+plugins: lce_pct 5458edefef10, lce_atr 181835ba5477
+
+lce_pct
+coin      in-window   long  short   both no levels
+BTCUSDT     115,810  0.961  0.959  0.957     0.000
+ETHUSDT     115,810  0.946  0.944  0.941     0.000
+SOLUSDT     111,740  0.917  0.915  0.912     0.009
+BNBUSDT     115,810  0.949  0.949  0.946     0.000
+XRPUSDT     115,662  0.943  0.943  0.940     0.005
+DOGEUSDT    115,292  0.931  0.931  0.928     0.003
+AVAXUSDT    111,370  0.924  0.925  0.920     0.003
+LINKUSDT    115,810  0.933  0.932  0.929     0.000
+ADAUSDT     115,810  0.940  0.940  0.937     0.000
+DOTUSDT     112,998  0.940  0.939  0.937     0.003
+LTCUSDT     115,662  0.934  0.934  0.931     0.005
+BCHUSDT     115,810  0.943  0.942  0.940     0.000
+FILUSDT     109,964  0.931  0.931  0.929     0.008
+AAVEUSDT    110,112  0.917  0.917  0.913     0.003
+XLMUSDT     115,662  0.942  0.941  0.939     0.005
+ATOMUSDT    115,810  0.939  0.938  0.935     0.000
+ETCUSDT     115,810  0.946  0.947  0.944     0.000
+total     1,944,942  0.938  0.937  0.934     0.002
+minimum across coins: long 0.917 (SOLUSDT), short 0.915 (SOLUSDT), both 0.912 (SOLUSDT)
+coins under 0.95 (long or short): ETHUSDT long 0.946, ETHUSDT short 0.944, SOLUSDT long 0.917, SOLUSDT short 0.915, BNBUSDT long 0.949, BNBUSDT short 0.949, XRPUSDT long 0.943, XRPUSDT short 0.943, DOGEUSDT long 0.931, DOGEUSDT short 0.931, AVAXUSDT long 0.924, AVAXUSDT short 0.925, LINKUSDT long 0.933, LINKUSDT short 0.932, ADAUSDT long 0.940, ADAUSDT short 0.940, DOTUSDT long 0.940, DOTUSDT short 0.939, LTCUSDT long 0.934, LTCUSDT short 0.934, BCHUSDT long 0.943, BCHUSDT short 0.942, FILUSDT long 0.931, FILUSDT short 0.931, AAVEUSDT long 0.917, AAVEUSDT short 0.917, XLMUSDT long 0.942, XLMUSDT short 0.941, ATOMUSDT long 0.939, ATOMUSDT short 0.938, ETCUSDT long 0.946, ETCUSDT short 0.947
+
+lce_atr
+coin      in-window   long  short   both no levels
+BTCUSDT     115,810  0.999  0.999  0.999     0.000
+ETHUSDT     115,810  1.000  1.000  1.000     0.000
+SOLUSDT     111,740  0.979  0.979  0.979     0.021
+BNBUSDT     115,810  0.998  0.998  0.998     0.000
+XRPUSDT     115,662  0.985  0.985  0.985     0.013
+DOGEUSDT    115,292  0.990  0.990  0.990     0.007
+AVAXUSDT    111,370  0.991  0.991  0.991     0.007
+LINKUSDT    115,810  1.000  1.000  1.000     0.000
+ADAUSDT     115,810  0.999  0.999  0.999     0.000
+DOTUSDT     112,998  0.993  0.993  0.993     0.007
+LTCUSDT     115,662  0.987  0.986  0.986     0.013
+BCHUSDT     115,810  0.998  0.998  0.998     0.000
+FILUSDT     109,964  0.977  0.977  0.977     0.021
+AAVEUSDT    110,112  0.992  0.992  0.992     0.007
+XLMUSDT     115,662  0.984  0.983  0.983     0.013
+ATOMUSDT    115,810  1.000  1.000  1.000     0.000
+ETCUSDT     115,810  0.997  0.997  0.997     0.000
+total     1,944,942  0.992  0.992  0.992     0.006
+minimum across coins: long 0.977 (FILUSDT), short 0.977 (FILUSDT), both 0.977 (FILUSDT)
+coins under 0.95 (long or short): none

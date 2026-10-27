@@ -313,6 +313,16 @@ trades about a fifth of the week (6h05m of 24h, five days of seven), so two prob
 Plugins without `SESSION` behave exactly as before, so earlier verdicts stand. This goes in a
 separate commit with its own tests.
 
+**Known residual (user decision, 2026-10-27).** The calibration counts every in-session flat bar,
+but random entries can only fire where the bracket is valid. A pre-trial look measured the valid
+share of in-session OOS bars:
+- `lce_pct`: 0.938 pooled, lowest 0.917. Mostly closes beyond the grid.
+- `lce_atr`: 0.992 pooled, lowest 0.977.
+
+So the benchmark takes about 6% and 1% fewer trades than the two strategies. With costs this
+makes it slightly harder to beat, not easier. Accepted and recorded: `checks.py` prints the
+achieved random/strategy trade ratio, and the research note states it.
+
 ## Data
 
 **Backfill:** `lab backfill --tfs 5m` (klines only) for the 17 coins. That's about 690k bars per
@@ -335,6 +345,12 @@ grid setting `vp_days = 10`. Measure it before the first trial. **This spec's ca
 
 If it can't be met, stop and report the measured cost. A plugin that can't be examined can't
 enter the book, and raising `exam_cpu_hours` is the user's call.
+
+**Decision (user, 2026-10-23):** the budget can't be met. Task 6 measured the levels alone at
+0.34–0.35 s in a worker; the whole `prepare` is expected near 0.5 s. Continue anyway. The trials
+don't depend on the exam budget. If LCE is promoted, the user decides then between raising
+`exam_cpu_hours` and making the streamed exam cheaper. The measured cost is recorded, not used
+as a gate.
 
 ## Looks at real data before the trials
 
