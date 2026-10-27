@@ -359,17 +359,17 @@ def tint(color: str, alpha: float = BOX_ALPHA) -> str:
     return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{alpha})"
 
 
-def _boxes(fig: go.Figure, name: str, rows: list) -> None:
+def _boxes(fig: go.Figure, name: str, rows: list, color: str, group: str, legend: bool) -> None:
     """One bar trace per kind of box, one bar per box: it starts at t0 (offset 0) and is as wide as the box
     lasts, based at the entry. Bars, unlike shapes, show their hover anywhere inside, and one trace holds
     every trade's boxes however many are in view."""
     if not rows:
         return
-    t0, t1, y0, y1, color, hov = zip(*rows)
+    t0, t1, y0, y1, hov = zip(*rows)
     fig.add_bar(x=_times(list(t0)), width=[b - a for a, b in zip(t0, t1)], offset=0, base=list(y0),
-                y=[b - a for a, b in zip(y0, y1)], name=name, hovertext=list(hov),
-                hovertemplate="%{hovertext}<extra></extra>",
-                marker=dict(color=[tint(c) for c in color], line=dict(color=[tint(c, 0.6) for c in color], width=1)))
+                y=[b - a for a, b in zip(y0, y1)], name=name, legendgroup=group, showlegend=legend,
+                hovertext=list(hov), hovertemplate="%{hovertext}<extra></extra>",
+                marker=dict(color=tint(color), line=dict(color=tint(color, 0.6), width=1)))
 
 
 def _tags(fig: go.Figure, r: dict, b: dict, p: dict, lo: int, hi: int, fmt: str) -> None:
@@ -423,21 +423,24 @@ def _draw_trades(fig: go.Figure, t: pd.DataFrame, candles: pd.DataFrame, p: dict
     geo = [trade_boxes(r, TF_MS[tf]) for r in recs]
     skip = dict(hoverinfo="skip")
 
-    rows = {BOX_REWARD: [], BOX_RISK: [], BOX_RESULT: []}
+    rows = {"reward": [], "risk": [], "gain": [], "loss": []}
     for r, b, h in zip(recs, geo, hov):
-        for key, name, color in (("reward", BOX_REWARD, p["pos"]), ("risk", BOX_RISK, p["neg"])):
+        for key in ("reward", "risk"):
             for t0, t1, y0, y1 in b[key]:
                 a, z = max(t0, lo_ms), min(t1, hi_ms)
                 if z > a:
-                    rows[name].append((a, z, y0, y1, color, h))
+                    rows[key].append((a, z, y0, y1, h))
         if b["no_target"]:            # no reward box: the move to the exit, green for a gain, red for a loss
             a, z = max(b["span"][0], lo_ms), min(b["span"][1], hi_ms)
             (_, e_px), (_, x_px, _) = b["entry"], b["exit"]
             gain = (1 if r["side"] > 0 else -1) * (x_px - e_px) > 0
             if z > a:
-                rows[BOX_RESULT].append((a, z, e_px, x_px, p["pos"] if gain else p["neg"], h))
-    for name, box_rows in rows.items():
-        _boxes(fig, name, box_rows)
+                rows["gain" if gain else "loss"].append((a, z, e_px, x_px, h))
+    # A no-target trade's shading shares the legend entry of the box of its colour (one click hides both),
+    # and gets its own entry only when no such box is in view.
+    for key, name, color, group in (("reward", BOX_REWARD, p["pos"], "reward"), ("risk", BOX_RISK, p["neg"], "risk"),
+                                    ("gain", BOX_RESULT, p["pos"], "reward"), ("loss", BOX_RESULT, p["neg"], "risk")):
+        _boxes(fig, name, rows[key], color, group, legend=key == group or not rows[group])
 
     lvs = [_levels(r) for r in recs]
     moved = any(lv is not None for lv in lvs)
@@ -478,7 +481,7 @@ def _draw_trades(fig: go.Figure, t: pd.DataFrame, candles: pd.DataFrame, p: dict
         i = [k for k, b in enumerate(geo) if keep(b) and lo_ms <= b[at][0] < hi_ms]
         if i:
             fig.add_scatter(x=_times([geo[k][at][0] for k in i]), y=[geo[k][at][1] for k in i], mode="markers",
-                            name=name, legendgroup=name,
+                            name=name, legendgroup=name, showlegend=name != "entry",    # the entry needs no key
                             marker=dict(symbol="circle", size=9, color=color, line=dict(width=1.5, color=p["bg"])),
                             hovertext=[hov[k] for k in i], hovertemplate="%{hovertext}<extra></extra>")
 
@@ -550,7 +553,8 @@ def trade_figure(candles: pd.DataFrame, trades: pd.DataFrame, tf: str, *, palett
         lo, hi = candles.index[0], candles.index[-1] + _tf(tf)
         t = trades_in(trades, lo, hi)
         if len(t):
-            tagged = set(t.index) if len(t) <= TAG_ALL else {focus} & set(t.index)
+            tagged = (set(t.index) if len(t) <= TAG_ALL
+                      else {focus} if focus is not None and focus in t.index else set())
             _draw_trades(fig, t, candles, p, lo, hi, tf, tagged)
         warmup_end = None
         if "live" in candles.columns and not candles.live.all():

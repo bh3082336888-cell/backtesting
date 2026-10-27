@@ -198,7 +198,7 @@ def test_figure_draws_boxes_entries_signal_bar_exits_stops_targets_and_folds():
 
     assert sum(x.type == "candlestick" for x in fig.data) == 1
     (ent,) = _traces(fig, "entry")                                  # one dot per trade, long or short
-    assert ent.marker.color == tc.PALETTE["s1"] and len(ent.x) == 5
+    assert ent.marker.color == tc.PALETTE["s1"] and len(ent.x) == 5 and ent.showlegend is False
     assert pd.Timestamp(ent.x[1]) == pd.to_datetime(t.entry_time[1], unit="ms")      # UTC, zone dropped
     assert list(ent.y) == t.entry_price[:5].tolist()
     colors = tc.exit_colors()
@@ -417,8 +417,10 @@ def test_no_target_trade_has_no_reward_box_and_says_so():
     fig = tc.trade_figure(candles(n=200), pd.DataFrame([win, loss]), "4h")
     assert not _rects(fig, tc.BOX_REWARD)
     assert _rects(fig, tc.BOX_RESULT) == [(_at(11), _at(17), 110.5, 115.0), (_at(41), _at(47), 140.5, 145.0)]
-    (res,) = [tr for tr in fig.data if tr.name == tc.BOX_RESULT]
-    assert list(res.marker.color) == [tc.tint(tc.PALETTE["pos"]), tc.tint(tc.PALETTE["neg"])]   # gain, loss
+    gain, loss = [tr for tr in fig.data if tr.name == tc.BOX_RESULT]
+    assert (gain.marker.color, gain.legendgroup) == (tc.tint(tc.PALETTE["pos"]), "reward")
+    assert (loss.marker.color, loss.legendgroup) == (tc.tint(tc.PALETTE["neg"]), "risk")
+    assert loss.showlegend is False and gain.showlegend is True   # shares the risk box's key; no reward box here
     assert len(_rects(fig, tc.BOX_RISK)) == 2                            # the stop is still the risk
     labels = _notes(fig, "trade label")
     assert len(labels) == 2 and all(a.text.startswith("<b>no fixed target</b>") for a in labels)
@@ -628,6 +630,38 @@ def test_app_passes_the_jumped_to_trade_as_focus(wf_run):
     at.date_input(key=dates).set_value((pd.Timestamp("2024-02-15").date(), pd.Timestamp("2024-03-05").date())).run()
     assert not at.exception, [e.message for e in at.exception]
     assert not [a for a in _trade_chart(at)["layout"].get("annotations", []) if a.get("name") == "time tag"]
+
+
+def test_the_legend_hangs_below_the_title_on_every_chart(wf_run):
+    # every kind of key in the default window (the last test fold, bars 540 on): a reward box, a no-target gain
+    # and loss, moved levels, and all five exit reasons
+    def lv(s, stops, targets):
+        return _lv(_ms("2024-01-01") + (s + 1) * H4, [0, 2], stops, targets)
+    t = pd.DataFrame([
+        {**trade(sig=560, reason="target", target=700.0), **lv(560, [95.0, 97.0], [700.0, 700.0])},
+        trade(sig=580, reason="signal", exit_price=800.0), trade(sig=600, reason="stop", exit_price=650.0),
+        trade(sig=620, reason="liq"), trade(sig=640, reason="eow")])
+    t.to_parquet(wf_run.runs_dir / "wf1" / "oos_trades.parquet")
+    write_candles(wf_run.data_dir, "BTCUSDT", "4h", candles("2024-01-01", n=6 * 130))
+    at = _detail()
+    assert not at.exception, [e.message for e in at.exception]
+    spec = _trade_chart(at)
+    keys = sorted(d.get("name") for d in spec["data"] if d.get("showlegend", True))
+    assert keys == sorted([tc.BOX_REWARD, tc.BOX_RISK, "stop", "target", "signal bar (close)",
+                           *(f"exit: {r}" for r in tc.EXIT_REASONS)])         # no key for the entry or shading
+    charts = [json.loads(el.proto.spec) for el in at.get("plotly_chart")]
+    titled = [c["layout"] for c in charts if c["layout"].get("title", {}).get("text")]
+    assert spec["layout"] in titled and len(titled) == len(charts) > 1
+    for lay in titled:
+        title, legend, h = lay["title"], lay["legend"], lay["height"]
+        assert tuple(title.get(k) for k in ("yref", "y", "yanchor", "x", "xanchor")) == (
+            "container", 1, "top", 0, "left")
+        band = title["pad"]["t"] + 1.5 * title["font"]["size"]          # the title's line, in px from the top
+        top = (1 - legend["y"]) * h                                      # where the legend's first row starts
+        assert tuple(legend.get(k) for k in ("yref", "yanchor", "orientation")) == ("container", "top", "h")
+        assert band <= top < band + 8, title["text"]                    # just below the title
+        # one row fits the set margin; plotly reserves the margin down to the last row of a wrapped legend
+        assert lay["margin"]["t"] >= top + 24 and lay["margin"].get("autoexpand", True)
 
 
 def test_missing_candles_say_how_to_get_them(wf_run):

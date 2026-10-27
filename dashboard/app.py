@@ -61,11 +61,25 @@ C = {
 DIVERGING = [[0.0, C["neg"]], [0.5, C["mid"]], [1.0, C["s1"]]]
 
 
+TITLE_FONT = 16       # px
+TITLE_PAD = 8         # px above the title
+TITLE_PX = 34         # the title's band at the top of a chart: the legend starts below it
+
+
 def style(fig: go.Figure, h=320, **kw) -> go.Figure:
+    """The dashboard's chart look. With a title, the title sits in a fixed band at the top left and the legend
+    hangs below it, placed in the figure's own coordinates: plotly then reserves the top margin down to the
+    legend's last row, so the plot moves down however many rows the legend wraps to and nothing overlaps
+    the title. Without a title, the legend stands on the plot (and pushes the margin itself)."""
     title = kw.pop("title", None)
+    legend = dict(orientation="h", x=0, xanchor="left")
+    legend.update(dict(yref="container", y=1 - TITLE_PX / h, yanchor="top") if title
+                  else dict(y=1.0, yanchor="bottom"))
     fig.update_layout(height=h, margin=dict(l=8, r=8, t=64, b=8), hovermode=kw.pop("hovermode", "closest"),
-                      title=dict(text=title, y=0.98, yanchor="top") if title else None,
-                      legend=dict(orientation="h", y=1.0, yanchor="bottom", x=0), **kw)
+                      title=dict(text=title, x=0, xref="paper", xanchor="left", y=1, yref="container",
+                                 yanchor="top", pad=dict(t=TITLE_PAD), font=dict(size=TITLE_FONT))
+                      if title else None,
+                      legend=legend, **kw)
     fig.update_xaxes(showgrid=False, linecolor=C["grid"])
     fig.update_yaxes(gridcolor=C["grid"], gridwidth=1, zerolinecolor=C["muted"], zerolinewidth=1)
     return fig
